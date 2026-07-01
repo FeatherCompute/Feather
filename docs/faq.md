@@ -10,7 +10,16 @@ Not yet. The compute surface is the most usable part today. Graphics, automatic 
 
 ## How do I install it?
 
-Source-based consumption is the supported path right now. Reference `src/Feather/Feather.csproj` and, for generated kernels or shaders, reference `src/Feather.Generators/Feather.Generators.csproj` as an analyzer. See [Getting Started](getting-started.md).
+Install the preview package:
+
+```bash
+dotnet add package FeatherCompute --prerelease
+```
+
+The NuGet package ID is `FeatherCompute`; the C# namespaces remain `Feather` and
+its subnamespaces. When working from source, reference `src/Feather/Feather.csproj`
+and, for generated kernels or shaders, reference `src/Feather.Generators/Feather.Generators.csproj`
+as an analyzer. See [Getting Started](getting-started.md).
 
 ## Why do I get `DllNotFoundException` for `feather`?
 

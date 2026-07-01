@@ -4,7 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
-    <Title>Feather.Native</Title>
+    <PackageId>FeatherCompute.Native</PackageId>
+    <Title>FeatherCompute.Native</Title>
     <Description>SafeHandle and P/Invoke bindings for the Feather EasyGPU C ABI.</Description>
   </PropertyGroup>
 

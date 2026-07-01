@@ -8,7 +8,8 @@
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <DevelopmentDependency>true</DevelopmentDependency>
-    <Title>Feather.Generators</Title>
+    <PackageId>FeatherCompute.Generators</PackageId>
+    <Title>FeatherCompute.Generators</Title>
     <Description>Roslyn incremental generator and analyzer for Feather shader code.</Description>
   </PropertyGroup>
 

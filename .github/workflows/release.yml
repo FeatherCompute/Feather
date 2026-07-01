@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: NuGet package version to build.
+        required: true
+        default: 0.1.0-preview.1
+      publish:
+        description: Push packages to nuget.org.
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  native-assets:
+    name: Native assets (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    env:
+      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=OFF -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
+      FEATHER_NATIVE_CONFIGURATION: Release
+      FEATHER_RUNTIME_IDENTIFIER: ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+            library: libfeather.so
+          - os: macos-14
+            rid: osx-arm64
+            library: libfeather.dylib
+          - os: windows-2022
+            rid: win-x64
+            library: feather.dll
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            glslang-dev \
+            glslang-tools \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            spirv-cross \
+            spirv-tools \
+            vulkan-tools
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install \
+            glslang \
+            openssl@3 \
+            spirv-tools \
+            vulkan-loader
+          echo "FEATHER_NATIVE_CMAKE_ARGS=${FEATHER_NATIVE_CMAKE_ARGS} -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Install Windows Vulkan SDK components
+        if: runner.os == 'Windows'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: 1.4.304.1
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools, Glslang
+          vulkan-use-cache: true
+
+      - name: Build native runtime
+        shell: bash
+        run: ./eng/build-native.sh
+
+      - name: Stage native asset
+        shell: bash
+        run: ./eng/stage-native-assets.sh
+
+      - name: Upload native asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: artifacts/native-assets/runtimes/${{ matrix.rid }}/native/${{ matrix.library }}
+          if-no-files-found: error
+
+  pack:
+    name: Pack NuGet packages
+    runs-on: ubuntu-24.04
+    needs: native-assets
+    env:
+      FEATHER_PACKAGE_VERSION: ${{ inputs.version }}
+      FEATHER_SKIP_NATIVE_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+          global-json-file: global.json
+
+      - name: Download native assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: artifacts/downloaded-native-assets
+
+      - name: Assemble native asset staging
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A libraries=(
+            [linux-x64]=libfeather.so
+            [osx-arm64]=libfeather.dylib
+            [win-x64]=feather.dll
+          )
+
+          for rid in "${!libraries[@]}"; do
+            library="${libraries[$rid]}"
+            source="artifacts/downloaded-native-assets/native-$rid/$library"
+            target="artifacts/native-assets/runtimes/$rid/native/$library"
+            test -f "$source"
+            mkdir -p "$(dirname "$target")"
+            cp "$source" "$target"
+          done
+
+          find artifacts/native-assets -type f | sort
+
+      - name: Restore
+        run: dotnet restore Feather.slnx
+
+      - name: Pack
+        shell: bash
+        run: ./eng/pack.sh
+
+      - name: Validate package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${FEATHER_PACKAGE_VERSION}"
+          for package in \
+            "FeatherCompute.Generators.$version.nupkg" \
+            "FeatherCompute.Native.$version.nupkg" \
+            "FeatherCompute.NativeAssets.$version.nupkg" \
+            "FeatherCompute.$version.nupkg"; do
+            test -f "artifacts/packages/$package"
+          done
+
+          unzip -l "artifacts/packages/FeatherCompute.NativeAssets.$version.nupkg" | tee artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libfeather.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libfeather.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/feather.dll" artifacts/native-assets-package.txt
+
+          unzip -l "artifacts/packages/FeatherCompute.$version.nupkg" | tee artifacts/main-package.txt
+          grep -F "analyzers/dotnet/cs/Feather.Generators.dll" artifacts/main-package.txt
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages-${{ inputs.version }}
+          path: artifacts/packages/*.nupkg
+          if-no-files-found: error
+
+      - name: Publish to nuget.org
+        if: ${{ inputs.publish == 'true' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "${NUGET_API_KEY:-}"
+          version="${FEATHER_PACKAGE_VERSION}"
+          source="https://api.nuget.org/v3/index.json"
+
+          dotnet nuget push "artifacts/packages/FeatherCompute.Generators.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.Native.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.NativeAssets.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate

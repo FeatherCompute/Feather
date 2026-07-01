@@ -14,7 +14,7 @@ Feather is experimental. This page describes the intended stability of each publ
 | Automatic differentiation | Preview | 1D generated kernels, differentiable float and whole-vector buffer values, one scalar loss. |
 | Neural-network helpers | Preview | Useful for small models and samples; not a drop-in replacement for mature ML frameworks. |
 | Profiler and shader inspection | Preview | Useful for diagnostics; exact optimized output depends on backend. |
-| NuGet packaging | Preview | Native assets are staged under `artifacts/native-assets` and packed through `Feather.NativeAssets`; publish only packages built from a full RID matrix. |
+| NuGet packaging | Preview | Packages use the `FeatherCompute*` IDs. Native assets are staged under `artifacts/native-assets` and packed through `FeatherCompute.NativeAssets`; publish only packages built from a full RID matrix. |
 
 ## Summary
 
@@ -38,9 +38,11 @@ matching RID native asset under `runtimes/<rid>/native`.
 | Platform | Current use path | Notes |
 | --- | --- | --- |
 | macOS arm64 | Local CMake build or packaged asset | Vulkan path uses MoltenVK through EasyGPU. |
-| macOS x64 | Local CMake build | Requires matching native library in resolver path or `FEATHER_NATIVE_LIBRARY`. |
-| Windows x64/arm64 | Local CMake build | Requires C++ toolchain and backend dependencies. |
-| Linux x64/arm64 | Local CMake build | Window support needs X11 development libraries. |
+| macOS x64 | Local CMake build or future packaged asset | Requires matching native library in resolver path or `FEATHER_NATIVE_LIBRARY`. |
+| Windows x64 | Local CMake build or packaged asset | Requires C++ toolchain and backend dependencies when building from source. |
+| Windows arm64 | Local CMake build or future packaged asset | Package support depends on release matrix coverage. |
+| Linux x64 | Local CMake build or packaged asset | Window support needs X11 development libraries when building from source. |
+| Linux arm64 | Local CMake build or future packaged asset | Package support depends on release matrix coverage. |
 
 ## Backend Notes
 

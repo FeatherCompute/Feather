@@ -15,6 +15,20 @@ Build the native Feather runtime locally when working from source. Published
 packages carry native assets under NuGet's `runtimes/<rid>/native` layout; the
 source tree does not keep generated native binaries checked in.
 
+## Install From NuGet
+
+Preview packages are published under the `FeatherCompute` package ID. The
+package name is different from the C# namespace: application code still imports
+`Feather`, `Feather.Math`, `Feather.Resources`, and related subnamespaces.
+
+```bash
+dotnet add package FeatherCompute --prerelease
+```
+
+The main package includes the runtime API, the source generator, the native
+binding layer, and RID-specific native assets for the RIDs included in the
+release.
+
 ## Build Feather
 
 From the repository root:
@@ -60,7 +74,16 @@ Expected output includes:
 
 ## Write A Kernel
 
-Create or open a C# project that references both the runtime and generator:
+Create or open a C# project that references the package:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="FeatherCompute" Version="0.1.0-preview.1" />
+</ItemGroup>
+```
+
+When working from a source checkout instead of NuGet, reference both the runtime
+and generator projects:
 
 ```xml
 <ItemGroup>

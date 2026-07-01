@@ -4,7 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>true</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Title>Feather</Title>
+    <PackageId>FeatherCompute</PackageId>
+    <Title>FeatherCompute</Title>
     <Description>C# frontend API for EasyGPU compute, graphics, automatic differentiation, and neural network workloads.</Description>
   </PropertyGroup>
 
@@ -19,11 +20,12 @@
                       OutputItemType="Analyzer" />
   </ItemGroup>
 
-  <Target Name="AddGeneratorPackageDependency" BeforeTargets="GenerateNuspec">
-    <PropertyGroup>
-      <PackageDependencies Condition="'$(PackageDependencies)' == ''">$(PackageDependencies)</PackageDependencies>
-    </PropertyGroup>
-  </Target>
+  <ItemGroup>
+    <Content Include="$(MSBuildProjectDirectory)\..\Feather.Generators\bin\$(Configuration)\netstandard2.0\Feather.Generators.dll"
+             Pack="true"
+             PackagePath="analyzers/dotnet/cs"
+             Visible="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Feather.AD.Tests" />

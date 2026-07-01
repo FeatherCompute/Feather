@@ -43,6 +43,17 @@ Prerequisites:
 - Vulkan SDK when building the Vulkan backend.
 - X11 development libraries on Linux when using windows.
 
+For a package-based project:
+
+```bash
+dotnet add package FeatherCompute --prerelease
+```
+
+The NuGet package name is `FeatherCompute`; the public C# namespaces remain
+`Feather`, `Feather.Math`, `Feather.Resources`, and related subnamespaces.
+Preview packages include the generator and RID-specific native assets for the
+published runtime identifiers.
+
 Build from the repository root:
 
 ```bash
@@ -160,6 +171,12 @@ of the Feather source repository.
 The full gallery with learning order, commands, and screenshots is in [Examples](docs/examples.md).
 
 ## Project Shape
+
+When consuming Feather from NuGet, install the main package:
+
+```bash
+dotnet add package FeatherCompute --prerelease
+```
 
 When consuming Feather from this repository, reference both the runtime project and the generator project:
 
