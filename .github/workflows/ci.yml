@@ -63,7 +63,28 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            glslang-dev \
+            glslang-tools \
+            libspirv-cross-c-shared-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            spirv-cross \
+            spirv-tools \
+            vulkan-tools
+
+      - name: Check Linux Vulkan toolchain
+        if: runner.os == 'Linux'
+        run: |
+          ldconfig -p | grep -E 'libvulkan|libglslang|libSPIRV|libspirv-cross' || true
+          test -e /usr/include/vulkan/vulkan.h
+          test -e /usr/lib/x86_64-linux-gnu/libvulkan.so
 
       - name: Build native runtime
         run: ./eng/build-native.sh
