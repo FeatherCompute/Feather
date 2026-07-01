@@ -14,6 +14,12 @@ if [[ -n "${FEATHER_BUILD_WINDOW:-}" ]]; then
     cmake_args+=("-DFEATHER_BUILD_WINDOW=${FEATHER_BUILD_WINDOW}")
 fi
 
+if [[ -n "${FEATHER_NATIVE_CMAKE_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    extra_cmake_args=(${FEATHER_NATIVE_CMAKE_ARGS})
+    cmake_args+=("${extra_cmake_args[@]}")
+fi
+
 if [[ ${#cmake_args[@]} -gt 0 ]]; then
     cmake -S "$ROOT/native" -B "$BUILD_DIR" "${cmake_args[@]}"
 else
