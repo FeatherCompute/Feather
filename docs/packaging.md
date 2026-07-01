@@ -120,8 +120,22 @@ The repository has a manual GitHub Actions workflow named `Release`. It accepts 
 version and a `publish` switch:
 
 - `publish=false` builds packages and uploads them as workflow artifacts.
-- `publish=true` pushes the packages to nuget.org using the `NUGET_API_KEY`
-  repository secret.
+- `publish=true` pushes the packages to nuget.org using NuGet Trusted
+  Publishing. No long-lived API key is stored in GitHub.
+
+Before using `publish=true`, create a Trusted Publishing policy on nuget.org:
+
+| Field | Value |
+| --- | --- |
+| Package owner | Your nuget.org user or organization that will own `FeatherCompute*`. |
+| Repository owner | `FeatherCompute` |
+| Repository | `Feather` |
+| Workflow file | `release.yml` |
+| Environment | Leave empty unless the workflow is changed to use a GitHub environment. |
+
+Then add a GitHub repository variable named `NUGET_USER` with the same nuget.org
+user or organization name used as the package owner. This is the profile name,
+not an email address.
 
 The workflow currently builds packaged native assets for:
 

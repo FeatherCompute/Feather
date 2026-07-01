@@ -104,6 +104,9 @@ jobs:
     name: Pack NuGet packages
     runs-on: ubuntu-24.04
     needs: native-assets
+    permissions:
+      contents: read
+      id-token: write
     env:
       FEATHER_PACKAGE_VERSION: ${{ inputs.version }}
       FEATHER_SKIP_NATIVE_BUILD: "1"
@@ -179,19 +182,24 @@ jobs:
           path: artifacts/packages/*.nupkg
           if-no-files-found: error
 
+      - name: NuGet trusted publishing login
+        if: ${{ inputs.publish == 'true' }}
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Publish to nuget.org
         if: ${{ inputs.publish == 'true' }}
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
 
-          test -n "${NUGET_API_KEY:-}"
           version="${FEATHER_PACKAGE_VERSION}"
           source="https://api.nuget.org/v3/index.json"
+          api_key="${{ steps.nuget_login.outputs.NUGET_API_KEY }}"
 
-          dotnet nuget push "artifacts/packages/FeatherCompute.Generators.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
-          dotnet nuget push "artifacts/packages/FeatherCompute.Native.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
-          dotnet nuget push "artifacts/packages/FeatherCompute.NativeAssets.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
-          dotnet nuget push "artifacts/packages/FeatherCompute.$version.nupkg" --api-key "$NUGET_API_KEY" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.Generators.$version.nupkg" --api-key "$api_key" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.Native.$version.nupkg" --api-key "$api_key" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.NativeAssets.$version.nupkg" --api-key "$api_key" --source "$source" --skip-duplicate
+          dotnet nuget push "artifacts/packages/FeatherCompute.$version.nupkg" --api-key "$api_key" --source "$source" --skip-duplicate
