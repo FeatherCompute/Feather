@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Feather.Generators\Feather.Generators.csproj" />
+    <ProjectReference Include="..\..\src\Feather\Feather.csproj" />
+  </ItemGroup>
+</Project>

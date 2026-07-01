@@ -1,0 +1,44 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Feather.Generators/Feather.Generators.csproj" />
+    <Project Path="src/Feather.Native/Feather.Native.csproj" />
+    <Project Path="src/Feather.NativeAssets/Feather.NativeAssets.csproj" />
+    <Project Path="src/Feather/Feather.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Feather.AD.Tests/Feather.AD.Tests.csproj" />
+    <Project Path="tests/Feather.Generator.Tests/Feather.Generator.Tests.csproj" />
+    <Project Path="tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj" />
+    <Project Path="tests/Feather.Graphics.Tests/Feather.Graphics.Tests.csproj" />
+    <Project Path="tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj" />
+    <Project Path="tests/Feather.Native.Tests/Feather.Native.Tests.csproj" />
+    <Project Path="tests/Feather.NN.Tests/Feather.NN.Tests.csproj" />
+    <Project Path="tests/Feather.Tests/Feather.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/HelloBuffer/HelloBuffer.csproj" />
+    <Project Path="samples/TextureCopy/TextureCopy.csproj" />
+    <Project Path="samples/ParallelReduction/ParallelReduction.csproj" />
+    <Project Path="samples/JuliaSet/JuliaSet.csproj" />
+    <Project Path="samples/SpirvOptInspection/SpirvOptInspection.csproj" />
+    <Project Path="samples/Histogram/Histogram.csproj" />
+    <Project Path="samples/Mandelbrot/Mandelbrot.csproj" />
+    <Project Path="samples/SdfRenderer/SdfRenderer.csproj" />
+    <Project Path="samples/VolumetricFog/VolumetricFog.csproj" />
+    <Project Path="samples/AdLinearRegression/AdLinearRegression.csproj" />
+    <Project Path="samples/AutoDiffLinearRegression/AutoDiffLinearRegression.csproj" />
+    <Project Path="samples/AdTransformer/AdTransformer.csproj" />
+    <Project Path="samples/AdGptDemo/AdGptDemo.csproj" />
+    <Project Path="samples/AdGptPoetDemo/AdGptPoetDemo.csproj" />
+    <Project Path="samples/ColorFilter/ColorFilter.csproj" />
+    <Project Path="samples/HelloWorld/HelloWorld.csproj" />
+    <Project Path="samples/ProfilerSuite/ProfilerSuite.csproj" />
+    <Project Path="samples/RayTracing/RayTracing.csproj" />
+    <Project Path="samples/WindowHello/WindowHello.csproj" />
+    <Project Path="samples/WindowPixels/WindowPixels.csproj" />
+    <Project Path="samples/WindowCompute/WindowCompute.csproj" />
+    <Project Path="samples/WindowGraphicsTriangle/WindowGraphicsTriangle.csproj" />
+    <Project Path="samples/WindowGraphicsTexturedQuad/WindowGraphicsTexturedQuad.csproj" />
+    <Project Path="samples/SponzaRenderer/SponzaRenderer.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,69 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE and local workspace state
+.vs/
+.vscode/
+.VSCodeCounter/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# .NET build output
+bin/
+obj/
+TestResults/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+*.trx
+*.dmp
+*.mdmp
+
+# NuGet output
+*.nupkg
+*.snupkg
+
+# Repository build output
+artifacts/
+
+# Native/CMake build output
+native/build*/
+native/cmake-build*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.a
+*.lib
+*.dylib
+*.so
+*.dll
+*.pdb
+!src/**/AnalyzerReleases.*.md
+
+# Native runtime assets are staged by CI/eng scripts before packing.
+src/Feather.NativeAssets/runtimes/
+
+# Python caches used by repository scripts
+__pycache__/
+*.py[cod]
+
+# External sample assets. Fetch separately when running SponzaRenderer.
+Sponza/
+
+# EasyGPU is a pinned submodule; keep its local build output out of the root repo.
+EasyGPU/.cache/
+EasyGPU/.VSCodeCounter/
+EasyGPU/.idea/
+EasyGPU/CMakeFiles/
+EasyGPU/build*/
+EasyGPU/cmake-build*/
+EasyGPU/imgui.ini
+EasyGPU/Sponza/

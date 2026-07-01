@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Title>Feather</Title>
+    <Description>C# frontend API for EasyGPU compute, graphics, automatic differentiation, and neural network workloads.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Feather.Native\Feather.Native.csproj" />
+    <ProjectReference Include="..\Feather.NativeAssets\Feather.NativeAssets.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Feather.Generators\Feather.Generators.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer" />
+  </ItemGroup>
+
+  <Target Name="AddGeneratorPackageDependency" BeforeTargets="GenerateNuspec">
+    <PropertyGroup>
+      <PackageDependencies Condition="'$(PackageDependencies)' == ''">$(PackageDependencies)</PackageDependencies>
+    </PropertyGroup>
+  </Target>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Feather.AD.Tests" />
+    <InternalsVisibleTo Include="Feather.NN.Tests" />
+    <InternalsVisibleTo Include="Feather.Integration.Tests" />
+  </ItemGroup>
+
+</Project>

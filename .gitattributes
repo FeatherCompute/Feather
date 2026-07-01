@@ -1,0 +1,33 @@
+* text=auto eol=lf
+
+*.slnx text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.props text eol=lf
+*.targets text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.tga binary
+*.obj binary
+*.mtl text eol=lf
+*.dylib binary
+*.so binary
+*.dll binary
+*.a binary
+*.lib binary
+*.pdb binary
+*.nupkg binary
+*.snupkg binary
+*.dmp binary
+*.mdmp binary

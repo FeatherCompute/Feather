@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <FeatherUseGeneratorAnalyzer>false</FeatherUseGeneratorAnalyzer>
+  </PropertyGroup>
+</Project>

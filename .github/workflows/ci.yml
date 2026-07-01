@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  managed:
+    name: Managed build and tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore Feather.slnx
+
+      - name: Build native runtime
+        run: ./eng/build-native.sh
+
+      - name: Stage native assets
+        run: ./eng/stage-native-assets.sh
+
+      - name: Build
+        run: dotnet build Feather.slnx --no-restore -v minimal
+
+      - name: Test managed contracts
+        run: ./eng/test.sh
+
+      - name: Check markdown links
+        run: ./eng/check-markdown-links.py
+
+      - name: Pack
+        run: ./eng/pack.sh
+
+  native-smoke:
+    name: Native smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+          global-json-file: global.json
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Build native runtime
+        run: ./eng/build-native.sh
+
+      - name: Stage native assets
+        run: ./eng/stage-native-assets.sh
+
+      - name: Build solution
+        run: dotnet build Feather.slnx -v minimal

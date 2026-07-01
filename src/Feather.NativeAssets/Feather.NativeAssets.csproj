@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-arm64;osx-x64</RuntimeIdentifiers>
+    <IsPackable>true</IsPackable>
+    <Title>Feather.NativeAssets</Title>
+    <Description>RID-specific native EasyGPU runtime assets for Feather.</Description>
+    <NativeAssetStagingRoot Condition="'$(NativeAssetStagingRoot)' == ''">$(MSBuildThisFileDirectory)../../artifacts/native-assets/</NativeAssetStagingRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(NativeAssetStagingRoot)runtimes/**/native/*"
+          LinkBase="runtimes"
+          Pack="true"
+          PackagePath="%(LinkBase)/%(RecursiveDir)%(Filename)%(Extension)"
+          Visible="false" />
+  </ItemGroup>
+
+</Project>
