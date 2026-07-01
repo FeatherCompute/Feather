@@ -69,6 +69,7 @@ public class PublicApiTests
     }
 
     [Fact]
+    [Trait("Category", "Gpu")]
     public void GraphicsConvenienceResourcesExposeExpectedModes()
     {
         using var renderTarget = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8);
@@ -81,6 +82,7 @@ public class PublicApiTests
     }
 
     [Fact]
+    [Trait("Category", "Gpu")]
     public void TextureCanCreateSampledShaderView()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(2, 3, PixelFormat.Rgba8, TextureAccess.Sampled);
@@ -91,6 +93,7 @@ public class PublicApiTests
     }
 
     [Fact]
+    [Trait("Category", "Gpu")]
     public void TextureExposesMipLevelMetadata()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(8, 4, 4, PixelFormat.Rgba8, TextureAccess.Sampled);
@@ -101,6 +104,7 @@ public class PublicApiTests
     }
 
     [Fact]
+    [Trait("Category", "Gpu")]
     public void Texture3DExposesSizeAndShaderViews()
     {
         using var texture = GPU.CreateTexture3D<Rgba32, Rgba32>(4, 3, 2, 2, PixelFormat.Rgba8);
@@ -154,6 +158,7 @@ public class PublicApiTests
     }
 
     [Fact]
+    [Trait("Category", "Gpu")]
     public void GpuProfilerExposesProcessWideControls()
     {
         try

@@ -39,6 +39,7 @@ fi
 
 test_project() {
     local project="$1"
+    shift
     dotnet build "$project" -v minimal
 
     if [[ -f "$staged_native" ]]; then
@@ -48,19 +49,20 @@ test_project() {
         cp "$staged_native" "$target_dir/$native_library"
     fi
 
-    dotnet test "$project" --no-build -v minimal
+    dotnet test "$project" --no-build -v minimal "$@"
 }
 
 test_project "$ROOT/tests/Feather.Native.Tests/Feather.Native.Tests.csproj"
 test_project "$ROOT/tests/Feather.Generator.Tests/Feather.Generator.Tests.csproj"
-test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj"
 
 if [[ "${FEATHER_RUN_GPU_TESTS:-0}" == "1" ]]; then
+    test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj"
     test_project "$ROOT/tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj"
     test_project "$ROOT/tests/Feather.Graphics.Tests/Feather.Graphics.Tests.csproj"
     test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj"
     test_project "$ROOT/tests/Feather.AD.Tests/Feather.AD.Tests.csproj"
     test_project "$ROOT/tests/Feather.NN.Tests/Feather.NN.Tests.csproj"
 else
+    test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj" --filter "Category!=Gpu"
     echo "Skipping GPU/native integration tests. Set FEATHER_RUN_GPU_TESTS=1 to include them."
 fi
