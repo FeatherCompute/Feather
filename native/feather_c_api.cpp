@@ -697,6 +697,67 @@ void destroy_backend_resources_for_shutdown() {
     g_samplers.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
+
+    try {
+        GPU::Runtime::Context::GetInstance().ShutdownBackend();
+    } catch (...) {
+    }
+}
+
+void abandon_native_resources_for_process_exit() {
+#if FEATHER_BUILD_WINDOW
+    for (auto& [handle, presenter] : g_texture_presenters) {
+        (void)handle;
+        (void)presenter.presenter.release();
+    }
+    g_texture_presenters.clear();
+
+    for (auto& [handle, window] : g_windows) {
+        (void)handle;
+        (void)window.window.release();
+    }
+    g_windows.clear();
+#endif
+
+    for (auto& [handle, pipeline] : g_pipelines) {
+        (void)handle;
+        for (auto& entry : pipeline.backend_cache) {
+            entry.pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+            entry.vertex_shader = GPU::Backend::INVALID_SHADER_HANDLE;
+            entry.fragment_shader = GPU::Backend::INVALID_SHADER_HANDLE;
+        }
+        pipeline.backend_cache.clear();
+    }
+    g_pipelines.clear();
+
+    for (auto& [handle, kernel] : g_kernels) {
+        (void)handle;
+        for (auto& gradient : kernel.ad_gradients) {
+            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+        }
+        kernel.ad_gradients.clear();
+        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
+        kernel.ad_adj_pool_size = 0;
+    }
+    g_kernels.clear();
+
+    for (auto& [handle, texture] : g_textures) {
+        (void)handle;
+        texture.backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
+    }
+    g_textures.clear();
+
+    for (auto& [handle, buffer] : g_buffers) {
+        (void)handle;
+        buffer.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+    }
+    g_buffers.clear();
+
+    g_samplers.clear();
+    g_profiler_records.clear();
+    g_profiler_stats.clear();
+
+    GPU::Runtime::Context::GetInstance().AbandonBackendForProcessExit();
 }
 
 uint64_t next_handle() {
@@ -9439,6 +9500,19 @@ FE_API FeResult fe_runtime_shutdown(void) {
 
         std::lock_guard<std::mutex> lock(g_mutex);
         destroy_backend_resources_for_shutdown();
+        return ok();
+    });
+}
+
+FE_API FeResult fe_runtime_process_exit(void) {
+    return protect([&] {
+        const bool was_shutting_down = g_runtime_shutting_down.exchange(true, std::memory_order_acq_rel);
+        if (was_shutting_down) {
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        abandon_native_resources_for_process_exit();
         return ok();
     });
 }
