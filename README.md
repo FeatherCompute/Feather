@@ -53,10 +53,10 @@ Install the preview package from NuGet:
 dotnet add package FeatherCompute --prerelease
 ```
 
-Or pin the first preview release explicitly:
+Or pin the current preview release explicitly:
 
 ```bash
-dotnet add package FeatherCompute --version 0.1.0-preview.1
+dotnet add package FeatherCompute --version 0.1.0-preview.2
 ```
 
 The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
@@ -71,8 +71,8 @@ Current preview packages include native assets for:
 - `win-x64`
 
 Other runtime identifiers can still use Feather from source or with
-`FEATHER_NATIVE_LIBRARY=/absolute/path/to/libfeather...` pointing at a custom
-native build.
+`FEATHER_NATIVE_LIBRARY=/absolute/path/to/<native-library>` pointing at a
+custom native build.
 
 Build from the repository root:
 
@@ -86,7 +86,7 @@ dotnet build Feather.slnx
 dotnet run --project samples/HelloBuffer/HelloBuffer.csproj
 ```
 
-The native loader also honors `FEATHER_NATIVE_LIBRARY=/absolute/path/to/libfeather...`, which is useful when testing a custom native build.
+The native loader also honors `FEATHER_NATIVE_LIBRARY=/absolute/path/to/<native-library>`, which is useful when testing a custom native build.
 
 ## First Kernel
 

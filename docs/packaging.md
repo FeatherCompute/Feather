@@ -46,7 +46,7 @@ Window-only projects that do not define generated shader types can reference onl
 
 ## Native Library Resolution
 
-The managed resolver looks for `feather` in this order:
+The managed resolver looks for the platform native runtime library in this order:
 
 - `FEATHER_NATIVE_LIBRARY`, if set.
 - The application base directory.
@@ -68,7 +68,7 @@ Platform file names:
 
 | OS | Library name |
 | --- | --- |
-| Windows | `feather.dll` |
+| Windows | `feather_native.dll` |
 | Linux | `libfeather.so` |
 | macOS | `libfeather.dylib` |
 
@@ -146,10 +146,10 @@ The workflow currently builds packaged native assets for:
 It validates that `FeatherCompute.NativeAssets` contains all three native files
 and that `FeatherCompute` contains the analyzer before uploading or publishing.
 
-For the first preview release, use a prerelease version such as:
+For preview releases, use an immutable prerelease version such as:
 
 ```text
-0.1.0-preview.1
+0.1.0-preview.N
 ```
 
 NuGet package versions are immutable once published, so run the workflow once

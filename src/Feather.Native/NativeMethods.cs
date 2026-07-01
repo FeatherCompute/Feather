@@ -5,7 +5,8 @@ namespace Feather.Native;
 
 public static class NativeMethods
 {
-    private const string LibraryName = "feather";
+    private const string LibraryName = "Feather.NativeRuntime";
+    private const string ContractExportName = "fe_ir_bridge_contract_version";
     private static int resolverInitialized;
 
     static NativeMethods()
@@ -74,7 +75,12 @@ public static class NativeMethods
         {
             if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var handle))
             {
-                return handle;
+                if (NativeLibrary.TryGetExport(handle, ContractExportName, out _))
+                {
+                    return handle;
+                }
+
+                NativeLibrary.Free(handle);
             }
         }
 
@@ -122,7 +128,7 @@ public static class NativeMethods
     {
         if (OperatingSystem.IsWindows())
         {
-            return "feather.dll";
+            return "feather_native.dll";
         }
 
         if (OperatingSystem.IsMacOS())

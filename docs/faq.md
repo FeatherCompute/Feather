@@ -36,7 +36,7 @@ Or set:
 export FEATHER_NATIVE_LIBRARY=/absolute/path/to/libfeather.dylib
 ```
 
-Use `feather.dll` on Windows and `libfeather.so` on Linux.
+Use `feather_native.dll` on Windows and `libfeather.so` on Linux.
 
 ## Do I need to know GLSL, HLSL, Vulkan, or OpenGL?
 

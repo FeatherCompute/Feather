@@ -28,7 +28,7 @@ detect_rid() {
 
 RID="${FEATHER_RUNTIME_IDENTIFIER:-$(detect_rid)}"
 case "$RID" in
-    win-*) library="feather.dll" ;;
+    win-*) library="feather_native.dll" ;;
     osx-*) library="libfeather.dylib" ;;
     linux-*) library="libfeather.so" ;;
     *) echo "Unsupported runtime identifier: $RID" >&2; exit 1 ;;

@@ -35,6 +35,12 @@ set_target_properties(feather PROPERTIES
     VISIBILITY_INLINES_HIDDEN YES
 )
 
+if(WIN32)
+    set_target_properties(feather PROPERTIES
+        OUTPUT_NAME feather_native
+    )
+endif()
+
 option(FEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE "Build the native AD coverage probe executable" OFF)
 if(FEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE)
     add_executable(feather_ad_native_coverage_probe

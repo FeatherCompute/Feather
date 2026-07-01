@@ -6,6 +6,12 @@ namespace Feather.Native.Tests;
 public class NativeContractTests
 {
     [Fact]
+    public void NativeRuntimeCanLoadContractExport()
+    {
+        Assert.Equal(1u, NativeMethods.fe_ir_bridge_contract_version());
+    }
+
+    [Fact]
     public void ResultValuesMatchNativeAbiSpecification()
     {
         Assert.Equal(0u, (uint)FeResult.Ok);

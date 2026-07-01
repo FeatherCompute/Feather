@@ -49,7 +49,7 @@ Use the appropriate extension for your platform:
 | --- | --- |
 | macOS | `libfeather.dylib` |
 | Linux | `libfeather.so` |
-| Windows | `feather.dll` |
+| Windows | `feather_native.dll` |
 
 See [Packaging](packaging.md) for project and asset guidance.
 

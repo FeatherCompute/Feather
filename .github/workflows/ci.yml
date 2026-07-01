@@ -52,6 +52,9 @@ jobs:
       - name: Stage native assets
         run: ./eng/stage-native-assets.sh
 
+      - name: Check native contract export
+        run: ./eng/check-native-export.sh artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
+
       - name: Build
         run: dotnet build Feather.slnx --no-restore -v minimal
 
@@ -153,6 +156,16 @@ jobs:
       - name: Stage native assets
         shell: bash
         run: ./eng/stage-native-assets.sh
+
+      - name: Check native contract export
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux) rid=linux-x64; library=libfeather.so ;;
+            macOS) rid=osx-arm64; library=libfeather.dylib ;;
+            Windows) rid=win-x64; library=feather_native.dll ;;
+          esac
+          ./eng/check-native-export.sh "artifacts/native-assets/runtimes/$rid/native/$library"
 
       - name: Build solution
         shell: bash

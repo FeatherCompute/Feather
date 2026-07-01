@@ -32,7 +32,7 @@ Feather is experimental. This page describes the intended stability of each publ
 ## Platform And Native Assets
 
 The native bridge is built from `native/` and links EasyGPU. Source checkouts
-build `libfeather` or `feather.dll` locally; published packages supply the
+build `libfeather` or `feather_native.dll` locally; published packages supply the
 matching RID native asset under `runtimes/<rid>/native`.
 
 | Platform | Current use path | Notes |
