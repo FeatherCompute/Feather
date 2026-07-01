@@ -1,5 +1,6 @@
 #include "feather_typed_ir_lowerer.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <optional>
