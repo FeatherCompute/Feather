@@ -40,6 +40,8 @@ var libraryPath = Path.GetFullPath(args[0]);
 var handle = NativeLibrary.Load(libraryPath);
 try
 {
+    _ = NativeLibrary.GetExport(handle, "fe_runtime_shutdown");
+
     var export = NativeLibrary.GetExport(handle, "fe_ir_bridge_contract_version");
     var contractVersion = Marshal.GetDelegateForFunctionPointer<FeIrBridgeContractVersion>(export)();
     if (contractVersion != 1)

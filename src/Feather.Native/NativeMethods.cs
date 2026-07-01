@@ -8,10 +8,12 @@ public static class NativeMethods
     private const string LibraryName = "Feather.NativeRuntime";
     private const string ContractExportName = "fe_ir_bridge_contract_version";
     private static int resolverInitialized;
+    private static int runtimeShutdown;
 
     static NativeMethods()
     {
         EnsureResolverInitialized();
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) => ShutdownRuntime();
     }
 
     public static void EnsureResolverInitialized()
@@ -25,6 +27,25 @@ public static class NativeMethods
     }
 
     public static bool Succeeded(this FeResult result) => result == FeResult.Ok;
+
+    public static void ShutdownRuntime()
+    {
+        if (Interlocked.Exchange(ref runtimeShutdown, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = fe_runtime_shutdown();
+        }
+        catch (DllNotFoundException)
+        {
+        }
+        catch (EntryPointNotFoundException)
+        {
+        }
+    }
 
     public static void ThrowIfFailed(FeResult result)
     {
@@ -159,6 +180,9 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_get_last_error(IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_runtime_shutdown();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_window_create(in FeWindowDesc desc, out FeWindowHandle out_window);

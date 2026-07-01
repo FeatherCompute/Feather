@@ -504,6 +504,7 @@ struct ProfilerStats {
 
 std::mutex g_mutex;
 std::atomic<uint64_t> g_next_handle{100};
+std::atomic<bool> g_runtime_shutting_down{false};
 std::unordered_map<FeBufferHandle, BufferState> g_buffers;
 std::unordered_map<FeTextureHandle, TextureState> g_textures;
 std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
@@ -605,6 +606,97 @@ void destroy_graphics_pipeline_cache(GraphicsPipelineState& pipeline) {
         }
     }
     pipeline.backend_cache.clear();
+}
+
+void release_ad_gradient_buffers_with_backend(KernelState& kernel, GPU::Backend::Backend* backend) {
+    if (backend != nullptr) {
+        std::unordered_set<GPU::Backend::BufferHandle> released;
+        for (auto& gradient : kernel.ad_gradients) {
+            if (gradient.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE &&
+                released.insert(gradient.backend_buffer).second) {
+                backend->DestroyBuffer(gradient.backend_buffer);
+            }
+            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+        }
+
+        if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE) {
+            backend->DestroyBuffer(kernel.ad_adj_pool);
+            kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
+        }
+    } else {
+        for (auto& gradient : kernel.ad_gradients) {
+            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+        }
+        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
+    }
+
+    kernel.ad_gradients.clear();
+    kernel.ad_adj_pool_size = 0;
+}
+
+void destroy_backend_resources_for_shutdown() {
+    auto* backend = GPU::Runtime::Context::GetBackend();
+    if (backend != nullptr) {
+        try {
+            backend->Finish();
+        } catch (...) {
+        }
+    }
+
+#if FEATHER_BUILD_WINDOW
+    g_texture_presenters.clear();
+    g_windows.clear();
+#endif
+
+    for (auto& [handle, pipeline] : g_pipelines) {
+        (void)handle;
+        try {
+            destroy_graphics_pipeline_cache(pipeline);
+        } catch (...) {
+            pipeline.backend_cache.clear();
+        }
+    }
+    g_pipelines.clear();
+
+    for (auto& [handle, kernel] : g_kernels) {
+        (void)handle;
+        try {
+            release_ad_gradient_buffers_with_backend(kernel, backend);
+        } catch (...) {
+            release_ad_gradient_buffers_with_backend(kernel, nullptr);
+        }
+    }
+    g_kernels.clear();
+
+    if (backend != nullptr) {
+        for (auto& [handle, texture] : g_textures) {
+            (void)handle;
+            if (texture.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
+                try {
+                    backend->DestroyTexture(texture.backend_texture);
+                } catch (...) {
+                }
+                texture.backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
+            }
+        }
+
+        for (auto& [handle, buffer] : g_buffers) {
+            (void)handle;
+            if (buffer.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
+                try {
+                    backend->DestroyBuffer(buffer.backend_buffer);
+                } catch (...) {
+                }
+                buffer.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+            }
+        }
+    }
+
+    g_textures.clear();
+    g_buffers.clear();
+    g_samplers.clear();
+    g_profiler_records.clear();
+    g_profiler_stats.clear();
 }
 
 uint64_t next_handle() {
@@ -2087,29 +2179,7 @@ size_t ad_scalar_slot_count_for_type(const std::string& type_name) {
 
 void release_ad_gradient_buffers(KernelState& kernel) {
     GPU::Runtime::AutoInitContext();
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        kernel.ad_gradients.clear();
-        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-        kernel.ad_adj_pool_size = 0;
-        return;
-    }
-
-    std::unordered_set<GPU::Backend::BufferHandle> released;
-    for (auto& gradient : kernel.ad_gradients) {
-        if (gradient.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE &&
-            released.insert(gradient.backend_buffer).second) {
-            backend->DestroyBuffer(gradient.backend_buffer);
-        }
-        gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-    }
-    kernel.ad_gradients.clear();
-
-    if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE) {
-        backend->DestroyBuffer(kernel.ad_adj_pool);
-        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-    }
-    kernel.ad_adj_pool_size = 0;
+    release_ad_gradient_buffers_with_backend(kernel, GPU::Runtime::Context::GetBackend());
 }
 
 void release_pending_ad_gradient_buffers(std::vector<ADGradientState>& gradients) {
@@ -9360,6 +9430,19 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     return context == kDefaultContext || context == 0 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
 }
 
+FE_API FeResult fe_runtime_shutdown(void) {
+    return protect([&] {
+        const bool was_shutting_down = g_runtime_shutting_down.exchange(true, std::memory_order_acq_rel);
+        if (was_shutting_down) {
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        destroy_backend_resources_for_shutdown();
+        return ok();
+    });
+}
+
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend) {
     return protect([&] {
         if (context != kDefaultContext) {
@@ -9477,6 +9560,9 @@ FE_API FeResult fe_window_destroy(FeWindowHandle window) {
     return protect([&] {
 #if FEATHER_BUILD_WINDOW
         if (window == 0) {
+            return ok();
+        }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -9807,6 +9893,9 @@ FE_API FeResult fe_texture_presenter_destroy(FeTexturePresenterHandle presenter)
         if (presenter == 0) {
             return ok();
         }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
+            return ok();
+        }
         std::lock_guard<std::mutex> lock(g_mutex);
         return g_texture_presenters.erase(presenter) == 1
                    ? ok()
@@ -9922,6 +10011,9 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
 FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer) {
     return protect([&] {
         if (buffer == 0) {
+            return ok();
+        }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -10080,6 +10172,9 @@ FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDe
 FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
     return protect([&] {
         if (texture == 0) {
+            return ok();
+        }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -10304,6 +10399,9 @@ FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler) {
         if (sampler == 0) {
             return ok();
         }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
+            return ok();
+        }
         std::lock_guard<std::mutex> lock(g_mutex);
         return g_samplers.erase(sampler) == 1 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
     });
@@ -10339,6 +10437,9 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
     return protect([&] {
         if (kernel == 0) {
+            return ok();
+        }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -10800,6 +10901,9 @@ FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, con
 FE_API FeResult fe_graphics_pipeline_destroy(FeGraphicsPipelineHandle pipeline) {
     return protect([&] {
         if (pipeline == 0) {
+            return ok();
+        }
+        if (g_runtime_shutting_down.load(std::memory_order_acquire)) {
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
