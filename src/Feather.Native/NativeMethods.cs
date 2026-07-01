@@ -9,7 +9,6 @@ public static class NativeMethods
     private const string ContractExportName = "fe_ir_bridge_contract_version";
     private static int resolverInitialized;
     private static int runtimeShutdown;
-    private static int nativeLibraryLoaded;
     private static int processExiting;
 
     static NativeMethods()
@@ -54,22 +53,7 @@ public static class NativeMethods
     private static void ProcessExitShutdownRuntime()
     {
         Volatile.Write(ref processExiting, 1);
-        if (Volatile.Read(ref nativeLibraryLoaded) == 0 ||
-            Interlocked.Exchange(ref runtimeShutdown, 1) == 1)
-        {
-            return;
-        }
-
-        try
-        {
-            _ = fe_runtime_process_exit();
-        }
-        catch (DllNotFoundException)
-        {
-        }
-        catch (EntryPointNotFoundException)
-        {
-        }
+        _ = Interlocked.Exchange(ref runtimeShutdown, 1);
     }
 
     public static void ThrowIfFailed(FeResult result)
@@ -123,7 +107,6 @@ public static class NativeMethods
             {
                 if (NativeLibrary.TryGetExport(handle, ContractExportName, out _))
                 {
-                    Volatile.Write(ref nativeLibraryLoaded, 1);
                     return handle;
                 }
 
@@ -209,9 +192,6 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_runtime_shutdown();
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern FeResult fe_runtime_process_exit();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_window_create(in FeWindowDesc desc, out FeWindowHandle out_window);
