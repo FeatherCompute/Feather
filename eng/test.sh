@@ -37,16 +37,30 @@ if [[ -z "${FEATHER_NATIVE_LIBRARY:-}" && -f "$staged_native" ]]; then
     export FEATHER_NATIVE_LIBRARY="$staged_native"
 fi
 
-dotnet test "$ROOT/tests/Feather.Native.Tests/Feather.Native.Tests.csproj" -v minimal
-dotnet test "$ROOT/tests/Feather.Generator.Tests/Feather.Generator.Tests.csproj" -v minimal
-dotnet test "$ROOT/tests/Feather.Tests/Feather.Tests.csproj" -v minimal
+test_project() {
+    local project="$1"
+    dotnet build "$project" -v minimal
+
+    if [[ -f "$staged_native" ]]; then
+        local target_dir
+        target_dir="$(dotnet msbuild "$project" -getProperty:TargetDir)"
+        mkdir -p "$target_dir"
+        cp "$staged_native" "$target_dir/$native_library"
+    fi
+
+    dotnet test "$project" --no-build -v minimal
+}
+
+test_project "$ROOT/tests/Feather.Native.Tests/Feather.Native.Tests.csproj"
+test_project "$ROOT/tests/Feather.Generator.Tests/Feather.Generator.Tests.csproj"
+test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj"
 
 if [[ "${FEATHER_RUN_GPU_TESTS:-0}" == "1" ]]; then
-    dotnet test "$ROOT/tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj" -v minimal
-    dotnet test "$ROOT/tests/Feather.Graphics.Tests/Feather.Graphics.Tests.csproj" -v minimal
-    dotnet test "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj" -v minimal
-    dotnet test "$ROOT/tests/Feather.AD.Tests/Feather.AD.Tests.csproj" -v minimal
-    dotnet test "$ROOT/tests/Feather.NN.Tests/Feather.NN.Tests.csproj" -v minimal
+    test_project "$ROOT/tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj"
+    test_project "$ROOT/tests/Feather.Graphics.Tests/Feather.Graphics.Tests.csproj"
+    test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj"
+    test_project "$ROOT/tests/Feather.AD.Tests/Feather.AD.Tests.csproj"
+    test_project "$ROOT/tests/Feather.NN.Tests/Feather.NN.Tests.csproj"
 else
     echo "Skipping GPU/native integration tests. Set FEATHER_RUN_GPU_TESTS=1 to include them."
 fi
