@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(FeatherNative LANGUAGES CXX)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(EASYGPU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(EASYGPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 option(FEATHER_BUILD_WINDOW "Build Feather native window and texture presentation support" ON)
