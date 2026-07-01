@@ -45,6 +45,11 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+          global-json-file: global.json
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
