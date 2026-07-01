@@ -35,10 +35,16 @@ case "$RID" in
 esac
 
 source="$BUILD_DIR/$library"
+if [[ ! -f "$source" && -n "${FEATHER_NATIVE_CONFIGURATION:-}" ]]; then
+    source="$BUILD_DIR/$FEATHER_NATIVE_CONFIGURATION/$library"
+fi
+if [[ ! -f "$source" ]]; then
+    source="$(find "$BUILD_DIR" -maxdepth 3 -type f -name "$library" | head -n 1 || true)"
+fi
 target="$STAGING_ROOT/runtimes/$RID/native/$library"
 
 if [[ ! -f "$source" ]]; then
-    echo "Native library was not found: $source" >&2
+    echo "Native library was not found under: $BUILD_DIR" >&2
     echo "Run ./eng/build-native.sh first or set FEATHER_NATIVE_BUILD_DIR." >&2
     exit 1
 fi

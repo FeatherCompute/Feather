@@ -69,10 +69,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=OFF -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
+      FEATHER_NATIVE_CONFIGURATION: Release
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,6 +105,25 @@ jobs:
             spirv-tools \
             vulkan-tools
 
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install \
+            glslang \
+            openssl@3 \
+            spirv-tools \
+            vulkan-loader
+          echo "FEATHER_NATIVE_CMAKE_ARGS=${FEATHER_NATIVE_CMAKE_ARGS} -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Install Windows Vulkan SDK components
+        if: runner.os == 'Windows'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: 1.4.304.1
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools, Glslang
+          vulkan-use-cache: true
+
       - name: Check Linux Vulkan toolchain
         if: runner.os == 'Linux'
         run: |
@@ -111,11 +131,29 @@ jobs:
           test -e /usr/include/vulkan/vulkan.h
           test -e /usr/lib/x86_64-linux-gnu/libvulkan.so
 
+      - name: Check macOS Vulkan toolchain
+        if: runner.os == 'macOS'
+        run: |
+          test -e "$(brew --prefix vulkan-headers)/include/vulkan/vulkan.h"
+          test -e "$(brew --prefix vulkan-loader)/lib/libvulkan.dylib"
+          test -e "$(brew --prefix openssl@3)/lib/libcrypto.dylib"
+
+      - name: Check Windows Vulkan toolchain
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          test -n "${VULKAN_SDK:-}"
+          find "$VULKAN_SDK" -maxdepth 4 -iname vulkan.h -print -quit | grep .
+          find "$VULKAN_SDK" -maxdepth 4 \( -iname vulkan-1.lib -o -iname vulkan.lib \) -print -quit | grep .
+
       - name: Build native runtime
+        shell: bash
         run: ./eng/build-native.sh
 
       - name: Stage native assets
+        shell: bash
         run: ./eng/stage-native-assets.sh
 
       - name: Build solution
+        shell: bash
         run: dotnet build Feather.slnx -v minimal

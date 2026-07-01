@@ -14,6 +14,10 @@ if [[ -n "${FEATHER_BUILD_WINDOW:-}" ]]; then
     cmake_args+=("-DFEATHER_BUILD_WINDOW=${FEATHER_BUILD_WINDOW}")
 fi
 
+if [[ -n "${FEATHER_NATIVE_CONFIGURATION:-}" ]]; then
+    cmake_args+=("-DCMAKE_BUILD_TYPE=${FEATHER_NATIVE_CONFIGURATION}")
+fi
+
 if [[ -n "${FEATHER_NATIVE_CMAKE_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     extra_cmake_args=(${FEATHER_NATIVE_CMAKE_ARGS})
@@ -25,4 +29,10 @@ if [[ ${#cmake_args[@]} -gt 0 ]]; then
 else
     cmake -S "$ROOT/native" -B "$BUILD_DIR"
 fi
-cmake --build "$BUILD_DIR" --target feather --parallel "$JOBS"
+
+build_args=(--target feather --parallel "$JOBS")
+if [[ -n "${FEATHER_NATIVE_CONFIGURATION:-}" ]]; then
+    build_args+=(--config "$FEATHER_NATIVE_CONFIGURATION")
+fi
+
+cmake --build "$BUILD_DIR" "${build_args[@]}"
