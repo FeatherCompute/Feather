@@ -8,6 +8,10 @@ Write GPU compute kernels, texture pipelines, raster shaders, reverse-mode autom
 
 [Documentation](docs/README.md) | [Getting Started](docs/getting-started.md) | [Examples](docs/examples.md) | [API Reference](docs/api.md) | [FEIR](docs/feir.md) | [Support Status](docs/support-status.md)
 
+[![NuGet](https://img.shields.io/nuget/vpre/FeatherCompute?label=FeatherCompute)](https://www.nuget.org/packages/FeatherCompute)
+[![NuGet downloads](https://img.shields.io/nuget/dt/FeatherCompute?label=downloads)](https://www.nuget.org/packages/FeatherCompute)
+[![CI](https://github.com/FeatherCompute/Feather/actions/workflows/ci.yml/badge.svg)](https://github.com/FeatherCompute/Feather/actions/workflows/ci.yml)
+
 </div>
 
 ---
@@ -43,16 +47,32 @@ Prerequisites:
 - Vulkan SDK when building the Vulkan backend.
 - X11 development libraries on Linux when using windows.
 
-For a package-based project:
+Install the preview package from NuGet:
 
 ```bash
 dotnet add package FeatherCompute --prerelease
 ```
 
-The NuGet package name is `FeatherCompute`; the public C# namespaces remain
-`Feather`, `Feather.Math`, `Feather.Resources`, and related subnamespaces.
-Preview packages include the generator and RID-specific native assets for the
-published runtime identifiers.
+Or pin the first preview release explicitly:
+
+```bash
+dotnet add package FeatherCompute --version 0.1.0-preview.1
+```
+
+The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
+`Feather`, `Feather.Math`, `Feather.Resources`, and related subnamespaces. Most
+projects only need this one package. It brings in the source generator, native
+loader, and published native assets through companion packages.
+
+Current preview packages include native assets for:
+
+- `linux-x64`
+- `osx-arm64`
+- `win-x64`
+
+Other runtime identifiers can still use Feather from source or with
+`FEATHER_NATIVE_LIBRARY=/absolute/path/to/libfeather...` pointing at a custom
+native build.
 
 Build from the repository root:
 
@@ -172,11 +192,21 @@ The full gallery with learning order, commands, and screenshots is in [Examples]
 
 ## Project Shape
 
-When consuming Feather from NuGet, install the main package:
+When consuming Feather from NuGet, install the main package only:
 
 ```bash
 dotnet add package FeatherCompute --prerelease
 ```
+
+The companion packages are published so NuGet can model the runtime layout, but
+most applications should not reference them directly:
+
+| Package | Role |
+| --- | --- |
+| [`FeatherCompute`](https://www.nuget.org/packages/FeatherCompute) | Main package for application developers. Includes the managed API and generator analyzer. |
+| [`FeatherCompute.Native`](https://www.nuget.org/packages/FeatherCompute.Native) | Native loader and P/Invoke layer used by the main package. |
+| [`FeatherCompute.NativeAssets`](https://www.nuget.org/packages/FeatherCompute.NativeAssets) | RID-specific native binaries staged under NuGet's `runtimes/<rid>/native` layout. |
+| [`FeatherCompute.Generators`](https://www.nuget.org/packages/FeatherCompute.Generators) | Roslyn source generator package for advanced analyzer-only scenarios. |
 
 When consuming Feather from this repository, reference both the runtime project and the generator project:
 
