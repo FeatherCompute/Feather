@@ -168,6 +168,93 @@ public class ADCallableRegressionTests
         Assert.DoesNotContain("grad_fe_1", backward, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void CallableLocalNamedLikeGlslIntrinsicDoesNotRemapFunctionName()
+    {
+        const float p = 0.4f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new CallableLengthNameCollisionAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float expectedLoss = (5f * p * p) + 9f;
+        float expectedGradient = 10f * p;
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
+
+        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
+        Assert.Contains("length(", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NestedCallableSwizzleArgumentsParticipateInGradient()
+    {
+        const float p = 0.3f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new NestedCallableSwizzleArgumentAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float expectedLoss = ((2f * p) - 0.5f) * ((2f * p) - 0.5f) + (p + 0.5f) * (p + 0.5f);
+        float expectedGradient = (10f * p) - 1f;
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
+
+        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
+        Assert.DoesNotContain("+()", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("abs(()", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("()-", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LtcStyleNestedShaderLibraryPathCompilesAndDifferentiates()
+    {
+        const float p = 0.3f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new LtcStyleNestedShaderLibraryAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float brdfValue = (2f * p) + 0.1f;
+        float brdfPdf = p + 0.2f;
+        float ltcValue = (5f * p * p) + 9f;
+        float magnitude = p + 2f;
+        float error = ltcValue - brdfValue;
+        float denominator = (ltcValue / magnitude) + brdfPdf;
+        float expectedLoss = error * error * error / denominator;
+
+        float dError = (10f * p) - 2f;
+        float dDenominator = (((10f * p) * magnitude) - ltcValue) / (magnitude * magnitude) + 1f;
+        float expectedGradient =
+            (3f * error * error * dError / denominator) -
+            (error * error * error * dDenominator / (denominator * denominator));
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
+
+        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
+        Assert.Contains("length(", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("+()", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("abs(()", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("()-", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_targets", backwardSection, StringComparison.Ordinal);
+    }
+
     private static void AssertNear(float expected, float actual, float tolerance = 1e-3f)
         => Assert.InRange(actual, expected - tolerance, expected + tolerance);
 
@@ -366,6 +453,45 @@ public static class LtcAdRegressionShaderLibrary
         float error = ShaderMath.Abs(brdfValue - ltcValue);
         return error * error * error / denominator;
     }
+
+    [Callable]
+    public static float LengthNameCollision(float3 value)
+    {
+        float length = ShaderMath.Length(value);
+        return length * length;
+    }
+
+    [Callable]
+    public static float2 BrdfPair(float value)
+    {
+        return new float2((2f * value) + 0.1f, value + 0.2f);
+    }
+
+    [Callable]
+    public static float LtcStyleNestedPath(float value)
+    {
+        float2 brdf = BrdfPair(value);
+        float ltcValue = LengthNameCollision(new float3(value, value * 2f, 3f));
+        float magnitude = value + 2f;
+        return MisLike(brdf.X, brdf.Y, ltcValue, magnitude);
+    }
+}
+
+[ShaderLibrary]
+public static class NestedSwizzleArgumentShaderLibrary
+{
+    [Callable]
+    public static float Outer(float2 value, float target)
+    {
+        return Inner(value.X, target) + Inner(value.Y, target);
+    }
+
+    [Callable]
+    public static float Inner(float x, float y)
+    {
+        float delta = x - y;
+        return delta * delta;
+    }
 }
 
 [Kernel]
@@ -423,5 +549,57 @@ public readonly partial struct ReadOnlyTargetMisLikeAdKernel(
         loss[0] = y;
         ADMarker.Parameter(parameters[0]);
         ADMarker.Loss(y);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct CallableLengthNameCollisionAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        float p = parameters[0];
+        float y = LtcAdRegressionShaderLibrary.LengthNameCollision(new float3(p, p * 2f, 3f));
+        loss[0] = y;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(y);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct NestedCallableSwizzleArgumentAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        float p = parameters[0];
+        float2 pair = new float2(p * 2f, p + 1f);
+        float result = NestedSwizzleArgumentShaderLibrary.Outer(pair, 0.5f);
+        loss[0] = result;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(result);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct LtcStyleNestedShaderLibraryAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        float p = parameters[0];
+        float result = LtcAdRegressionShaderLibrary.LtcStyleNestedPath(p);
+        loss[0] = result;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(result);
     }
 }
