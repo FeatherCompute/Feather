@@ -264,13 +264,6 @@ internal static class ShaderModelFactory
                     yield return diagnostic;
                 }
 
-                if (model.AutoDiff)
-                {
-                    foreach (var diagnostic in ValidateAutoDiffCallableBody(method, symbol, methodSemanticModel, cancellationToken))
-                    {
-                        yield return diagnostic;
-                    }
-                }
             }
 
             foreach (var diagnostic in ValidateShaderMethod(method, methodSemanticModel, cancellationToken))
@@ -747,28 +740,6 @@ internal static class ShaderModelFactory
                     FeatherDiagnostics.UnsupportedCall,
                     parameterSyntax?.GetLocation() ?? method.Identifier.GetLocation(),
                     symbol.Name);
-            }
-        }
-    }
-
-    private static IEnumerable<ShaderBodyDiagnosticModel> ValidateAutoDiffCallableBody(
-        MethodDeclarationSyntax method,
-        IMethodSymbol callableSymbol,
-        SemanticModel semanticModel,
-        CancellationToken cancellationToken)
-    {
-        foreach (var invocation in method.DescendantNodes().OfType<InvocationExpressionSyntax>())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (semanticModel.GetSymbolInfo(invocation, cancellationToken).Symbol is IMethodSymbol target &&
-                IsCallable(target) &&
-                !SymbolEqualityComparer.Default.Equals(target, callableSymbol))
-            {
-                yield return BodyDiagnostic(
-                    FeatherDiagnostics.AutoDiffMarkerUnsupported,
-                    invocation.GetLocation(),
-                    target.Name,
-                    "nested callable-to-callable AD is not supported");
             }
         }
     }

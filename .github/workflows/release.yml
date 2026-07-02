@@ -6,7 +6,7 @@ on:
       version:
         description: NuGet package version to build.
         required: true
-        default: 0.1.0-preview.5
+        default: 0.1.0-preview.6
       publish:
         description: Push packages to nuget.org.
         required: true
@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   native-assets:

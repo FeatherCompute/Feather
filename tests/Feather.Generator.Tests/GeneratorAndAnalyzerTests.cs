@@ -5516,17 +5516,19 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
-    public async Task AnalyzerRejectsNestedCallableAd()
+    public void GeneratorAcceptsNestedCallableAd()
     {
-        var diagnostics = await AnalyzeAsync("""
+        var section = GenerateTypedIrSection("""
             using Feather;
             using Feather.AD;
             using Feather.Resources;
 
+            namespace Scratch;
+
             [Kernel]
             [ThreadGroupSize(1)]
             [AutoDiff]
-            public readonly partial struct BadKernel(ReadWriteBuffer<float> parameters) : IKernel1D
+            public readonly partial struct NestedCallableAdKernel(ReadWriteBuffer<float> parameters) : IKernel1D
             {
                 public void Execute()
                 {
@@ -5549,10 +5551,19 @@ public class GeneratorAndAnalyzerTests
                     return value * value;
                 }
             }
-            """);
+            """, "NestedCallableAdKernel.Feather.g.cs");
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "FE0021"
-            && diagnostic.GetMessage().Contains("nested callable-to-callable AD", StringComparison.Ordinal));
+        Assert.Equal(
+            ["NestedCallableAdKernel", "Outer", "Inner"],
+            section.Functions.Select(function => section.Strings[(int)function.NameId]).ToArray());
+        Assert.Contains(section.Expressions, expression =>
+            expression.Kind == 14 &&
+            expression.NameId < section.Strings.Count &&
+            section.Strings[(int)expression.NameId].Contains("Outer", StringComparison.Ordinal));
+        Assert.Contains(section.Expressions, expression =>
+            expression.Kind == 14 &&
+            expression.NameId < section.Strings.Count &&
+            section.Strings[(int)expression.NameId].Contains("Inner", StringComparison.Ordinal));
     }
 
     [Fact]

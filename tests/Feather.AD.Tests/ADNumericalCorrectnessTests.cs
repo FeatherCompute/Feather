@@ -614,6 +614,42 @@ public class ADNumericalCorrectnessTests
     }
 
     [Fact]
+    public void VectorMemberAccessAliasGradientMatchesAnalyticDerivative()
+    {
+        const float p = 0.25f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new NormalizedZAliasAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        var expectedGradient = EvaluateNormalizedZSquaredDerivative(p);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
+        AssertNear(EvaluateNormalizedZSquared(p), loss.ToArray()[0], 1e-3f);
+        Assert.DoesNotContain("d_(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VectorMemberAccessExpressionGradientMatchesAnalyticDerivative()
+    {
+        const float p = 0.25f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new NormalizedZExpressionAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        var expectedGradient = EvaluateNormalizedZSquaredDerivative(p);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
+        AssertNear(EvaluateNormalizedZSquared(p), loss.ToArray()[0], 1e-3f);
+        Assert.DoesNotContain("d_(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void VectorCallableGradientMatchesAnalyticDerivative()
     {
         using var parameters = GPU.CreateBuffer<float2>([new float2(1.5f, -2f)]);
@@ -672,6 +708,18 @@ public class ADNumericalCorrectnessTests
     {
         var scratch = value * 2f;
         return scratch * scratch;
+    }
+
+    private static float EvaluateNormalizedZSquared(float value)
+    {
+        var denominator = (value * value) + 1.25f;
+        return 1f / denominator;
+    }
+
+    private static float EvaluateNormalizedZSquaredDerivative(float value)
+    {
+        var denominator = (value * value) + 1.25f;
+        return (-2f * value) / (denominator * denominator);
     }
 
     private static void AssertNear(float expected, float actual, float tolerance = 1e-3f)
@@ -1543,6 +1591,45 @@ public readonly partial struct OverwrittenDifferentiableScratchAdKernel(
         loss[0] = l;
 
         ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(l);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct NormalizedZAliasAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float p = parameters[i];
+        float3 v = ShaderMath.Normalize(new float3(p, 0.5f, 1.0f));
+        float z = v.Z;
+        float l = z * z;
+        loss[i] = l;
+        ADMarker.Parameter(parameters[i]);
+        ADMarker.Loss(l);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct NormalizedZExpressionAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float p = parameters[i];
+        float3 v = ShaderMath.Normalize(new float3(p, 0.5f, 1.0f));
+        float l = v.Z * v.Z;
+        loss[i] = l;
+        ADMarker.Parameter(parameters[i]);
         ADMarker.Loss(l);
     }
 }

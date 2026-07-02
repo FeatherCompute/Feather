@@ -69,6 +69,38 @@ public class ADCallableRegressionTests
         Assert.Equal([2f], parameters.ToArray());
     }
 
+    [Fact]
+    public void NestedCallableToCallableParticipatesInGradient()
+    {
+        using var parameters = GPU.CreateBuffer<float>([2f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new NestedCallableAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        AssertNear(12f, loss.ToArray()[0]);
+        AssertNear(12f, ad.Gradients.Get<float>("parameters")[0]);
+        Assert.Equal([2f], parameters.ToArray());
+    }
+
+    [Fact]
+    public void NestedShaderLibraryCallableToCallableParticipatesInGradient()
+    {
+        using var parameters = GPU.CreateBuffer<float>([2f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new NestedShaderLibraryCallableAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        AssertNear(12f, loss.ToArray()[0]);
+        AssertNear(12f, ad.Gradients.Get<float>("parameters")[0]);
+        Assert.Equal([2f], parameters.ToArray());
+    }
+
     private static void AssertNear(float expected, float actual, float tolerance = 1e-3f)
         => Assert.InRange(actual, expected - tolerance, expected + tolerance);
 }
@@ -171,5 +203,69 @@ public readonly partial struct CallableLocalReturnExpressionAdKernel(
         float doubled = value * 2f;
         float shifted = doubled + 5f;
         return shifted + value;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct NestedCallableAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float p = parameters[i];
+        float y = Outer(p);
+        loss[i] = y;
+        ADMarker.Parameter(parameters[i]);
+        ADMarker.Loss(y);
+    }
+
+    [Callable]
+    private static float Outer(float value)
+    {
+        return Inner(value) * 3f;
+    }
+
+    [Callable]
+    private static float Inner(float value)
+    {
+        return value * value;
+    }
+}
+
+[ShaderLibrary]
+public static class NestedAdShaderLibrary
+{
+    [Callable]
+    public static float Outer(float value)
+    {
+        return Inner(value) * 3f;
+    }
+
+    [Callable]
+    public static float Inner(float value)
+    {
+        return value * value;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct NestedShaderLibraryCallableAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float p = parameters[i];
+        float y = NestedAdShaderLibrary.Outer(p);
+        loss[i] = y;
+        ADMarker.Parameter(parameters[i]);
+        ADMarker.Loss(y);
     }
 }
