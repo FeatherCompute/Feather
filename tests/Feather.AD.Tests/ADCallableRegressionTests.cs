@@ -256,6 +256,47 @@ public class ADCallableRegressionTests
     }
 
     [Fact]
+    public void InlineShaderLibraryCallableReturnInsideOuterExpressionPropagatesAdjoint()
+    {
+        const float targetValue = 1.1f;
+        const float pdfValue = 0.25f;
+        const float p = 0.4f;
+        const float magnitude = 1.2f;
+        const float lossScale = 1.75f;
+        using var targets = GPU.CreateBuffer<float>([targetValue]);
+        using var pdfs = GPU.CreateBuffer<float>([pdfValue]);
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new InlineCallableReturnExpressionAdKernel(
+            targets.AsReadOnly(),
+            pdfs.AsReadOnly(),
+            parameters.AsReadWrite(),
+            loss.AsReadWrite(),
+            new Uniform<float>(lossScale)));
+
+        ad.Backward(1);
+
+        float ltcValue = (p * p) + 0.5f;
+        float error = MathF.Abs(targetValue - ltcValue);
+        float denominator = (ltcValue / magnitude) + pdfValue;
+        float expectedLoss = lossScale * error * error * error / denominator;
+        float dLossDValue = lossScale *
+            (((-3f * error * error) * denominator) - (error * error * error / magnitude)) /
+            (denominator * denominator);
+        float expectedGradient = dLossDValue * 2f * p;
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-5f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
+        Assert.NotEqual(0f, ad.Gradients.Get<float>("parameters")[0]);
+
+        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
+        Assert.Contains("_ad_expr", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("d_global__", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_targets", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_pdfs", backwardSection, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CallableRematerializesTransitiveLocalDependencyChain()
     {
         const float p = 0.23f;
@@ -665,6 +706,27 @@ public readonly partial struct LtcStyleNestedShaderLibraryAdKernel(
         loss[0] = result;
         ADMarker.Parameter(parameters[0]);
         ADMarker.Loss(result);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct InlineCallableReturnExpressionAdKernel(
+    ReadOnlyBuffer<float> targets,
+    ReadOnlyBuffer<float> pdfs,
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss,
+    Uniform<float> lossScale) : IKernel1D
+{
+    public void Execute()
+    {
+        float p = parameters[0];
+        float ltcValue = (p * p) + 0.5f;
+        float y = LtcAdRegressionShaderLibrary.MisLike(targets[0], pdfs[0], ltcValue, 1.2f) * lossScale.Value;
+        loss[0] = y;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(y);
     }
 }
 
