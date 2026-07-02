@@ -85,10 +85,11 @@ internal static class ShaderIrLowerer
 
             var callBlock = LowerMethodBody(callable.Syntax, callableSemanticModel, callCtx, ct);
             var retType = ShaderTypeFactory.FromTypeSymbol(callable.Symbol.ReturnType) ?? ShaderTypeFactory.Void;
-            var pars = callable.Parameters.Items.Select(p =>
-                new ShaderParameterModel(p.Name,
-                    ShaderTypeFactory.FromTypeName(p.TypeName) ?? ShaderTypeFactory.Float,
-                    p.IsRef ? ShaderParameterDirection.InOut : ShaderParameterDirection.In))
+            var pars = callable.Symbol.Parameters.Select(p =>
+                new ShaderParameterModel(
+                    p.Name,
+                    ToTy(p.Type, callable.Syntax),
+                    p.RefKind is RefKind.Ref or RefKind.Out ? ShaderParameterDirection.InOut : ShaderParameterDirection.In))
                 .ToArray();
 
             callableFuncs.Add(new ShaderFunctionModel(
@@ -326,9 +327,21 @@ internal static class ShaderIrLowerer
             IInvocationOperation inv => LowerInvoke(inv, ctx),
             IPropertyReferenceOperation prop => LowerPropRef(prop, ctx),
             IObjectCreationOperation ctor => LowerCtor(ctor, ctx),
+            IDefaultValueOperation def => LowerDefaultValue(def),
             IConditionalOperation { IsRef: false } tern => LowerTernary(tern, ctx),
             _ => throw Unsupported(u, $"unsupported expression operation '{u.Kind}'")
         };
+    }
+
+    private static ShaderExpression LowerDefaultValue(IDefaultValueOperation operation)
+    {
+        var type = ToTy(operation.Type);
+        if (TryLowerZeroValue(type, out var expression))
+        {
+            return expression;
+        }
+
+        throw Unsupported(operation, $"default value for shader type '{type.CSharpTypeName}' is not supported");
     }
 
     private static ShaderExpression LowerFieldRef(IFieldReferenceOperation f, LowerCtx ctx)
@@ -654,6 +667,8 @@ internal static class ShaderIrLowerer
             return new ShaderBuiltinExpression(ToTy(prop.Type), (ShaderBuiltinKind)(byte)lbk);
         if (TryLowerBuiltinVector(prop, ctx, out var builtinVector))
             return builtinVector;
+        if (prop.Property.IsStatic && TryLowerStaticMathProperty(prop, out var staticMathProperty))
+            return staticMathProperty;
         if (prop.Property.Name == "Value" && prop.Instance is { } inst
             && ShaderSemanticFacts.IsUniformResourceType(inst.Type))
         {
@@ -820,6 +835,149 @@ internal static class ShaderIrLowerer
 
         return new ShaderIndexAccessExpression(ToTy(prop.Type), instance, index);
     }
+
+    private static bool TryLowerStaticMathProperty(IPropertyReferenceOperation prop, out ShaderExpression expression)
+    {
+        expression = null!;
+        if (!ShaderSemanticFacts.IsFeatherVectorType(prop.Property.ContainingType) &&
+            !ShaderSemanticFacts.IsFeatherMatrixType(prop.Property.ContainingType))
+        {
+            return false;
+        }
+
+        var type = ToTy(prop.Type);
+        return prop.Property.Name switch
+        {
+            "Zero" => TryLowerZeroValue(type, out expression),
+            "Identity" => TryLowerIdentityValue(type, out expression),
+            _ => false
+        };
+    }
+
+    private static bool TryLowerZeroValue(ShaderType type, out ShaderExpression expression)
+    {
+        expression = null!;
+        switch (type)
+        {
+            case ShaderPrimitiveType primitive:
+                expression = new ShaderLiteralExpression(primitive, ZeroLiteral(primitive));
+                return true;
+            case ShaderVectorType vector:
+                expression = new ShaderConstructorExpression(
+                    vector,
+                    new EquatableArray<ShaderExpression>(Enumerable.Range(0, vector.ComponentCount)
+                        .Select(_ => new ShaderLiteralExpression(vector.ElementType, ZeroLiteral(vector.ElementType)))
+                        .Cast<ShaderExpression>()
+                        .ToArray()));
+                return true;
+            case ShaderMatrixType matrix:
+                expression = new ShaderConstructorExpression(
+                    matrix,
+                    new EquatableArray<ShaderExpression>(Enumerable.Range(0, matrix.Columns)
+                        .Select(_ => ZeroVector(matrix.ElementType, matrix.Rows))
+                        .Cast<ShaderExpression>()
+                        .ToArray()));
+                return true;
+            case ShaderStructType structure:
+            {
+                var fields = new List<ShaderExpression>(structure.Fields.Items.Count);
+                foreach (var field in structure.Fields.Items)
+                {
+                    if (!TryLowerZeroValue(field.Type, out var value))
+                    {
+                        return false;
+                    }
+
+                    fields.Add(value);
+                }
+
+                expression = new ShaderConstructorExpression(
+                    structure,
+                    new EquatableArray<ShaderExpression>(fields.ToArray()));
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryLowerIdentityValue(ShaderType type, out ShaderExpression expression)
+    {
+        expression = null!;
+        if (type is not ShaderMatrixType { ElementType.Kind: ShaderPrimitiveKind.Float } matrix ||
+            matrix.Rows != matrix.Columns)
+        {
+            return false;
+        }
+
+        expression = new ShaderConstructorExpression(
+            matrix,
+            new EquatableArray<ShaderExpression>(Enumerable.Range(0, matrix.Columns)
+                .Select(column => UnitVector(matrix.ElementType, matrix.Rows, column))
+                .Cast<ShaderExpression>()
+                .ToArray()));
+        return true;
+    }
+
+    private static ShaderExpression ZeroVector(ShaderPrimitiveType elementType, int componentCount)
+    {
+        var vectorType = VectorType(elementType, componentCount);
+        return new ShaderConstructorExpression(
+            vectorType,
+            new EquatableArray<ShaderExpression>(Enumerable.Range(0, componentCount)
+                .Select(_ => new ShaderLiteralExpression(elementType, ZeroLiteral(elementType)))
+                .Cast<ShaderExpression>()
+                .ToArray()));
+    }
+
+    private static ShaderExpression UnitVector(ShaderPrimitiveType elementType, int componentCount, int activeComponent)
+    {
+        var vectorType = VectorType(elementType, componentCount);
+        return new ShaderConstructorExpression(
+            vectorType,
+            new EquatableArray<ShaderExpression>(Enumerable.Range(0, componentCount)
+                .Select(component => new ShaderLiteralExpression(
+                    elementType,
+                    component == activeComponent ? OneLiteral(elementType) : ZeroLiteral(elementType)))
+                .Cast<ShaderExpression>()
+                .ToArray()));
+    }
+
+    private static ShaderVectorType VectorType(ShaderPrimitiveType elementType, int componentCount)
+        => (elementType.Kind, componentCount) switch
+        {
+            (ShaderPrimitiveKind.Float, 2) => ShaderTypeFactory.Float2,
+            (ShaderPrimitiveKind.Float, 3) => ShaderTypeFactory.Float3,
+            (ShaderPrimitiveKind.Float, 4) => ShaderTypeFactory.Float4,
+            (ShaderPrimitiveKind.Int, 2) => ShaderTypeFactory.Int2,
+            (ShaderPrimitiveKind.Int, 3) => ShaderTypeFactory.Int3,
+            (ShaderPrimitiveKind.Int, 4) => ShaderTypeFactory.Int4,
+            (ShaderPrimitiveKind.Bool, 2) => ShaderTypeFactory.Bool2,
+            (ShaderPrimitiveKind.Bool, 3) => ShaderTypeFactory.Bool3,
+            (ShaderPrimitiveKind.Bool, 4) => ShaderTypeFactory.Bool4,
+            _ => new ShaderVectorType(elementType, componentCount)
+            {
+                CSharpTypeName = $"{elementType.CSharpTypeName}{componentCount}"
+            }
+        };
+
+    private static string ZeroLiteral(ShaderPrimitiveType primitive)
+        => primitive.Kind switch
+        {
+            ShaderPrimitiveKind.Bool => "false",
+            ShaderPrimitiveKind.UInt => "0u",
+            ShaderPrimitiveKind.Float => "0.0",
+            _ => "0"
+        };
+
+    private static string OneLiteral(ShaderPrimitiveType primitive)
+        => primitive.Kind switch
+        {
+            ShaderPrimitiveKind.Bool => "true",
+            ShaderPrimitiveKind.UInt => "1u",
+            ShaderPrimitiveKind.Float => "1.0",
+            _ => "1"
+        };
 
     private static ShaderLValue? LowerIndexerLValue(IPropertyReferenceOperation prop, LowerCtx ctx)
     {

@@ -965,6 +965,33 @@ public class GeneratedGraphicsPipelineTests
         Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
     }
 
+    [Fact]
+    public void GeneratedGraphicsPipelineLowersCallablesStructParametersAndFullFragmentBody()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedCallableBodyFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedCallableBody" });
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 64)]);
+
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedCallableBodyFragmentShader(new Uniform<float>(0.8f)),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[64];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => pixel.X > 0.5f && pixel.Y > 0.2f && pixel.Z < 0.5f && pixel.W > 0.9f);
+        Assert.Contains(readback, pixel => pixel.X < 0.05f && pixel.Y < 0.05f && pixel.Z < 0.05f && pixel.W > 0.9f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
     private static Rgba32[] CreateCheckerboard(int size)
     {
         var pixels = new Rgba32[size * size];
@@ -1198,6 +1225,16 @@ public partial struct GeneratedMeshVaryings
     public float4 AtlasTransform;
 }
 
+[GpuStruct]
+public partial struct GeneratedCallableRect
+{
+    public float3 Center;
+    public float3 DirX;
+    public float3 DirY;
+    public float HalfX;
+    public float HalfY;
+}
+
 [VertexShader]
 public readonly partial struct GeneratedMeshVertexShader(
     ReadOnlyBuffer<GeneratedMeshVertex> vertices,
@@ -1231,5 +1268,81 @@ public readonly partial struct GeneratedMeshFragmentShader(
         var light = ShaderMath.Max(ShaderMath.Dot(normal, ShaderMath.Normalize(new float3(0.3f, 0.6f, 0.4f))), 0.2f);
         var sampled = texture.SampleGrad(sampler, uv, ddx, ddy);
         return new float4(sampled.R * light, sampled.G * light, sampled.B * light, sampled.A);
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedCallableBodyFragmentShader(Uniform<float> scale) : IFragmentShader<float4>
+{
+    public float4 Execute(float4 input)
+    {
+        var rect = BuildRect();
+        var direction = ShaderMath.Normalize(float3x3.Identity * new float3(input.X, input.Y, 1.0f));
+        var hit = IntersectRect(float3.Zero, direction, rect);
+        if (input.X < -0.75f)
+        {
+            return new float4(float3.Zero, 1.0f);
+        }
+
+        if (hit <= 0.0f)
+        {
+            return new float4(0.05f, 0.0f, 0.0f, 1.0f);
+        }
+
+        var color = ShadeRect(rect, direction, scale.Value);
+        var greenBoost = rect.HalfY * 0.1f;
+        greenBoost += 0.02f;
+        return new float4(color.X, color.Y + greenBoost, color.Z, 1.0f);
+    }
+
+    [Callable]
+    public static GeneratedCallableRect BuildRect()
+    {
+        var rect = new GeneratedCallableRect
+        {
+            Center = new float3(0.0f, 0.0f, 1.0f),
+            DirX = new float3(1.0f, 0.0f, 0.0f),
+            DirY = new float3(0.0f, 1.0f, 0.0f),
+            HalfX = 0.5f,
+            HalfY = 0.5f
+        };
+        rect.HalfX = rect.HalfX + 0.25f;
+        return rect;
+    }
+
+    [Callable]
+    public static float IntersectRect(float3 origin, float3 direction, GeneratedCallableRect rect)
+    {
+        var normal = ShaderMath.Normalize(ShaderMath.Cross(rect.DirX, rect.DirY));
+        var denom = ShaderMath.Dot(normal, direction);
+        if (ShaderMath.Abs(denom) <= 0.000001f)
+        {
+            return -1.0f;
+        }
+
+        var t = ShaderMath.Dot(normal, rect.Center - origin) / denom;
+        if (t <= 0.0f)
+        {
+            return -1.0f;
+        }
+
+        var local = origin + (direction * t) - rect.Center;
+        var x = ShaderMath.Dot(local, rect.DirX);
+        var y = ShaderMath.Dot(local, rect.DirY);
+        return (ShaderMath.Abs(x) <= rect.HalfX && ShaderMath.Abs(y) <= rect.HalfY) ? t : -1.0f;
+    }
+
+    [Callable]
+    public static float3 ShadeRect(GeneratedCallableRect rect, float3 direction, float scale)
+    {
+        var normal = ShaderMath.Normalize(ShaderMath.Cross(rect.DirX, rect.DirY));
+        var facing = ShaderMath.Max(ShaderMath.Dot(normal, direction), 0.0f);
+        var value = facing * scale;
+        for (int i = 0; i < 2; i++)
+        {
+            value += 0.025f;
+        }
+
+        return new float3(value, rect.HalfX * 0.4f, 1.0f - facing);
     }
 }

@@ -56,20 +56,14 @@ internal static class ShaderModelFactory
         }
         catch (ShaderIrLoweringException ex)
         {
-            if (model.Kind is ShaderKind.Compute1D or ShaderKind.Compute2D or ShaderKind.Compute3D)
-            {
-                diagnostics.Add(new TypedIrDiagnosticModel(
-                    ex.Location ?? model.Syntax.Identifier.GetLocation(),
-                    ex.Message));
-            }
+            diagnostics.Add(new TypedIrDiagnosticModel(
+                ex.Location ?? model.Syntax.Identifier.GetLocation(),
+                ex.Message));
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (model.Kind is ShaderKind.Compute1D or ShaderKind.Compute2D or ShaderKind.Compute3D)
-            {
-                diagnostics.Add(new TypedIrDiagnosticModel(model.Syntax.Identifier.GetLocation(), ex.Message));
-            }
+            diagnostics.Add(new TypedIrDiagnosticModel(model.Syntax.Identifier.GetLocation(), ex.Message));
             return null;
         }
     }

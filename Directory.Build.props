@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.1.0</VersionPrefix>
-    <VersionSuffix>preview.10</VersionSuffix>
+    <VersionSuffix>preview.11</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -18,7 +18,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Fixes automatic differentiation for non-recursive nested callables and vector member/swizzle gradients through normalized vector expressions.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Fixes graphics typed IR diagnostics, shader-side static default values, graphics callable lowering, GPU struct callable parameters, and full graphics shader statement body lowering.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true'">

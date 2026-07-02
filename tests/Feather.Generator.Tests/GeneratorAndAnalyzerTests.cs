@@ -137,6 +137,35 @@ public class GeneratorAndAnalyzerTests
             tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void GeneratorReportsTypedIrLoweringFailuresForGraphicsShaders()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Graphics;
+            using Feather.Math;
+
+            namespace Scratch;
+
+            [FragmentShader]
+            public readonly partial struct BadFragmentShader : IFragmentShader<float4>
+            {
+                public float4 Execute(float4 input)
+                {
+                    return new float4(global::System.MathF.Sqrt(input.X));
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0027");
+        Assert.Contains("System.MathF.Sqrt", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadFragmentShader.Feather.g.cs", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("0")]
     [InlineData("-1")]

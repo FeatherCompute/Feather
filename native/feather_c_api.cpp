@@ -7934,6 +7934,20 @@ std::string graphics_intrinsic_name(std::string symbol) {
     if (symbol == "global::Feather.Math.ShaderMath.Ddy") {
         return "dFdy";
     }
+    if (symbol == "global::Feather.Math.ShaderMath.Transpose" ||
+        symbol == "global::Feather.Math.Hlsl.Transpose") {
+        return "transpose";
+    }
+    if (symbol == "global::Feather.Math.ShaderMath.Determinant") {
+        return "determinant";
+    }
+    if (symbol == "global::Feather.Math.ShaderMath.Inverse" ||
+        symbol == "global::Feather.Math.Hlsl.Inverse") {
+        return "inverse";
+    }
+    if (symbol == "global::Feather.Math.ShaderMath.Hadamard") {
+        return "matrixCompMult";
+    }
 
     return easygpu_intrinsic_name(symbol);
 }
@@ -8222,6 +8236,36 @@ bool lower_graphics_stage_expression(GraphicsLoweringContext& context, uint32_t 
     }
     case 13:
         return lower_graphics_intrinsic_expression(context, expression, glsl);
+    case 14: {
+        if (expression.name_id >= context.module.strings.size() ||
+            (expression.argument_count == 0 && expression.first_argument != UINT32_MAX) ||
+            (expression.argument_count > 0 &&
+             (expression.first_argument == UINT32_MAX ||
+              expression.first_argument > context.module.arguments.size() ||
+              expression.argument_count > context.module.arguments.size() - expression.first_argument))) {
+            return false;
+        }
+
+        std::ostringstream stream;
+        stream << sanitize_graphics_glsl_identifier(context.module.strings[expression.name_id]) << "(";
+        for (uint32_t i = 0; i < expression.argument_count; ++i) {
+            std::string argument;
+            const auto argument_expr_id = context.module.arguments[expression.first_argument + i];
+            if (!lower_graphics_stage_expression(context, argument_expr_id, &argument)) {
+                trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
+                                                  argument_expr_id,
+                                                  "callable argument lowering failed");
+                return false;
+            }
+            if (i != 0) {
+                stream << ", ";
+            }
+            stream << argument;
+        }
+        stream << ")";
+        *glsl = stream.str();
+        return true;
+    }
     case 15: {
         const auto* swizzle = typed_ir_string(context.module, expression.name_id);
         if (swizzle == nullptr) {
@@ -8480,6 +8524,12 @@ bool append_graphics_shader_prelude(GraphicsLoweringContext& context,
 
     std::set<uint32_t> declared_structs;
     *glsl << "#version 450\n";
+    for (uint32_t type_id = 0; type_id < context.module.types.size(); ++type_id) {
+        if (context.module.types[type_id].kind == 4 &&
+            !append_graphics_struct_declaration(context.module, type_id, &declared_structs, glsl)) {
+            return false;
+        }
+    }
     if (context.stage == GraphicsStage::Vertex &&
         !append_graphics_struct_declaration(context.module, context.varyings.type_id, &declared_structs, glsl)) {
         return false;
@@ -8497,41 +8547,634 @@ bool append_graphics_shader_prelude(GraphicsLoweringContext& context,
     return true;
 }
 
-bool append_graphics_vertex_main(GraphicsLoweringContext& context, uint32_t return_expr_id,
-                                 std::ostringstream* glsl) {
+std::string graphics_indent(int depth) {
+    return std::string(static_cast<size_t>(std::max(depth, 0)) * 4, ' ');
+}
+
+const char* graphics_compound_operator(uint32_t op) {
+    switch (op) {
+    case 0:
+        return "+=";
+    case 1:
+        return "-=";
+    case 2:
+        return "*=";
+    case 3:
+        return "/=";
+    case 4:
+        return "%=";
+    case 5:
+        return "&=";
+    case 6:
+        return "|=";
+    case 7:
+        return "^=";
+    case 8:
+        return "<<=";
+    case 9:
+        return ">>=";
+    default:
+        return nullptr;
+    }
+}
+
+bool lower_graphics_stage_lvalue(GraphicsLoweringContext& context, uint32_t lvalue_id,
+                                 std::string* glsl) {
+    if (glsl == nullptr || lvalue_id >= context.module.lvalues.size()) {
+        return false;
+    }
+
+    const auto& lvalue = context.module.lvalues[lvalue_id];
+    switch (lvalue.kind) {
+    case 1:
+    case 2: {
+        const auto* name = typed_ir_string(context.module, lvalue.name_id);
+        if (name == nullptr || name->empty()) {
+            return false;
+        }
+        *glsl = sanitize_graphics_glsl_identifier(*name);
+        return true;
+    }
+    case 3:
+    case 6: {
+        const auto* member = typed_ir_string(context.module, lvalue.name_id);
+        if (member == nullptr || member->empty()) {
+            return false;
+        }
+        if (lvalue.a == UINT32_MAX) {
+            *glsl = sanitize_graphics_glsl_identifier(*member);
+            return true;
+        }
+
+        std::string instance;
+        if (!lower_graphics_stage_lvalue(context, lvalue.a, &instance)) {
+            return false;
+        }
+        *glsl = "(" + instance + ")." + sanitize_graphics_glsl_identifier(*member);
+        return true;
+    }
+    case 4: {
+        const auto* resource_name = typed_ir_string(context.module, lvalue.name_id);
+        if (resource_name == nullptr || resource_name->empty()) {
+            return false;
+        }
+        const auto* resource = find_graphics_resource_by_name_and_kind(
+            context.ir, *resource_name, kIrResourceKindBuffer);
+        if (resource == nullptr) {
+            return false;
+        }
+        const auto backend_binding = graphics_backend_binding(
+            context.resources, kIrResourceKindBuffer, resource->binding);
+        if (!backend_binding.has_value()) {
+            return false;
+        }
+
+        std::string index;
+        if (!lower_graphics_stage_expression(context, lvalue.a, &index)) {
+            return false;
+        }
+
+        context.used_buffer_bindings.insert(resource->binding);
+        *glsl = "fe_buffer_" + std::to_string(*backend_binding) + "[" + index + "]";
+        return true;
+    }
+    case 5: {
+        const auto* swizzle = typed_ir_string(context.module, lvalue.name_id);
+        if (swizzle == nullptr || swizzle->empty()) {
+            return false;
+        }
+
+        std::string value;
+        if (!lower_graphics_stage_expression(context, lvalue.a, &value)) {
+            return false;
+        }
+        *glsl = "(" + value + ")." + graphics_swizzle_components(*swizzle);
+        return true;
+    }
+    case 7: {
+        std::string value;
+        std::string index;
+        if (!lower_graphics_stage_lvalue(context, lvalue.a, &value) ||
+            !lower_graphics_stage_expression(context, lvalue.b, &index)) {
+            return false;
+        }
+        *glsl = "(" + value + ")[" + index + "]";
+        return true;
+    }
+    case 8: {
+        std::string matrix;
+        std::string column;
+        if (!lower_graphics_stage_expression(context, lvalue.a, &matrix) ||
+            !lower_graphics_stage_expression(context, lvalue.b, &column)) {
+            return false;
+        }
+        *glsl = "(" + matrix + ")[" + column + "]";
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+using GraphicsReturnEmitter = std::function<bool(GraphicsLoweringContext&, uint32_t, int, std::ostringstream*)>;
+
+bool append_graphics_stage_statement(GraphicsLoweringContext& context,
+                                     uint32_t statement_id,
+                                     int indent,
+                                     const GraphicsReturnEmitter& return_emitter,
+                                     std::ostringstream* glsl);
+
+bool append_graphics_stage_statement_clause(GraphicsLoweringContext& context,
+                                            uint32_t statement_id,
+                                            std::string* glsl) {
+    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
+        return false;
+    }
+
+    const auto& statement = context.module.statements[statement_id];
+    switch (statement.kind) {
+    case 1: {
+        if (statement.child_count == 0) {
+            *glsl = "";
+            return statement.first_child == UINT32_MAX;
+        }
+        if (statement.child_count != 1 ||
+            statement.first_child == UINT32_MAX ||
+            statement.first_child >= context.module.children.size()) {
+            return false;
+        }
+        return append_graphics_stage_statement_clause(
+            context,
+            context.module.children[statement.first_child],
+            glsl);
+    }
+    case 2: {
+        if (statement.name_id >= context.module.strings.size() || statement.op >= context.module.types.size()) {
+            return false;
+        }
+        const auto type_name = graphics_glsl_type_name(context.module, statement.op);
+        if (type_name.empty()) {
+            return false;
+        }
+        std::ostringstream stream;
+        stream << type_name << " " << sanitize_graphics_glsl_identifier(context.module.strings[statement.name_id]);
+        if (statement.a != UINT32_MAX) {
+            std::string initializer;
+            if (!lower_graphics_stage_expression(context, statement.a, &initializer)) {
+                return false;
+            }
+            stream << " = " << initializer;
+        }
+        *glsl = stream.str();
+        return true;
+    }
+    case 3: {
+        std::string target;
+        std::string value;
+        if (!lower_graphics_stage_lvalue(context, statement.a, &target) ||
+            !lower_graphics_stage_expression(context, statement.b, &value)) {
+            return false;
+        }
+        *glsl = target + " = " + value;
+        return true;
+    }
+    case 4: {
+        const auto* op = graphics_compound_operator(statement.op);
+        std::string target;
+        std::string value;
+        if (op == nullptr ||
+            !lower_graphics_stage_lvalue(context, statement.a, &target) ||
+            !lower_graphics_stage_expression(context, statement.b, &value)) {
+            return false;
+        }
+        *glsl = target + " " + op + " " + value;
+        return true;
+    }
+    case 12: {
+        return lower_graphics_stage_expression(context, statement.a, glsl);
+    }
+    case 14: {
+        std::string target;
+        if (!lower_graphics_stage_lvalue(context, statement.a, &target)) {
+            return false;
+        }
+        const auto op = (statement.op & 1u) ? "++" : "--";
+        *glsl = (statement.op & 2u) ? std::string(op) + target : target + op;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool append_graphics_stage_statement_list(GraphicsLoweringContext& context,
+                                          uint32_t statement_id,
+                                          int indent,
+                                          const GraphicsReturnEmitter& return_emitter,
+                                          std::ostringstream* glsl) {
+    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
+        return false;
+    }
+
+    const auto& statement = context.module.statements[statement_id];
+    if (statement.kind != 1) {
+        return append_graphics_stage_statement(context, statement_id, indent, return_emitter, glsl);
+    }
+    if (statement.child_count == 0) {
+        return statement.first_child == UINT32_MAX;
+    }
+    if (statement.first_child == UINT32_MAX ||
+        statement.first_child > context.module.children.size() ||
+        statement.child_count > context.module.children.size() - statement.first_child) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < statement.child_count; ++i) {
+        if (!append_graphics_stage_statement(
+                context,
+                context.module.children[statement.first_child + i],
+                indent,
+                return_emitter,
+                glsl)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool append_graphics_stage_statement(GraphicsLoweringContext& context,
+                                     uint32_t statement_id,
+                                     int indent,
+                                     const GraphicsReturnEmitter& return_emitter,
+                                     std::ostringstream* glsl) {
+    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
+        return false;
+    }
+
+    const auto& statement = context.module.statements[statement_id];
+    const auto pad = graphics_indent(indent);
+    switch (statement.kind) {
+    case 1:
+        *glsl << pad << "{\n";
+        if (!append_graphics_stage_statement_list(context, statement_id, indent + 1, return_emitter, glsl)) {
+            return false;
+        }
+        *glsl << pad << "}\n";
+        return true;
+    case 2: {
+        if (statement.name_id >= context.module.strings.size() || statement.op >= context.module.types.size()) {
+            return false;
+        }
+        const auto type_name = graphics_glsl_type_name(context.module, statement.op);
+        if (type_name.empty()) {
+            return false;
+        }
+        *glsl << pad << type_name << " " << sanitize_graphics_glsl_identifier(context.module.strings[statement.name_id]);
+        if (statement.a != UINT32_MAX) {
+            std::string initializer;
+            if (!lower_graphics_stage_expression(context, statement.a, &initializer)) {
+                trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
+                                                  statement.a, "local initializer lowering failed");
+                return false;
+            }
+            *glsl << " = " << initializer;
+        }
+        *glsl << ";\n";
+        return true;
+    }
+    case 3: {
+        std::string target;
+        std::string value;
+        if (!lower_graphics_stage_lvalue(context, statement.a, &target) ||
+            !lower_graphics_stage_expression(context, statement.b, &value)) {
+            return false;
+        }
+        *glsl << pad << target << " = " << value << ";\n";
+        return true;
+    }
+    case 4: {
+        const auto* op = graphics_compound_operator(statement.op);
+        std::string target;
+        std::string value;
+        if (op == nullptr ||
+            !lower_graphics_stage_lvalue(context, statement.a, &target) ||
+            !lower_graphics_stage_expression(context, statement.b, &value)) {
+            return false;
+        }
+        *glsl << pad << target << " " << op << " " << value << ";\n";
+        return true;
+    }
+    case 5: {
+        std::string condition;
+        if (!lower_graphics_stage_expression(context, statement.a, &condition) ||
+            statement.b >= context.module.statements.size()) {
+            return false;
+        }
+        *glsl << pad << "if (" << condition << ") {\n";
+        if (!append_graphics_stage_statement_list(context, statement.b, indent + 1, return_emitter, glsl)) {
+            return false;
+        }
+        *glsl << pad << "}";
+        if (statement.c != UINT32_MAX) {
+            if (statement.c >= context.module.statements.size()) {
+                return false;
+            }
+            *glsl << " else {\n";
+            if (!append_graphics_stage_statement_list(context, statement.c, indent + 1, return_emitter, glsl)) {
+                return false;
+            }
+            *glsl << pad << "}";
+        }
+        *glsl << "\n";
+        return true;
+    }
+    case 6: {
+        if (statement.op >= context.module.statements.size()) {
+            return false;
+        }
+
+        std::string initializer;
+        std::string condition;
+        std::string step;
+        if (statement.a != UINT32_MAX &&
+            !append_graphics_stage_statement_clause(context, statement.a, &initializer)) {
+            return false;
+        }
+        if (statement.b != UINT32_MAX &&
+            !lower_graphics_stage_expression(context, statement.b, &condition)) {
+            return false;
+        }
+        if (statement.c != UINT32_MAX &&
+            !append_graphics_stage_statement_clause(context, statement.c, &step)) {
+            return false;
+        }
+
+        *glsl << pad << "for (" << initializer << "; " << condition << "; " << step << ") {\n";
+        if (!append_graphics_stage_statement_list(context, statement.op, indent + 1, return_emitter, glsl)) {
+            return false;
+        }
+        *glsl << pad << "}\n";
+        return true;
+    }
+    case 7: {
+        std::string condition;
+        if (!lower_graphics_stage_expression(context, statement.a, &condition) ||
+            statement.b >= context.module.statements.size()) {
+            return false;
+        }
+        *glsl << pad << "while (" << condition << ") {\n";
+        if (!append_graphics_stage_statement_list(context, statement.b, indent + 1, return_emitter, glsl)) {
+            return false;
+        }
+        *glsl << pad << "}\n";
+        return true;
+    }
+    case 8: {
+        if (statement.a >= context.module.statements.size()) {
+            return false;
+        }
+        std::string condition;
+        if (!lower_graphics_stage_expression(context, statement.b, &condition)) {
+            return false;
+        }
+        *glsl << pad << "do {\n";
+        if (!append_graphics_stage_statement_list(context, statement.a, indent + 1, return_emitter, glsl)) {
+            return false;
+        }
+        *glsl << pad << "} while (" << condition << ");\n";
+        return true;
+    }
+    case 9:
+        *glsl << pad << "break;\n";
+        return true;
+    case 10:
+        *glsl << pad << "continue;\n";
+        return true;
+    case 11:
+        if (return_emitter) {
+            if (statement.a == UINT32_MAX) {
+                return false;
+            }
+            return return_emitter(context, statement.a, indent, glsl);
+        }
+        if (statement.a == UINT32_MAX) {
+            *glsl << pad << "return;\n";
+            return true;
+        } else {
+            std::string value;
+            if (!lower_graphics_stage_expression(context, statement.a, &value)) {
+                return false;
+            }
+            *glsl << pad << "return " << value << ";\n";
+            return true;
+        }
+    case 12: {
+        std::string value;
+        if (!lower_graphics_stage_expression(context, statement.a, &value)) {
+            return false;
+        }
+        *glsl << pad << value << ";\n";
+        return true;
+    }
+    case 14: {
+        std::string target;
+        if (!lower_graphics_stage_lvalue(context, statement.a, &target)) {
+            return false;
+        }
+        *glsl << pad << (statement.op & 1u ? "++" : "--") << target << ";\n";
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool append_graphics_callable_declarations(GraphicsLoweringContext& context,
+                                           std::ostringstream* glsl) {
     if (glsl == nullptr) {
         return false;
     }
 
-    std::string return_expression;
-    if (!lower_graphics_stage_expression(context, return_expr_id, &return_expression)) {
-        return false;
-    }
-
-    *glsl << "void main() {\n";
-    if (context.varyings.is_float4) {
-        *glsl << "    vec4 fe_result = " << return_expression << ";\n";
-        *glsl << "    gl_Position = fe_result;\n";
-        *glsl << "    v_fe_color = fe_result;\n";
-        *glsl << "    v_fe_uv = fe_result.xy * 0.5 + vec2(0.5);\n";
-        *glsl << "}\n";
-        return true;
-    }
-
-    const auto result_type = graphics_glsl_type_name(context.module, context.varyings.type_id);
-    if (result_type.empty() || context.varyings.position_field_name.empty()) {
-        return false;
-    }
-
-    *glsl << "    " << result_type << " fe_result = " << return_expression << ";\n";
-    *glsl << "    gl_Position = fe_result."
-          << sanitize_graphics_glsl_identifier(context.varyings.position_field_name) << ";\n";
-    for (const auto& field : context.varyings.fields) {
-        if (field.position) {
+    for (const auto& function : context.module.functions) {
+        if (function.kind != 5) {
             continue;
         }
-        *glsl << "    " << graphics_varying_variable_name(field) << " = fe_result."
-              << sanitize_graphics_glsl_identifier(field.name) << ";\n";
+        if (function.mangled_name_id >= context.module.strings.size() ||
+            function.return_type_id >= context.module.types.size()) {
+            return false;
+        }
+
+        const auto return_type = graphics_glsl_type_name(context.module, function.return_type_id);
+        if (return_type.empty()) {
+            return false;
+        }
+
+        *glsl << return_type << " "
+              << sanitize_graphics_glsl_identifier(context.module.strings[function.mangled_name_id]) << "(";
+        if (function.parameter_count > 0) {
+            if (function.first_parameter == UINT32_MAX ||
+                function.first_parameter > context.module.parameters.size() ||
+                function.parameter_count > context.module.parameters.size() - function.first_parameter) {
+                return false;
+            }
+            for (uint32_t i = 0; i < function.parameter_count; ++i) {
+                const auto& parameter = context.module.parameters[function.first_parameter + i];
+                if (parameter.name_id >= context.module.strings.size()) {
+                    return false;
+                }
+                const auto parameter_type = graphics_glsl_type_name(context.module, parameter.type_id);
+                if (parameter_type.empty()) {
+                    return false;
+                }
+                if (i != 0) {
+                    *glsl << ", ";
+                }
+                if (parameter.direction != 0) {
+                    *glsl << "inout ";
+                }
+                *glsl << parameter_type << " "
+                      << sanitize_graphics_glsl_identifier(context.module.strings[parameter.name_id]);
+            }
+        }
+        *glsl << ");\n";
+    }
+
+    if (!context.module.functions.empty()) {
+        *glsl << "\n";
+    }
+    return true;
+}
+
+bool append_graphics_callable_definitions(GraphicsLoweringContext& context,
+                                          std::ostringstream* glsl) {
+    if (glsl == nullptr) {
+        return false;
+    }
+
+    for (const auto& function : context.module.functions) {
+        if (function.kind != 5) {
+            continue;
+        }
+        if (function.mangled_name_id >= context.module.strings.size() ||
+            function.return_type_id >= context.module.types.size() ||
+            function.body_statement_index >= context.module.statements.size()) {
+            return false;
+        }
+
+        const auto return_type = graphics_glsl_type_name(context.module, function.return_type_id);
+        if (return_type.empty()) {
+            return false;
+        }
+
+        *glsl << return_type << " "
+              << sanitize_graphics_glsl_identifier(context.module.strings[function.mangled_name_id]) << "(";
+        if (function.parameter_count > 0) {
+            if (function.first_parameter == UINT32_MAX ||
+                function.first_parameter > context.module.parameters.size() ||
+                function.parameter_count > context.module.parameters.size() - function.first_parameter) {
+                return false;
+            }
+            for (uint32_t i = 0; i < function.parameter_count; ++i) {
+                const auto& parameter = context.module.parameters[function.first_parameter + i];
+                if (parameter.name_id >= context.module.strings.size()) {
+                    return false;
+                }
+                const auto parameter_type = graphics_glsl_type_name(context.module, parameter.type_id);
+                if (parameter_type.empty()) {
+                    return false;
+                }
+                if (i != 0) {
+                    *glsl << ", ";
+                }
+                if (parameter.direction != 0) {
+                    *glsl << "inout ";
+                }
+                *glsl << parameter_type << " "
+                      << sanitize_graphics_glsl_identifier(context.module.strings[parameter.name_id]);
+            }
+        }
+        *glsl << ") {\n";
+
+        auto callable_context = context;
+        callable_context.parameter_name.clear();
+        callable_context.locals.clear();
+        if (!append_graphics_stage_statement_list(
+                callable_context,
+                function.body_statement_index,
+                1,
+                {},
+                glsl)) {
+            return false;
+        }
+        *glsl << "}\n\n";
+    }
+
+    return true;
+}
+
+bool append_graphics_vertex_main(GraphicsLoweringContext& context, std::ostringstream* glsl) {
+    if (glsl == nullptr) {
+        return false;
+    }
+
+    if (context.module.entry_function >= context.module.functions.size()) {
+        return false;
+    }
+
+    const auto& function = context.module.functions[context.module.entry_function];
+    if (function.body_statement_index >= context.module.statements.size()) {
+        return false;
+    }
+
+    GraphicsReturnEmitter emit_vertex_return = [](GraphicsLoweringContext& context,
+                                                  uint32_t expr_id,
+                                                  int indent,
+                                                  std::ostringstream* glsl) {
+        std::string return_expression;
+        if (!lower_graphics_stage_expression(context, expr_id, &return_expression)) {
+            trace_graphics_expression_failure(context, "vertex", expr_id, "return expression lowering failed");
+            return false;
+        }
+
+        const auto pad = graphics_indent(indent);
+        const auto result_name = "fe_result_" + std::to_string(expr_id);
+        if (context.varyings.is_float4) {
+            *glsl << pad << "vec4 " << result_name << " = " << return_expression << ";\n";
+            *glsl << pad << "gl_Position = " << result_name << ";\n";
+            *glsl << pad << "v_fe_color = " << result_name << ";\n";
+            *glsl << pad << "v_fe_uv = " << result_name << ".xy * 0.5 + vec2(0.5);\n";
+            *glsl << pad << "return;\n";
+            return true;
+        }
+
+        const auto result_type = graphics_glsl_type_name(context.module, context.varyings.type_id);
+        if (result_type.empty() || context.varyings.position_field_name.empty()) {
+            return false;
+        }
+
+        *glsl << pad << result_type << " " << result_name << " = " << return_expression << ";\n";
+        *glsl << pad << "gl_Position = " << result_name << "."
+              << sanitize_graphics_glsl_identifier(context.varyings.position_field_name) << ";\n";
+        for (const auto& field : context.varyings.fields) {
+            if (field.position) {
+                continue;
+            }
+            *glsl << pad << graphics_varying_variable_name(field) << " = " << result_name << "."
+                  << sanitize_graphics_glsl_identifier(field.name) << ";\n";
+        }
+        *glsl << pad << "return;\n";
+        return true;
+    };
+
+    *glsl << "void main() {\n";
+    if (!append_graphics_stage_statement_list(
+            context,
+            function.body_statement_index,
+            1,
+            emit_vertex_return,
+            glsl)) {
+        return false;
     }
     *glsl << "}\n";
     return true;
@@ -8556,38 +9199,64 @@ bool append_graphics_fragment_output_declarations(const GraphicsFragmentOutputLa
 
 bool append_graphics_fragment_main(GraphicsLoweringContext& context,
                                    const GraphicsFragmentOutputLayout& outputs,
-                                   uint32_t return_expr_id,
                                    std::ostringstream* glsl) {
     if (glsl == nullptr || outputs.fields.empty()) {
         return false;
     }
 
-    std::string return_expression;
-    if (!lower_graphics_stage_expression(context, return_expr_id, &return_expression)) {
-        trace_graphics_expression_failure(context, "fragment", return_expr_id, "return expression lowering failed");
+    if (context.module.entry_function >= context.module.functions.size()) {
         return false;
     }
 
-    *glsl << "void main() {\n";
-    if (outputs.is_float4) {
-        *glsl << "    out_color_0 = " << return_expression << ";\n";
-        *glsl << "}\n";
-        return true;
-    }
-
-    const auto result_type = graphics_glsl_type_name(context.module, outputs.type_id);
-    if (result_type.empty()) {
+    const auto& function = context.module.functions[context.module.entry_function];
+    if (function.body_statement_index >= context.module.statements.size()) {
         return false;
     }
 
-    *glsl << "    " << result_type << " fe_result = " << return_expression << ";\n";
-    for (const auto& field : outputs.fields) {
-        if (field.name.empty()) {
+    GraphicsReturnEmitter emit_fragment_return = [&outputs](GraphicsLoweringContext& context,
+                                                            uint32_t expr_id,
+                                                            int indent,
+                                                            std::ostringstream* glsl) {
+        std::string return_expression;
+        if (!lower_graphics_stage_expression(context, expr_id, &return_expression)) {
+            trace_graphics_expression_failure(context, "fragment", expr_id, "return expression lowering failed");
             return false;
         }
 
-        *glsl << "    out_color_" << field.location << " = fe_result."
-              << sanitize_graphics_glsl_identifier(field.name) << ";\n";
+        const auto pad = graphics_indent(indent);
+        if (outputs.is_float4) {
+            *glsl << pad << "out_color_0 = " << return_expression << ";\n";
+            *glsl << pad << "return;\n";
+            return true;
+        }
+
+        const auto result_type = graphics_glsl_type_name(context.module, outputs.type_id);
+        if (result_type.empty()) {
+            return false;
+        }
+
+        const auto result_name = "fe_result_" + std::to_string(expr_id);
+        *glsl << pad << result_type << " " << result_name << " = " << return_expression << ";\n";
+        for (const auto& field : outputs.fields) {
+            if (field.name.empty()) {
+                return false;
+            }
+
+            *glsl << pad << "out_color_" << field.location << " = " << result_name << "."
+                  << sanitize_graphics_glsl_identifier(field.name) << ";\n";
+        }
+        *glsl << pad << "return;\n";
+        return true;
+    };
+
+    *glsl << "void main() {\n";
+    if (!append_graphics_stage_statement_list(
+            context,
+            function.body_statement_index,
+            1,
+            emit_fragment_return,
+            glsl)) {
+        return false;
     }
     *glsl << "}\n";
     return true;
@@ -8616,18 +9285,16 @@ bool build_graphics_vertex_glsl(const ParsedIr& vertex_ir, const GraphicsPipelin
         {},
         {}};
 
-    if (!collect_graphics_stage_locals(&context)) {
-        return false;
-    }
-
-    uint32_t return_expr_id = UINT32_MAX;
-    if (!find_graphics_stage_return_expression(context, 3, &return_expr_id)) {
+    const auto& function = context.module.functions[context.module.entry_function];
+    if (function.kind != 3 || function.body_statement_index >= context.module.statements.size()) {
         return false;
     }
 
     std::ostringstream glsl;
     if (!append_graphics_shader_prelude(context, &glsl) ||
-        !append_graphics_vertex_main(context, return_expr_id, &glsl)) {
+        !append_graphics_callable_declarations(context, &glsl) ||
+        !append_graphics_callable_definitions(context, &glsl) ||
+        !append_graphics_vertex_main(context, &glsl)) {
         return false;
     }
 
@@ -8659,6 +9326,9 @@ bool build_graphics_fragment_glsl(const ParsedIr& fragment_ir, const GraphicsPip
         {}};
 
     const auto& function = context.module.functions[context.module.entry_function];
+    if (function.kind != 4 || function.body_statement_index >= context.module.statements.size()) {
+        return false;
+    }
     if (function.parameter_count > 0 && function.first_parameter < context.module.parameters.size()) {
         const auto& parameter = context.module.parameters[function.first_parameter];
         if (parameter.name_id < context.module.strings.size()) {
@@ -8666,23 +9336,15 @@ bool build_graphics_fragment_glsl(const ParsedIr& fragment_ir, const GraphicsPip
         }
     }
 
-    if (!collect_graphics_stage_locals(&context)) {
-        return false;
-    }
-
-    uint32_t return_expr_id = UINT32_MAX;
-    if (!find_graphics_stage_return_expression(context, 4, &return_expr_id)) {
-        return false;
-    }
-
     GraphicsFragmentOutputLayout outputs;
     if (!build_graphics_fragment_output_layout(
             context.module,
-            context.module.expressions[return_expr_id].type_id,
+            function.return_type_id,
             pipeline.color_attachment_count,
             &outputs)) {
-        trace_graphics_expression_failure(context, "fragment", return_expr_id,
-                                          "fragment output type is not a supported color output shape");
+        if (feather_graphics_trace_enabled()) {
+            std::cerr << "[feather graphics] fragment output type is not a supported color output shape\n";
+        }
         return false;
     }
 
@@ -8694,7 +9356,9 @@ bool build_graphics_fragment_glsl(const ParsedIr& fragment_ir, const GraphicsPip
         return false;
     }
     if (!append_graphics_fragment_output_declarations(outputs, &glsl) ||
-        !append_graphics_fragment_main(context, outputs, return_expr_id, &glsl)) {
+        !append_graphics_callable_declarations(context, &glsl) ||
+        !append_graphics_callable_definitions(context, &glsl) ||
+        !append_graphics_fragment_main(context, outputs, &glsl)) {
         return false;
     }
 
