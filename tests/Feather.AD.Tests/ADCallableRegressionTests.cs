@@ -255,8 +255,62 @@ public class ADCallableRegressionTests
         Assert.DoesNotContain("grad_targets", backwardSection, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void CallableRematerializesTransitiveLocalDependencyChain()
+    {
+        const float p = 0.23f;
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new CallableEvalLikeDependencyChainAdKernel(
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float expectedLoss = EvalLikeCpu(p);
+        const float eps = 1e-3f;
+        float expectedGradient = (EvalLikeCpu(p + eps) - EvalLikeCpu(p - eps)) / (2f * eps);
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 3e-3f);
+
+        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
+        int original = backwardSection.IndexOf("_original = normalize", StringComparison.Ordinal);
+        int transformed = backwardSection.IndexOf("_transformed = ", StringComparison.Ordinal);
+        Assert.True(original >= 0, backwardSection);
+        Assert.True(transformed > original, backwardSection);
+        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
+    }
+
     private static void AssertNear(float expected, float actual, float tolerance = 1e-3f)
         => Assert.InRange(actual, expected - tolerance, expected + tolerance);
+
+    private static float EvalLikeCpu(float p)
+    {
+        float3 direction = NormalizeCpu(new float3(0.2f, 0.1f, 0.97f));
+        float3 original = NormalizeCpu(new float3(
+            direction.X / (1f + p),
+            direction.Y,
+            direction.Z));
+        float3 transformed = new(
+            (1f + (0.5f * p)) * original.X,
+            1.2f * original.Y,
+            0.9f * original.Z);
+        float length = LengthCpu(transformed);
+        float d = MathF.Max(original.Z, 0.0f);
+        float scale = MathF.Exp(p);
+        return scale * d / length;
+    }
+
+    private static float3 NormalizeCpu(float3 value)
+    {
+        float length = LengthCpu(value);
+        return value / length;
+    }
+
+    private static float LengthCpu(float3 value)
+        => MathF.Sqrt((value.X * value.X) + (value.Y * value.Y) + (value.Z * value.Z));
 
     private static string BackwardSection(string glsl)
     {
@@ -475,6 +529,16 @@ public static class LtcAdRegressionShaderLibrary
         float magnitude = value + 2f;
         return MisLike(brdf.X, brdf.Y, ltcValue, magnitude);
     }
+
+    [Callable]
+    public static float EvalLike(float3 direction, float3x3 m, float3x3 invM, float scale)
+    {
+        float3 original = ShaderMath.Normalize(invM * direction);
+        float3 transformed = m * original;
+        float length = ShaderMath.Length(transformed);
+        float d = ShaderMath.Max(original.Z, 0.0f);
+        return scale * d / length;
+    }
 }
 
 [ShaderLibrary]
@@ -598,6 +662,33 @@ public readonly partial struct LtcStyleNestedShaderLibraryAdKernel(
     {
         float p = parameters[0];
         float result = LtcAdRegressionShaderLibrary.LtcStyleNestedPath(p);
+        loss[0] = result;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(result);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct CallableEvalLikeDependencyChainAdKernel(
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        float p = parameters[0];
+        float3 direction = ShaderMath.Normalize(new float3(0.2f, 0.1f, 0.97f));
+        float3x3 m = new(
+            1f + (0.5f * p), 0f, 0f,
+            0f, 1.2f, 0f,
+            0f, 0f, 0.9f);
+        float3x3 invM = new(
+            1f / (1f + p), 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f);
+        float scale = ShaderMath.Exp(p);
+        float result = LtcAdRegressionShaderLibrary.EvalLike(direction, m, invM, scale);
         loss[0] = result;
         ADMarker.Parameter(parameters[0]);
         ADMarker.Loss(result);
