@@ -6,7 +6,7 @@ on:
       version:
         description: NuGet package version to build.
         required: true
-        default: 0.1.0-preview.11
+        default: 0.1.0-preview.12
       publish:
         description: Push packages to nuget.org.
         required: true
@@ -107,7 +107,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rid }}
-          path: artifacts/native-assets/runtimes/${{ matrix.rid }}/native/${{ matrix.library }}
+          path: artifacts/native-assets/runtimes/${{ matrix.rid }}/native
           if-no-files-found: error
 
   pack:
@@ -147,11 +147,14 @@ jobs:
 
           for rid in "${!libraries[@]}"; do
             library="${libraries[$rid]}"
-            source="artifacts/downloaded-native-assets/native-$rid/$library"
-            target="artifacts/native-assets/runtimes/$rid/native/$library"
+            source="$(find "artifacts/downloaded-native-assets/native-$rid" -type f -name "$library" -print -quit)"
+            test -n "$source"
             test -f "$source"
-            mkdir -p "$(dirname "$target")"
-            cp "$source" "$target"
+
+            source_dir="$(dirname "$source")"
+            target_dir="artifacts/native-assets/runtimes/$rid/native"
+            mkdir -p "$target_dir"
+            cp "$source_dir"/* "$target_dir/"
           done
 
           find artifacts/native-assets -type f | sort
@@ -181,6 +184,9 @@ jobs:
           grep -F "runtimes/linux-x64/native/libfeather.so" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libfeather.dylib" artifacts/native-assets-package.txt
           grep -F "runtimes/win-x64/native/feather_native.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libglslang" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libSPIRV" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libvulkan" artifacts/native-assets-package.txt
 
           unzip -l "artifacts/packages/FeatherCompute.$version.nupkg" | tee artifacts/main-package.txt
           grep -F "analyzers/dotnet/cs/Feather.Generators.dll" artifacts/main-package.txt

@@ -135,6 +135,43 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void DispatchSurvivesVulkanDescriptorPoolRollover()
+    {
+        const int dispatchCount = 1030;
+        var inputs = new GpuBuffer<float>[dispatchCount];
+        var outputs = new GpuBuffer<float>[dispatchCount];
+
+        try
+        {
+            using var gpuKernel = GpuKernel.Create<UniformExpressionKernel>(GPU.Context);
+
+            for (var i = 0; i < dispatchCount; i++)
+            {
+                inputs[i] = GPU.CreateBuffer<float>([(float)i]);
+                outputs[i] = GPU.CreateBuffer<float>(1);
+                var kernel = new UniformExpressionKernel(inputs[i].AsReadOnly(), outputs[i].AsReadWrite(), new Uniform<float>(2));
+
+                GpuKernel.Dispatch(GPU.Context, gpuKernel, kernel, new GpuDispatchSize(1, 1, 1), wait: true);
+            }
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
+            Assert.Equal((dispatchCount - 1) * 2f, outputs[^1].ToArray()[0]);
+        }
+        finally
+        {
+            foreach (var output in outputs)
+            {
+                output?.Dispose();
+            }
+
+            foreach (var input in inputs)
+            {
+                input?.Dispose();
+            }
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsLiteralArithmeticFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try

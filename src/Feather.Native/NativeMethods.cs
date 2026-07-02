@@ -101,17 +101,41 @@ public static class NativeMethods
             return IntPtr.Zero;
         }
 
+        var failures = new List<string>();
         foreach (var candidate in EnumerateNativeLibraryCandidates(assembly))
         {
-            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var handle))
+            if (!File.Exists(candidate))
             {
-                if (NativeLibrary.TryGetExport(handle, ContractExportName, out _))
-                {
-                    return handle;
-                }
-
-                NativeLibrary.Free(handle);
+                continue;
             }
+
+            IntPtr handle;
+            try
+            {
+                handle = NativeLibrary.Load(candidate);
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or BadImageFormatException)
+            {
+                failures.Add($"{candidate}: {ex.Message}");
+                continue;
+            }
+
+            if (NativeLibrary.TryGetExport(handle, ContractExportName, out _))
+            {
+                return handle;
+            }
+
+            NativeLibrary.Free(handle);
+            failures.Add($"{candidate}: loaded, but export '{ContractExportName}' was not found.");
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new DllNotFoundException(
+                $"Unable to load Feather native runtime for '{RuntimeInformation.RuntimeIdentifier}'. " +
+                "Candidate native libraries were found, but none could be used:" +
+                Environment.NewLine +
+                string.Join(Environment.NewLine, failures));
         }
 
         return IntPtr.Zero;
