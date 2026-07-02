@@ -1,4 +1,5 @@
 using Feather.Interop;
+using Feather.Math;
 using Feather.Native;
 using Feather.Resources;
 
@@ -380,6 +381,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         {
             var viewport = drawDesc.Viewport;
             var scissor = drawDesc.Scissor;
+            var clearColor = drawDesc.ClearColor.GetValueOrDefault();
             var nativeDraw = new FeGraphicsDrawDesc(
                 (IntPtr)colorPtr,
                 (uint)colorHandles.Length,
@@ -400,7 +402,13 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                 scissor.GetValueOrDefault().Height,
                 drawDesc.ClearDepth.HasValue ? 1u : 0u,
                 drawDesc.ClearDepth.GetValueOrDefault(),
-                (uint)drawDesc.DepthLoadOp);
+                (uint)drawDesc.DepthLoadOp,
+                drawDesc.ClearColor.HasValue ? 1u : 0u,
+                clearColor.X,
+                clearColor.Y,
+                clearColor.Z,
+                clearColor.W,
+                (uint)drawDesc.ColorLoadOp);
             NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_draw_ex(Handle, in nativeDraw));
         }
     }
@@ -635,10 +643,20 @@ public enum GraphicsDepthLoadOp : uint
     Clear
 }
 
+public enum GraphicsColorLoadOp : uint
+{
+    Default,
+    Load,
+    Clear,
+    DontCare
+}
+
 public readonly record struct GraphicsDrawDesc
 {
     public GraphicsRect? Viewport { get; init; }
     public GraphicsRect? Scissor { get; init; }
+    public GraphicsColorLoadOp ColorLoadOp { get; init; }
+    public float4? ClearColor { get; init; }
     public GraphicsDepthLoadOp DepthLoadOp { get; init; }
     public float? ClearDepth { get; init; }
 }

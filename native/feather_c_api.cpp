@@ -6394,6 +6394,13 @@ enum class GraphicsDepthLoadOp : uint32_t {
     Clear = 2
 };
 
+enum class GraphicsColorLoadOp : uint32_t {
+    Default = 0,
+    Load = 1,
+    Clear = 2,
+    DontCare = 3
+};
+
 struct GraphicsLoweringContext {
     GraphicsStage stage = GraphicsStage::Fragment;
     const ParsedIr& ir;
@@ -10008,12 +10015,53 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
                     "MSAA depth load is not supported because EasyGPU uses transient multisampled depth attachments; clear depth for MSAA draws.");
     }
 
+    const auto color_load_op = static_cast<GraphicsColorLoadOp>(draw.color_load_op);
+    GPU::Backend::AttachmentLoadOp backend_color_load_op = GPU::Backend::AttachmentLoadOp::Default;
+    bool clear_color = false;
+    switch (color_load_op) {
+    case GraphicsColorLoadOp::Default:
+        clear_color = draw.clear_color != 0 || sample_count != GPU::Backend::SampleCount::X1;
+        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Default;
+        break;
+    case GraphicsColorLoadOp::Load:
+        if (draw.clear_color != 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "GraphicsDrawDesc cannot specify ClearColor when ColorLoadOp is Load.");
+        }
+        clear_color = false;
+        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Load;
+        break;
+    case GraphicsColorLoadOp::Clear:
+        clear_color = true;
+        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Clear;
+        break;
+    case GraphicsColorLoadOp::DontCare:
+        if (draw.clear_color != 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "GraphicsDrawDesc cannot specify ClearColor when ColorLoadOp is DontCare.");
+        }
+        clear_color = false;
+        backend_color_load_op = GPU::Backend::AttachmentLoadOp::DontCare;
+        break;
+    default:
+        return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc color load op contains an unsupported value.");
+    }
+    if (sample_count != GPU::Backend::SampleCount::X1 && !clear_color) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "MSAA color load is not supported because EasyGPU uses transient multisampled color attachments; clear color for MSAA draws.");
+    }
+
     GPU::Backend::RenderPassBeginDesc render_pass;
     render_pass.colorAttachment = target_textures.front();
     render_pass.colorAttachments = target_textures;
     render_pass.depthAttachment = depth_texture;
     render_pass.sampleCount = sample_count;
-    render_pass.clearColorFlag = sample_count != GPU::Backend::SampleCount::X1;
+    render_pass.clearColorFlag = clear_color;
+    render_pass.colorLoadOp = backend_color_load_op;
+    render_pass.clearColor[0] = draw.clear_color != 0 ? draw.clear_color_r : 0.0f;
+    render_pass.clearColor[1] = draw.clear_color != 0 ? draw.clear_color_g : 0.0f;
+    render_pass.clearColor[2] = draw.clear_color != 0 ? draw.clear_color_b : 0.0f;
+    render_pass.clearColor[3] = draw.clear_color != 0 ? draw.clear_color_a : 1.0f;
     render_pass.clearDepthFlag = has_depth_attachment && clear_depth;
     render_pass.clearDepth = draw.clear_depth != 0
                                  ? std::clamp(draw.clear_depth_value, 0.0f, 1.0f)

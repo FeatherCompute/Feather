@@ -272,6 +272,294 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedGraphicsPipelineColorLoadPreservesPreviousPassOutsideSecondGeometry()
+    {
+        using var floorVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var quadVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.5f, -0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(0.5f, 0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorLoadPreserve" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(floorVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.25f, 0.5f, 0.75f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(quadVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 6,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load });
+
+        var readback = new float4[64];
+        target.Read(readback);
+        AssertColorNear(readback[0], new float4(0.25f, 0.5f, 0.75f, 1.0f));
+        AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineColorClearDiscardsPreviousPassOutsideSecondGeometry()
+    {
+        using var fullscreenVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var quadVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.5f, -0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(0.5f, 0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorClearDiscard" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 0.0f, 0.0f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(quadVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 6,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 1.0f, 1.0f)
+            });
+
+        var readback = new float4[64];
+        target.Read(readback);
+        AssertColorNear(readback[0], new float4(0.0f, 0.0f, 1.0f, 1.0f));
+        AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
+        Assert.DoesNotContain(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.Z < 0.2f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineDefaultColorLoadClearsWhenClearColorIsSpecified()
+    {
+        using var fullscreenVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorDefaultClearColor" });
+        target.Upload([.. Enumerable.Repeat(new float4(1.0f, 0.0f, 0.0f, 1.0f), 16)]);
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.0f, 1.0f, 0.0f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ClearColor = new float4(0.0f, 0.0f, 1.0f, 1.0f),
+                Scissor = new GraphicsRect(0, 0, 1, 1)
+            });
+
+        var readback = new float4[16];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => IsColorNear(pixel, new float4(0.0f, 1.0f, 0.0f, 1.0f)));
+        Assert.Contains(readback, pixel => IsColorNear(pixel, new float4(0.0f, 0.0f, 1.0f, 1.0f)));
+        Assert.DoesNotContain(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.Z < 0.2f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineColorDontCareAcceptsFullscreenOverwrite()
+    {
+        using var fullscreenVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorDontCare" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.2f, 0.4f, 0.8f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.DontCare });
+
+        var readback = new float4[16];
+        target.Read(readback);
+        Assert.All(readback, pixel => AssertColorNear(pixel, new float4(0.2f, 0.4f, 0.8f, 1.0f)));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineIndexedDrawUsesColorLoadDesc()
+    {
+        using var fullscreenVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var quadVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.5f, -0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1),
+            new float4(0.5f, 0.5f, 0, 1)
+        ]);
+        using var indices = GPU.CreateBuffer<uint>([0u, 1u, 2u, 1u, 3u, 2u], BufferAccess.ReadOnly);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorLoadIndexed" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.1f, 0.7f, 0.2f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
+
+        pipeline.DrawIndexed(
+            new GeneratedVertexShader(quadVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            [target],
+            indices,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load });
+
+        var readback = new float4[64];
+        target.Read(readback);
+        AssertColorNear(readback[0], new float4(0.1f, 0.7f, 0.2f, 1.0f));
+        AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineRejectsColorLoadWithClearColor()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorLoadRejectsClear" });
+
+        var ex = Assert.Throws<FeatherNativeException>(() => pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Load,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            }));
+
+        Assert.Contains("ClearColor when ColorLoadOp is Load", ex.Message);
+        Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineRejectsInvalidColorLoadOp()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedColorLoadInvalid" });
+
+        var ex = Assert.Throws<FeatherNativeException>(() => pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = (GraphicsColorLoadOp)99u }));
+
+        Assert.Contains("color load op contains an unsupported value", ex.Message);
+        Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineRejectsExplicitMsaaColorLoad()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(16, 16, PixelFormat.Rgba8);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "GeneratedMsaaColorLoadReject" });
+
+        var ex = Assert.Throws<FeatherNativeException>(() => pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load }));
+
+        Assert.Contains("MSAA color load is not supported", ex.Message);
+        Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineSamplesTextureThroughEasyGpu()
     {
         using var vertices = GPU.CreateBuffer<float4>(
@@ -1015,6 +1303,18 @@ public class GeneratedGraphicsPipelineTests
 
     private static float4 FirstDrawn(float4[] pixels)
         => pixels.First(pixel => pixel.W > 0.5f);
+
+    private static void AssertColorNear(float4 actual, float4 expected, float tolerance = 0.02f)
+    {
+        Assert.True(IsColorNear(actual, expected, tolerance),
+            $"Expected color near {expected}, got {actual}.");
+    }
+
+    private static bool IsColorNear(float4 actual, float4 expected, float tolerance = 0.02f)
+        => System.Math.Abs(actual.X - expected.X) <= tolerance &&
+           System.Math.Abs(actual.Y - expected.Y) <= tolerance &&
+           System.Math.Abs(actual.Z - expected.Z) <= tolerance &&
+           System.Math.Abs(actual.W - expected.W) <= tolerance;
 
     private readonly record struct Rgba32(byte R, byte G, byte B, byte A);
 }

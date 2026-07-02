@@ -41,6 +41,36 @@ Graphics shader structs use `[VertexShader]` and `[FragmentShader]`.
 | `DrawIndexed(...)` | Draws with a per-draw index buffer. |
 | `Dispose()` | Releases native pipeline handle. |
 
+## Draw State
+
+`GraphicsDrawDesc` controls state that belongs to one draw call rather than the reusable graphics pipeline.
+
+| Property | Purpose |
+| --- | --- |
+| `Viewport` | Optional viewport rectangle. Defaults to the full color target. |
+| `Scissor` | Optional scissor rectangle. Defaults to the full color target. |
+| `ColorLoadOp` | Per-pass color attachment load behavior: `Default`, `Load`, `Clear`, or `DontCare`. |
+| `ClearColor` | Optional color clear value. Valid with `Default` or `Clear`. |
+| `DepthLoadOp` | Per-pass depth attachment load behavior: `Default`, `Load`, or `Clear`. |
+| `ClearDepth` | Optional depth clear value, clamped to `[0, 1]`. |
+
+`GraphicsColorLoadOp.Load` is used for multi-pass rendering into the same target:
+
+```csharp
+floorPipeline.Draw(floorVS, floorFS, color, 3, new GraphicsDrawDesc
+{
+    ColorLoadOp = GraphicsColorLoadOp.Clear,
+    ClearColor = new float4(0, 0, 0, 1)
+});
+
+lightPipeline.Draw(lightVS, lightFS, color, 6, new GraphicsDrawDesc
+{
+    ColorLoadOp = GraphicsColorLoadOp.Load
+});
+```
+
+This clears before the first pass, then preserves the first pass anywhere the second pass does not rasterize. `GraphicsColorLoadOp.DontCare` is for passes that overwrite every pixel they later read. MSAA color `Load` is currently unsupported because EasyGPU uses transient multisampled color attachments and resolves into the target texture at the end of the pass.
+
 ## Pipeline State
 
 `GraphicsPipelineDesc`:

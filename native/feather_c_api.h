@@ -215,6 +215,12 @@ typedef struct FeGraphicsDrawDesc {
     uint32_t clear_depth;
     float clear_depth_value;
     uint32_t depth_load_op;
+    uint32_t clear_color;
+    float clear_color_r;
+    float clear_color_g;
+    float clear_color_b;
+    float clear_color_a;
+    uint32_t color_load_op;
 } FeGraphicsDrawDesc;
 
 typedef struct FeProfilerQueryResult {

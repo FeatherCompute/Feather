@@ -409,7 +409,13 @@ public readonly struct FeGraphicsDrawDesc
         uint scissorHeight,
         uint clearDepth,
         float clearDepthValue,
-        uint depthLoadOp)
+        uint depthLoadOp,
+        uint clearColor,
+        float clearColorR,
+        float clearColorG,
+        float clearColorB,
+        float clearColorA,
+        uint colorLoadOp)
     {
         ColorTargets = colorTargets;
         ColorTargetCount = colorTargetCount;
@@ -431,6 +437,12 @@ public readonly struct FeGraphicsDrawDesc
         ClearDepth = clearDepth;
         ClearDepthValue = clearDepthValue;
         DepthLoadOp = depthLoadOp;
+        ClearColor = clearColor;
+        ClearColorR = clearColorR;
+        ClearColorG = clearColorG;
+        ClearColorB = clearColorB;
+        ClearColorA = clearColorA;
+        ColorLoadOp = colorLoadOp;
     }
 
     public readonly IntPtr ColorTargets;
@@ -453,6 +465,12 @@ public readonly struct FeGraphicsDrawDesc
     public readonly uint ClearDepth;
     public readonly float ClearDepthValue;
     public readonly uint DepthLoadOp;
+    public readonly uint ClearColor;
+    public readonly float ClearColorR;
+    public readonly float ClearColorG;
+    public readonly float ClearColorB;
+    public readonly float ClearColorA;
+    public readonly uint ColorLoadOp;
 }
 
 /// <summary>

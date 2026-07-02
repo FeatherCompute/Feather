@@ -138,6 +138,46 @@ pipeline.Draw(new MeshVS(vertices.AsReadOnly(), new Uniform<float4x4>(mvp)),
               vertexCount);
 ```
 
+## Per-Draw Color Load And Clear
+
+Every `Draw` starts a native render pass. Use `GraphicsDrawDesc.ColorLoadOp` when a frame is split into multiple passes that render into the same color target.
+
+| Value | Meaning |
+| --- | --- |
+| `GraphicsColorLoadOp.Default` | Compatibility mode. A supplied `ClearColor` clears the target; otherwise non-MSAA draws keep the previous contents and MSAA draws clear their transient color attachment. |
+| `GraphicsColorLoadOp.Load` | Load the existing color target contents at the start of the pass. This is the option for a second pass that should preserve pixels it does not cover. |
+| `GraphicsColorLoadOp.Clear` | Clear the color target before drawing. `ClearColor` defaults to `(0, 0, 0, 1)` when omitted. |
+| `GraphicsColorLoadOp.DontCare` | The previous color contents are undefined. Use only when the draw overwrites every pixel you will read later. |
+
+Two-pass example:
+
+```csharp
+floorPipeline.Draw(
+    new FloorVS(floorVertices.AsReadOnly()),
+    new FloorFS(...),
+    color,
+    vertexCount: 3,
+    drawDesc: new GraphicsDrawDesc
+    {
+        ColorLoadOp = GraphicsColorLoadOp.Clear,
+        ClearColor = new float4(0, 0, 0, 1)
+    });
+
+lightPipeline.Draw(
+    new LightQuadVS(lightVertices.AsReadOnly()),
+    new LightQuadFS(...),
+    color,
+    vertexCount: 6,
+    drawDesc: new GraphicsDrawDesc
+    {
+        ColorLoadOp = GraphicsColorLoadOp.Load
+    });
+```
+
+The first pass clears and fills the floor. The second pass loads that color target, so pixels outside the light quad keep the floor result while pixels covered by the quad are overwritten by the light shader.
+
+`ClearColor` is only valid with `Default` or `Clear`. `Load` and `DontCare` reject `ClearColor` because no clear is performed. With the current EasyGPU Vulkan backend, MSAA draws use transient multisampled color attachments; explicitly loading color for an MSAA draw is unsupported, so clear the pass instead.
+
 ## Pipeline State
 
 `GraphicsPipelineDesc` controls fixed-function state:
