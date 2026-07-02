@@ -54,13 +54,13 @@ Modern Feather uses section 7 typed IR as the canonical representation. That let
 - Resource l-values.
 - Push constants.
 - Known math intrinsics.
-- Callables and overloads.
+- Kernel-local callables, source-available shader-library callables, and overloads.
 - GPU structs and fixed arrays.
 - Atomics.
 - Texture loads, stores, samples, and sample-level operations.
 - AD parameter/loss metadata.
 
-This is why generated kernels can use `ShaderMath.Sqrt`, `Hlsl.Dot`, or a `[Callable]` helper without the native bridge guessing from source text.
+This is why generated kernels can use `ShaderMath.Sqrt`, `Hlsl.Dot`, a kernel-local `[Callable]`, or a source-available `[ShaderLibrary]` helper without the native bridge guessing from source text.
 
 ## Inspecting FEIR And GLSL
 

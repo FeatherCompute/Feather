@@ -52,6 +52,8 @@ DispatchPath path = GPU.DispatchAndGetPath(new Kernel1D(...), count);
 
 ## Callables
 
+Kernel-local helper:
+
 ```csharp
 [Callable]
 private static float Smooth(float x)
@@ -60,7 +62,21 @@ private static float Smooth(float x)
 }
 ```
 
-Callables must use supported shader value types. Overloads bind by generated symbol identity.
+Reusable helper library:
+
+```csharp
+[ShaderLibrary]
+public static class Brdf
+{
+    [Callable]
+    public static float3 Diffuse(float3 albedo, float nDotL)
+    {
+        return albedo * ShaderMath.Clamp(nDotL, 0.0f, 1.0f);
+    }
+}
+```
+
+Callables must use supported shader value types. Overloads bind by generated symbol identity. `[ShaderLibrary]` callables must be static and source-available to the consuming compilation.
 
 ## Shared Memory
 
@@ -116,6 +132,7 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 ## Related Docs
 
 - [C# Shader Subset](../csharp-subset.md)
+- [Shader Libraries](../shader-libraries.md)
 - [Tutorial](../tutorial.md)
 - [Diagnostics](../diagnostics.md)
 
@@ -124,6 +141,7 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 - `GPU.Dispatch` and `GpuKernel` are host APIs.
 - `ThreadIds`, `LocalIds`, `GroupIds`, `DispatchSize`, `GroupSize`, `GpuBarrier`, `GpuAtomic`, and `SharedMemory<T>` are shader-only markers.
 - `[Callable]` methods are ordinary C# declarations at compile time, but their bodies must fit the shader subset.
+- `[ShaderLibrary]` is a compile-time import marker; it does not register runtime functions.
 
 ## Lifetime And Errors
 

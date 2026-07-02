@@ -56,13 +56,22 @@ public sealed class EntryAttribute : Attribute;
 public sealed class ShaderFunctionAttribute : Attribute;
 
 /// <summary>
-/// Marks a static or instance method inside a kernel or shader struct as a GPU callable function.
+/// Marks a static type as a source-available shader helper library. Static methods
+/// marked with <see cref="CallableAttribute"/> can be imported into any generated
+/// Feather shader module that calls them.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
+public sealed class ShaderLibraryAttribute : Attribute;
+
+/// <summary>
+/// Marks a method as a GPU callable function.
 /// Callable methods are compiled into the shader module and can be invoked from the entry-point
 /// method or from other callables within the same module.
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
-/// <item>Callables must be defined inside the kernel or shader struct.</item>
+/// <item>Kernel-local callables may be static or instance methods defined inside the kernel or shader struct.</item>
+/// <item>Reusable callables must be static methods on a source-available type marked with <see cref="ShaderLibraryAttribute"/>.</item>
 /// <item>The generator builds a call graph and emits each callable exactly once, even when referenced from multiple call sites.</item>
 /// <item>Recursion is not supported by current EasyGPU backends and will produce a diagnostic.</item>
 /// <item>Parameters may be scalars, vectors, matrices, structs, or resource references where the backend allows.</item>

@@ -34,7 +34,7 @@ New completed DSL features should not prove behavior through `CpuReferenceFallba
 | `for` | Supported | Canonical typed lowering. |
 | `while` / `do` | Supported for compute | AD has narrower restrictions. |
 | `break` / `continue` | Supported for compute | AD currently rejects these. |
-| `[Callable]` helpers | Supported | Overloads bind by generated mangled identity. |
+| `[Callable]` helpers | Supported | Kernel-local and source-available `[ShaderLibrary]` callables; overloads bind by generated mangled identity. |
 | Shader math / HLSL aliases | Supported subset | Calls resolve by Roslyn symbol identity. |
 | Shared memory | Supported | Dedicated declaration records. |
 | Barriers | Supported | Workgroup, memory, and full barrier markers. |

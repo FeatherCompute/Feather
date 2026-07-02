@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.1.0</VersionPrefix>
-    <VersionSuffix>preview.2</VersionSuffix>
+    <VersionSuffix>preview.5</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -18,7 +18,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds source-available ShaderLibrary callables for sharing shader helper functions across generated kernels.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true'">

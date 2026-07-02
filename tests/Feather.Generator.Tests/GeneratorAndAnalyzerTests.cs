@@ -1112,6 +1112,350 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
+    public void GeneratorImportsNestedShaderLibraryCallableClosureIntoTypedIr()
+    {
+        var section = GenerateTypedIrSection("""
+            using Feather;
+            using Feather.Math;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [ShaderLibrary]
+            public static class Pbr
+            {
+                [Callable]
+                public static float3 Diffuse(float3 albedo, float nDotL)
+                {
+                    return albedo * Saturate(nDotL);
+                }
+
+                [Callable]
+                public static float Saturate(float value)
+                {
+                    return ShaderMath.Clamp(value, 0.0f, 1.0f);
+                }
+
+                [Callable]
+                public static float3 FresnelSchlick(float cosTheta, float3 f0)
+                {
+                    float factor = ShaderMath.Pow(1.0f - Saturate(cosTheta), 5.0f);
+                    return f0 + ((new float3(1.0f) - f0) * factor);
+                }
+            }
+
+            [ShaderLibrary]
+            public static class Sampling
+            {
+                [Callable]
+                public static float Bias(float value)
+                {
+                    return value + 0.25f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BrdfKernel(
+                ReadOnlyBuffer<float3> albedo,
+                ReadWriteBuffer<float3> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    float3 f0 = new float3(0.04f);
+                    output[i] = Pbr.Diffuse(albedo[i], Sampling.Bias(0.75f)) + Pbr.FresnelSchlick(0.5f, f0);
+                }
+            }
+            """, "BrdfKernel.Feather.g.cs");
+
+        var functions = section.Functions
+            .Select(function => section.Strings[(int)function.NameId])
+            .ToArray();
+        var mangledFunctions = section.Functions
+            .Select(function => section.Strings[(int)function.MangledNameId])
+            .ToArray();
+        var callableCalls = section.Expressions
+            .Where(expression => expression.Kind == 14)
+            .Select(expression => section.Strings[(int)expression.NameId])
+            .ToArray();
+
+        Assert.Equal(["BrdfKernel", "Diffuse", "Bias", "FresnelSchlick", "Saturate"], functions);
+        Assert.Equal(4, section.Functions.Count(function => function.Kind == (byte)ShaderFunctionKind.Callable));
+        Assert.Contains(mangledFunctions, name => name.Contains("Scratch_Pbr_Diffuse", StringComparison.Ordinal));
+        Assert.Contains(mangledFunctions, name => name.Contains("Scratch_Pbr_Saturate", StringComparison.Ordinal));
+        Assert.Contains(mangledFunctions, name => name.Contains("Scratch_Pbr_FresnelSchlick", StringComparison.Ordinal));
+        Assert.Contains(mangledFunctions, name => name.Contains("Scratch_Sampling_Bias", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Pbr_Diffuse", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Pbr_Saturate", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Pbr_FresnelSchlick", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Sampling_Bias", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorImportsOnlyReachableShaderLibraryOverloadsPerKernel()
+    {
+        var source = """
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [ShaderLibrary]
+            public static class ShapeLibrary
+            {
+                [Callable]
+                public static float Shape(float value)
+                {
+                    return Common(value) * 2.0f;
+                }
+
+                [Callable]
+                public static int Shape(int value)
+                {
+                    return value + 7;
+                }
+
+                [Callable]
+                public static float Common(float value)
+                {
+                    return value + 1.0f;
+                }
+
+                [Callable]
+                public static float Unused(float value)
+                {
+                    return value - 100.0f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct FloatShapeKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = ShapeLibrary.Shape(input[i]);
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct IntShapeKernel(
+                ReadOnlyBuffer<int> input,
+                ReadWriteBuffer<int> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = ShapeLibrary.Shape(input[i]);
+                }
+            }
+            """;
+
+        var floatSection = GenerateTypedIrSection(source, "FloatShapeKernel.Feather.g.cs");
+        var intSection = GenerateTypedIrSection(source, "IntShapeKernel.Feather.g.cs");
+
+        var floatMangled = floatSection.Functions.Select(function => floatSection.Strings[(int)function.MangledNameId]).ToArray();
+        var intMangled = intSection.Functions.Select(function => intSection.Strings[(int)function.MangledNameId]).ToArray();
+
+        Assert.Equal(["FloatShapeKernel", "Shape", "Common"], floatSection.Functions.Select(function => floatSection.Strings[(int)function.NameId]).ToArray());
+        Assert.Contains(floatMangled, name => name.Contains("Shape_float", StringComparison.Ordinal));
+        Assert.Contains(floatMangled, name => name.Contains("Common_float", StringComparison.Ordinal));
+        Assert.DoesNotContain(floatMangled, name => name.Contains("Shape_int", StringComparison.Ordinal));
+        Assert.DoesNotContain(floatMangled, name => name.Contains("Unused", StringComparison.Ordinal));
+
+        Assert.Equal(["IntShapeKernel", "Shape"], intSection.Functions.Select(function => intSection.Strings[(int)function.NameId]).ToArray());
+        Assert.Contains(intMangled, name => name.Contains("Shape_int", StringComparison.Ordinal));
+        Assert.DoesNotContain(intMangled, name => name.Contains("Common", StringComparison.Ordinal));
+        Assert.DoesNotContain(intMangled, name => name.Contains("Unused", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsExternalCallableWithoutShaderLibraryAttribute()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            public static class Helpers
+            {
+                [Callable]
+                public static float Twice(float value)
+                {
+                    return value * 2.0f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = Helpers.Twice(input[i]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0008");
+        Assert.Contains("Twice", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsInstanceShaderLibraryCallable()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [ShaderLibrary]
+            public readonly struct BadLibrary
+            {
+                [Callable]
+                public float Twice(float value)
+                {
+                    return value * 2.0f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = default(BadLibrary).Twice(input[i]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Id == "FE0008" &&
+            diagnostic.GetMessage().Contains("must be static", StringComparison.Ordinal));
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsRecursiveShaderLibraryCallableGraph()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [ShaderLibrary]
+            public static class RecursiveLibrary
+            {
+                [Callable]
+                public static float A(float value)
+                {
+                    return B(value);
+                }
+
+                [Callable]
+                public static float B(float value)
+                {
+                    return A(value);
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = RecursiveLibrary.A(input[i]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "FE0015");
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsMetadataOnlyShaderLibraryCallable()
+    {
+        var libraryReference = CompileReference("""
+            using Feather;
+
+            namespace External;
+
+            [ShaderLibrary]
+            public static class MetadataOnlyLibrary
+            {
+                [Callable]
+                public static float Twice(float value)
+                {
+                    return value * 2.0f;
+                }
+            }
+            """, "ExternalShaderLibrary");
+
+        var compilation = CreateCompilation("""
+            using External;
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = MetadataOnlyLibrary.Twice(input[i]);
+                }
+            }
+            """, [libraryReference]);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Id == "FE0008" &&
+            diagnostic.GetMessage().Contains("source-available", StringComparison.Ordinal));
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AnalyzerReportsTopLevelConstantsReferencedFromKernel()
     {
         var compilation = CreateCompilation("""
@@ -5446,6 +5790,29 @@ public class GeneratorAndAnalyzerTests
         throw new InvalidDataException("Generated IR did not contain typed shader IR section 7.");
     }
 
+    private static TypedIrSection GenerateTypedIrSection(
+        string source,
+        string generatedFileName,
+        IEnumerable<MetadataReference>? additionalReferences = null)
+    {
+        var compilation = CreateCompilation(source, additionalReferences);
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var generated = GetGeneratedTree(outputCompilation, diagnostics, generatedFileName);
+        return ReadTypedIrSection(ExtractTypedIrBytes(generated.ToString()));
+    }
+
+    private static MetadataReference CompileReference(string source, string assemblyName)
+    {
+        var compilation = CreateCompilation(source, assemblyName: assemblyName);
+        using var stream = new MemoryStream();
+        var result = compilation.Emit(stream);
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        return MetadataReference.CreateFromImage(stream.ToArray());
+    }
+
     private static SyntaxTree GetGeneratedTree(Compilation compilation, IEnumerable<Diagnostic> generatorDiagnostics, string fileName)
     {
         var matches = compilation.SyntaxTrees
@@ -5755,16 +6122,20 @@ public class GeneratorAndAnalyzerTests
         }
     }
 
-    private static CSharpCompilation CreateCompilation(string source)
+    private static CSharpCompilation CreateCompilation(
+        string source,
+        IEnumerable<MetadataReference>? additionalReferences = null,
+        string assemblyName = "Scratch")
     {
         var references = AppDomain.CurrentDomain.GetAssemblies()
             .Where(assembly => !assembly.IsDynamic && !string.IsNullOrWhiteSpace(assembly.Location))
             .Select(assembly => MetadataReference.CreateFromFile(assembly.Location))
             .Concat([MetadataReference.CreateFromFile(typeof(KernelAttribute).Assembly.Location)])
+            .Concat(additionalReferences ?? [])
             .Distinct(MetadataReferenceComparer.Instance);
 
         return CSharpCompilation.Create(
-            "Scratch",
+            assemblyName,
             [CSharpSyntaxTree.ParseText(source)],
             references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));

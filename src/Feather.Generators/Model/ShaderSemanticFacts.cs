@@ -239,6 +239,13 @@ internal static class ShaderSemanticFacts
             a.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) is "global::Feather.CallableAttribute"
                 or "global::Feather.ShaderFunctionAttribute");
 
+    public static bool IsShaderLibraryType(ITypeSymbol? type)
+        => type?.GetAttributes().Any(static a =>
+            a.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == "global::Feather.ShaderLibraryAttribute") == true;
+
+    public static bool IsShaderLibraryCallableMethod(IMethodSymbol method)
+        => IsCallableMethod(method) && IsShaderLibraryType(method.ContainingType);
+
     public static bool IsGpuStructType(ITypeSymbol? type)
         => type is not null
             && type.GetAttributes().Any(static a =>

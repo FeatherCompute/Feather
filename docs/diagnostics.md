@@ -47,6 +47,12 @@ Constructor parameters and captured fields must be shader resources or supported
 
 The code is outside Feather's shader subset. Typical causes include LINQ, managed collections, unsupported BCL calls, reference allocation, or calling a helper method without `[Callable]`.
 
+For shared helper functions:
+
+- Put one-off helpers inside the shader struct and mark them `[Callable]`.
+- Put reusable helpers on a source-available `[ShaderLibrary]` type and mark each imported method `[Callable]`.
+- Make `[ShaderLibrary]` methods `static`; compiled binary-only helpers cannot be imported because the generator cannot see their method bodies.
+
 ### `FE0016`: Resource access mode violation
 
 The shader is writing to a read-only resource or reading from a write-only resource. Use the correct view:

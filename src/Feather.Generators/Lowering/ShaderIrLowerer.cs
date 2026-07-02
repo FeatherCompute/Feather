@@ -74,13 +74,16 @@ internal static class ShaderIrLowerer
                 throw new ShaderIrLoweringException($"callable '{callable.Name}' must have a block body", callable.Syntax.GetLocation());
             }
 
-            var callCtx = new LowerCtx(model, semanticModel, ct);
+            var callableSemanticModel = callable.Syntax.SyntaxTree == semanticModel.SyntaxTree
+                ? semanticModel
+                : semanticModel.Compilation.GetSemanticModel(callable.Syntax.SyntaxTree);
+            var callCtx = new LowerCtx(model, callableSemanticModel, ct);
             foreach (var parameter in callable.Symbol.Parameters)
             {
                 callCtx.Register(parameter, ToTy(parameter.Type, callable.Syntax));
             }
 
-            var callBlock = LowerMethodBody(callable.Syntax, semanticModel, callCtx, ct);
+            var callBlock = LowerMethodBody(callable.Syntax, callableSemanticModel, callCtx, ct);
             var retType = ShaderTypeFactory.FromTypeSymbol(callable.Symbol.ReturnType) ?? ShaderTypeFactory.Void;
             var pars = callable.Parameters.Items.Select(p =>
                 new ShaderParameterModel(p.Name,

@@ -110,7 +110,7 @@ Use `f` suffixes for float literals. A bare `2.0` is a C# `double`, which is not
 
 ## Callable Helpers
 
-Mark helper methods with `[Callable]`:
+Mark one-off helper methods inside a shader with `[Callable]`:
 
 ```csharp
 [Callable]
@@ -120,9 +120,25 @@ private static float Smooth(float x)
 }
 ```
 
+For helpers shared across kernels, use a source-available `[ShaderLibrary]` type:
+
+```csharp
+[ShaderLibrary]
+public static class Sdf
+{
+    [Callable]
+    public static float Sphere(float3 p, float radius)
+    {
+        return ShaderMath.Length(p) - radius;
+    }
+}
+```
+
 Rules:
 
-- Callables must be inside the shader struct.
+- Local callables can be inside the shader struct.
+- Shared callables must be static methods on a type marked with `[ShaderLibrary]`.
+- Shared callables must have source available to the consuming compilation.
 - Recursive callables are not supported.
 - Callable parameters and return values must use supported shader types.
 - Nested callable patterns are supported for ordinary compute where the generator can lower them, but AD callables are more restricted.

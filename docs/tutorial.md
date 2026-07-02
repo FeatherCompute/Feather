@@ -114,7 +114,7 @@ Uniforms are best for scalars, vectors, matrices, and small GPU structs that cha
 
 ## 5. Math And Callables
 
-Use `Feather.Math` types and `ShaderMath`/`Hlsl` helpers inside GPU code:
+Use `Feather.Math` types and `ShaderMath`/`Hlsl` helpers inside GPU code. Put one-off helpers in the shader struct:
 
 ```csharp
 [Callable]
@@ -125,7 +125,22 @@ private static float3 Shade(float3 normal, float3 light)
 }
 ```
 
-`[Callable]` methods are emitted into the generated shader module. They must stay inside the supported shader subset: no object allocation, no exceptions, no async, no virtual dispatch, and no ordinary .NET collections.
+Use `[ShaderLibrary]` when the helper should be shared by many kernels:
+
+```csharp
+[ShaderLibrary]
+public static class Pbr
+{
+    [Callable]
+    public static float3 Lambert(float3 albedo, float3 normal, float3 light)
+    {
+        float nDotL = ShaderMath.Max(ShaderMath.Dot(ShaderMath.Normalize(normal), light), 0.0f);
+        return albedo * nDotL;
+    }
+}
+```
+
+`[Callable]` methods are emitted into the generated shader module. They must stay inside the supported shader subset: no object allocation, no exceptions, no async, no virtual dispatch, and no ordinary .NET collections. Library callables must be static and source-available to the generator. See [Shader Libraries](shader-libraries.md) for the full set of rules.
 
 ## 6. Textures
 

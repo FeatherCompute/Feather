@@ -31,6 +31,7 @@ Feather is designed for C# developers who want to stay inside .NET while writing
 
 - Compute kernels over buffers, 2D textures, and 3D textures.
 - Shader math with `float2`, `float3`, `float4`, matrices, swizzles, and HLSL-style helpers.
+- Reusable `[ShaderLibrary]` callables for shared BRDF, SDF, sampling, and math code.
 - Native windows and texture presentation for interactive GPU output.
 - Preview raster pipelines written as C# vertex and fragment shaders.
 - Preview reverse-mode AD for generated 1D kernels through EasyGPU's gradient tape.
@@ -56,7 +57,7 @@ dotnet add package FeatherCompute --prerelease
 Or pin the current preview release explicitly:
 
 ```bash
-dotnet add package FeatherCompute --version 0.1.0-preview.4
+dotnet add package FeatherCompute --version 0.1.0-preview.5
 ```
 
 The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
@@ -127,6 +128,7 @@ At the call site this is ordinary C#. Inside `Execute`, Feather accepts a GPU-sa
 | First successful build and dispatch | [Getting Started](docs/getting-started.md) |
 | Thread IDs, buffers, uniforms, textures | [Tutorial](docs/tutorial.md) |
 | Supported shader-language subset | [C# Shader Subset](docs/csharp-subset.md) |
+| Shared shader helper libraries | [Shader Libraries](docs/shader-libraries.md) |
 | Window loops and texture presentation | [Windowing](docs/window.md) |
 | Vertex/fragment raster pipelines | [Graphics Pipeline](docs/graphics-pipeline.md) |
 | Reverse-mode AD and gradients | [Automatic Differentiation](docs/autodiff.md) |

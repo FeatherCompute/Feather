@@ -7,7 +7,7 @@ Feather lets .NET applications write GPU work in C# and execute it through the n
 | Stage | Read | You will learn |
 | --- | --- | --- |
 | First kernel | [Getting Started](getting-started.md) | Build the native bridge, run `HelloBuffer`, write a 1D buffer kernel. |
-| GPU mental model | [Tutorial](tutorial.md) | Thread IDs, dispatch sizes, buffers, uniforms, textures, callables, inspection. |
+| GPU mental model | [Tutorial](tutorial.md) | Thread IDs, dispatch sizes, buffers, uniforms, textures, callables, shader libraries, inspection. |
 | Image compute | [Examples](examples.md) | How Mandelbrot, Julia, SDF, ray tracing, and volume samples are organized. |
 | Window output | [Windowing](window.md) | Native windows, events, CPU pixels, GPU texture presentation. |
 | Graphics | [Graphics Pipeline](graphics-pipeline.md) | C# vertex/fragment shaders, render targets, depth, sampling, draw state. |
@@ -26,6 +26,7 @@ Feather lets .NET applications write GPU work in C# and execute it through the n
 
 - [Getting Started](getting-started.md): prerequisites, native build, first kernel, first dispatch.
 - [Tutorial](tutorial.md): progressive compute walkthrough from buffers to textures and inspection.
+- [Shader Libraries](shader-libraries.md): reusable `[ShaderLibrary]` + `[Callable]` helpers for BRDFs, SDFs, sampling, and math.
 - [Examples](examples.md): sample gallery with recommended learning order.
 - [C# Shader Subset](csharp-subset.md): what is legal inside generated GPU code.
 - [Windowing](window.md): window creation, event loops, pixels, and texture presentation.

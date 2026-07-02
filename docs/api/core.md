@@ -75,6 +75,7 @@ Console.WriteLine($"{caps.BackendType}: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGr
 | `[FragmentShader]` | Struct | Marks a generated fragment shader. |
 | `[Entry]` | Method | Selects an explicit entry method. |
 | `[Callable]` | Method | Emits a helper method into the shader module. |
+| `[ShaderLibrary]` | Class/struct | Enables source-available static `[Callable]` helpers to be imported by generated shaders. |
 | `[GpuStruct]` | Struct | Requests deterministic GPU layout metadata. |
 | `[Position]` | Field/property | Marks graphics position output. |
 | `[Color(index)]` | Field/property | Marks a fragment color output. |
