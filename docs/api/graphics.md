@@ -69,7 +69,9 @@ lightPipeline.Draw(lightVS, lightFS, color, 6, new GraphicsDrawDesc
 });
 ```
 
-This clears before the first pass, then preserves the first pass anywhere the second pass does not rasterize. `GraphicsColorLoadOp.DontCare` is for passes that overwrite every pixel they later read. MSAA color `Load` is currently unsupported because EasyGPU uses transient multisampled color attachments and resolves into the target texture at the end of the pass.
+This clears before the first pass, then preserves the first pass anywhere the second pass does not rasterize. `GraphicsColorLoadOp.DontCare` is for passes that overwrite every pixel they later read.
+
+For MSAA pipelines, Feather preserves an internal multisampled color attachment per resolved render target, so a later `Load` draw against the same target keeps previous multisampled color before resolving again.
 
 ## Pipeline State
 

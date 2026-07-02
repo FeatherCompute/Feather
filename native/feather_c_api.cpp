@@ -10046,11 +10046,6 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     default:
         return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc color load op contains an unsupported value.");
     }
-    if (sample_count != GPU::Backend::SampleCount::X1 && !clear_color) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "MSAA color load is not supported because EasyGPU uses transient multisampled color attachments; clear color for MSAA draws.");
-    }
-
     GPU::Backend::RenderPassBeginDesc render_pass;
     render_pass.colorAttachment = target_textures.front();
     render_pass.colorAttachments = target_textures;

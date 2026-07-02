@@ -535,28 +535,118 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineRejectsExplicitMsaaColorLoad()
+    public void GeneratedGraphicsPipelineMsaaColorLoadPreservesPreviousPassOutsideSecondGeometry()
     {
-        using var vertices = GPU.CreateBuffer<float4>(
+        using var floorVertices = GPU.CreateBuffer<float4>(
         [
             new float4(-1, -1, 0, 1),
             new float4(3, -1, 0, 1),
             new float4(-1, 3, 0, 1)
         ]);
-        using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(16, 16, PixelFormat.Rgba8);
+        using var quadVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.5f, -0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(0.5f, 0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(16, 16, PixelFormat.Rgba32Float);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
-        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
-            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "GeneratedMsaaColorLoadReject" });
+        using var floorPipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "GeneratedMsaaColorLoadFloor" });
+        using var lightPipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "GeneratedMsaaColorLoadLight" });
 
-        var ex = Assert.Throws<FeatherNativeException>(() => pipeline.Draw(
-            new GeneratedVertexShader(vertices.AsReadOnly()),
-            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+        floorPipeline.Draw(
+            new GeneratedVertexShader(floorVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.15f, 0.45f, 0.75f, 1.0f))),
             target,
             vertexCount: 3,
-            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load }));
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
 
-        Assert.Contains("MSAA color load is not supported", ex.Message);
-        Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
+        lightPipeline.Draw(
+            new GeneratedVertexShader(quadVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            target,
+            vertexCount: 6,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load });
+
+        var readback = new float4[256];
+        target.Read(readback);
+        AssertColorNear(readback[0], new float4(0.15f, 0.45f, 0.75f, 1.0f));
+        AssertColorNear(readback[(8 * 16) + 8], new float4(1.0f, 1.0f, 1.0f, 1.0f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, floorPipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.TypedEasyGpu, lightPipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelineMsaaColorLoadKeepsSameSizedTargetsIsolated()
+    {
+        using var fullscreenVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var quadVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.5f, -0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1),
+            new float4(0.5f, -0.5f, 0, 1),
+            new float4(0.5f, 0.5f, 0, 1),
+            new float4(-0.5f, 0.5f, 0, 1)
+        ]);
+        using var targetA = GPU.CreateRenderTexture2D<float4, float4>(16, 16, PixelFormat.Rgba32Float);
+        using var targetB = GPU.CreateRenderTexture2D<float4, float4>(16, 16, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "GeneratedMsaaColorLoadTargetIsolation" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.0f, 0.8f, 0.2f, 1.0f))),
+            targetA,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(fullscreenVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(0.8f, 0.0f, 0.1f, 1.0f))),
+            targetB,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f)
+            });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(quadVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(new float4(1.0f, 1.0f, 1.0f, 1.0f))),
+            targetA,
+            vertexCount: 6,
+            drawDesc: new GraphicsDrawDesc { ColorLoadOp = GraphicsColorLoadOp.Load });
+
+        var readbackA = new float4[256];
+        var readbackB = new float4[256];
+        targetA.Read(readbackA);
+        targetB.Read(readbackB);
+        AssertColorNear(readbackA[0], new float4(0.0f, 0.8f, 0.2f, 1.0f));
+        AssertColorNear(readbackA[(8 * 16) + 8], new float4(1.0f, 1.0f, 1.0f, 1.0f));
+        AssertColorNear(readbackB[0], new float4(0.8f, 0.0f, 0.1f, 1.0f));
+        Assert.DoesNotContain(readbackA, pixel => pixel.X > 0.7f && pixel.Y < 0.1f && pixel.Z < 0.2f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
     }
 
     [Fact]

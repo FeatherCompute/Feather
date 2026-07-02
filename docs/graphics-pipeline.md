@@ -144,7 +144,7 @@ Every `Draw` starts a native render pass. Use `GraphicsDrawDesc.ColorLoadOp` whe
 
 | Value | Meaning |
 | --- | --- |
-| `GraphicsColorLoadOp.Default` | Compatibility mode. A supplied `ClearColor` clears the target; otherwise non-MSAA draws keep the previous contents and MSAA draws clear their transient color attachment. |
+| `GraphicsColorLoadOp.Default` | Compatibility mode. A supplied `ClearColor` clears the target; otherwise non-MSAA draws keep the previous contents and MSAA draws clear their internal multisampled color attachment. |
 | `GraphicsColorLoadOp.Load` | Load the existing color target contents at the start of the pass. This is the option for a second pass that should preserve pixels it does not cover. |
 | `GraphicsColorLoadOp.Clear` | Clear the color target before drawing. `ClearColor` defaults to `(0, 0, 0, 1)` when omitted. |
 | `GraphicsColorLoadOp.DontCare` | The previous color contents are undefined. Use only when the draw overwrites every pixel you will read later. |
@@ -176,7 +176,9 @@ lightPipeline.Draw(
 
 The first pass clears and fills the floor. The second pass loads that color target, so pixels outside the light quad keep the floor result while pixels covered by the quad are overwritten by the light shader.
 
-`ClearColor` is only valid with `Default` or `Clear`. `Load` and `DontCare` reject `ClearColor` because no clear is performed. With the current EasyGPU Vulkan backend, MSAA draws use transient multisampled color attachments; explicitly loading color for an MSAA draw is unsupported, so clear the pass instead.
+`ClearColor` is only valid with `Default` or `Clear`. `Load` and `DontCare` reject `ClearColor` because no clear is performed.
+
+With MSAA enabled, Feather keeps an internal multisampled color attachment for each resolved render target. A later `ColorLoadOp.Load` draw against the same target loads that multisampled attachment, preserves the earlier pass, rasterizes more geometry, and resolves back into the target at the end of the draw.
 
 ## Pipeline State
 
