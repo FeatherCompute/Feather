@@ -57,7 +57,7 @@ dotnet add package FeatherCompute --prerelease
 Or pin the current preview release explicitly:
 
 ```bash
-dotnet add package FeatherCompute --version 0.1.0-preview.6
+dotnet add package FeatherCompute --version 0.1.0-preview.7
 ```
 
 The NuGet package ID is `FeatherCompute`; the public C# namespaces remain

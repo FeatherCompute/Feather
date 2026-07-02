@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -117,15 +118,47 @@ constexpr uint32_t kIrAdRoleParameter = 0;
 constexpr uint32_t kIrAdRoleLoss = 1;
 constexpr uint32_t kIrAdSourceKindBufferElement = 1;
 constexpr uint32_t kIrAdSourceKindLocal = 2;
+constexpr uint8_t kTypedStatementBlock = 1;
+constexpr uint8_t kTypedStatementLocalDeclaration = 2;
+constexpr uint8_t kTypedStatementAssignment = 3;
+constexpr uint8_t kTypedStatementCompoundAssignment = 4;
 constexpr uint8_t kTypedStatementIf = 5;
-constexpr uint32_t kTypedStructFieldFlagPosition = 1u;
-constexpr uint32_t kTypedStructFieldFlagColor = 2u;
-constexpr uint32_t kTypedStructFieldColorIndexShift = 8u;
 constexpr uint8_t kTypedStatementFor = 6;
 constexpr uint8_t kTypedStatementWhile = 7;
 constexpr uint8_t kTypedStatementDoWhile = 8;
 constexpr uint8_t kTypedStatementBreak = 9;
 constexpr uint8_t kTypedStatementContinue = 10;
+constexpr uint8_t kTypedStatementReturn = 11;
+constexpr uint8_t kTypedStatementExpression = 12;
+constexpr uint8_t kTypedStatementIncrementDecrement = 14;
+constexpr uint8_t kTypedExpressionResourceElement = 5;
+constexpr uint8_t kTypedExpressionUnary = 6;
+constexpr uint8_t kTypedExpressionBinary = 7;
+constexpr uint8_t kTypedExpressionComparison = 8;
+constexpr uint8_t kTypedExpressionLogical = 9;
+constexpr uint8_t kTypedExpressionConditional = 10;
+constexpr uint8_t kTypedExpressionConversion = 11;
+constexpr uint8_t kTypedExpressionConstructor = 12;
+constexpr uint8_t kTypedExpressionIntrinsic = 13;
+constexpr uint8_t kTypedExpressionCallableCall = 14;
+constexpr uint8_t kTypedExpressionSwizzle = 15;
+constexpr uint8_t kTypedExpressionMemberAccess = 16;
+constexpr uint8_t kTypedExpressionIndexAccess = 17;
+constexpr uint8_t kTypedExpressionMatrixColumn = 20;
+constexpr uint8_t kTypedExpressionAtomic = 22;
+constexpr uint8_t kTypedExpressionTextureSample = 23;
+constexpr uint8_t kTypedLValueLocal = 1;
+constexpr uint8_t kTypedLValueParameter = 2;
+constexpr uint8_t kTypedLValueField = 3;
+constexpr uint8_t kTypedLValueResourceElement = 4;
+constexpr uint8_t kTypedLValueSwizzle = 5;
+constexpr uint8_t kTypedLValueMemberAccess = 6;
+constexpr uint8_t kTypedLValueIndexAccess = 7;
+constexpr uint8_t kTypedLValueMatrixColumn = 8;
+constexpr uint8_t kTypedLValueSharedMemoryElement = 9;
+constexpr uint32_t kTypedStructFieldFlagPosition = 1u;
+constexpr uint32_t kTypedStructFieldFlagColor = 2u;
+constexpr uint32_t kTypedStructFieldColorIndexShift = 8u;
 constexpr uint32_t kWindowEventResize = 1;
 constexpr uint32_t kWindowEventClose = 2;
 constexpr uint32_t kWindowEventKey = 3;
@@ -1755,6 +1788,293 @@ const IrResource* find_resource_by_binding(const ParsedIr& ir, uint32_t binding)
     }
 
     return nullptr;
+}
+
+struct BufferUsageSummary {
+    std::unordered_set<uint32_t> reads;
+    std::unordered_set<uint32_t> writes;
+};
+
+BufferUsageSummary collect_ad_buffer_usage(const ParsedIr& ir) {
+    BufferUsageSummary usage;
+
+    auto mark_read_binding = [&](uint32_t binding) {
+        const auto* resource = find_resource_by_binding(ir, binding);
+        if (resource != nullptr && resource->kind == kIrResourceKindBuffer) {
+            usage.reads.insert(binding);
+        }
+    };
+    auto mark_write_binding = [&](uint32_t binding) {
+        const auto* resource = find_resource_by_binding(ir, binding);
+        if (resource != nullptr && resource->kind == kIrResourceKindBuffer) {
+            usage.writes.insert(binding);
+        }
+    };
+    auto mark_read_name = [&](const std::string& name) {
+        const auto* resource = find_resource_by_name(ir, name);
+        if (resource != nullptr && resource->kind == kIrResourceKindBuffer) {
+            usage.reads.insert(resource->binding);
+        }
+    };
+    auto mark_write_name = [&](const std::string& name) {
+        const auto* resource = find_resource_by_name(ir, name);
+        if (resource != nullptr && resource->kind == kIrResourceKindBuffer) {
+            usage.writes.insert(resource->binding);
+        }
+    };
+
+    std::function<void(uint32_t, const std::vector<IrExpressionNode>&, const std::vector<uint32_t>&)> collect_legacy_expr;
+    collect_legacy_expr = [&](uint32_t node_index, const std::vector<IrExpressionNode>& nodes,
+                              const std::vector<uint32_t>& args) {
+        if (node_index >= nodes.size()) {
+            return;
+        }
+
+        const auto& node = nodes[node_index];
+        if (node.kind == 1) {
+            mark_read_binding(node.resource_binding);
+        }
+        if (node.left_node_index != UINT32_MAX) {
+            collect_legacy_expr(node.left_node_index, nodes, args);
+        }
+        if (node.right_node_index != UINT32_MAX) {
+            collect_legacy_expr(node.right_node_index, nodes, args);
+        }
+        if (node.first_argument_index != UINT32_MAX && node.first_argument_index <= args.size() &&
+            node.argument_count <= args.size() - node.first_argument_index) {
+            for (uint32_t i = 0; i < node.argument_count; ++i) {
+                collect_legacy_expr(args[node.first_argument_index + i], nodes, args);
+            }
+        }
+    };
+
+    for (const auto& assignment : ir.elementwise_assignments) {
+        mark_write_binding(assignment.destination_binding);
+        mark_read_binding(assignment.left_binding);
+        if (assignment.right_binding != UINT32_MAX) {
+            mark_read_binding(assignment.right_binding);
+        }
+    }
+    for (const auto& assignment : ir.expression_assignments) {
+        mark_write_binding(assignment.destination_binding);
+        collect_legacy_expr(assignment.root_node_index, ir.expression_nodes, ir.expression_argument_indices);
+    }
+    for (const auto& assignment : ir.compound_assignments) {
+        mark_write_binding(assignment.destination_binding);
+        mark_read_binding(assignment.destination_binding);
+        collect_legacy_expr(assignment.root_node_index, ir.compound_assignment_nodes, ir.compound_assignment_args);
+    }
+    for (const auto& expression : ir.control_flow_expressions) {
+        collect_legacy_expr(expression.root_node_index, ir.control_flow_nodes, ir.control_flow_argument_indices);
+    }
+
+    if (!ir.has_section7) {
+        return usage;
+    }
+
+    const auto& typed = ir.typed_module;
+    auto typed_string = [&](uint32_t id) -> const std::string* {
+        return id < typed.strings.size() ? &typed.strings[id] : nullptr;
+    };
+
+    std::function<void(uint32_t)> collect_typed_expr;
+    std::function<void(uint32_t)> collect_lvalue_read;
+    std::function<void(uint32_t)> collect_lvalue_write;
+    std::function<void(uint32_t)> collect_statement;
+
+    auto collect_typed_args = [&](const Feather::TypedIR::Expression& expr) {
+        if (expr.first_argument == Feather::TypedIR::NoIndex ||
+            expr.first_argument > typed.arguments.size() ||
+            expr.argument_count > typed.arguments.size() - expr.first_argument) {
+            return;
+        }
+
+        for (uint32_t i = 0; i < expr.argument_count; ++i) {
+            collect_typed_expr(typed.arguments[expr.first_argument + i]);
+        }
+    };
+
+    collect_typed_expr = [&](uint32_t expression_id) {
+        if (expression_id >= typed.expressions.size()) {
+            return;
+        }
+
+        const auto& expr = typed.expressions[expression_id];
+        switch (expr.kind) {
+        case kTypedExpressionResourceElement:
+            if (const auto* name = typed_string(expr.name_id)) {
+                mark_read_name(*name);
+            }
+            collect_typed_expr(expr.a);
+            break;
+        case kTypedExpressionUnary:
+        case kTypedExpressionConversion:
+        case kTypedExpressionSwizzle:
+        case kTypedExpressionMemberAccess:
+            collect_typed_expr(expr.a);
+            break;
+        case kTypedExpressionBinary:
+        case kTypedExpressionComparison:
+        case kTypedExpressionLogical:
+        case kTypedExpressionIndexAccess:
+        case kTypedExpressionMatrixColumn:
+            collect_typed_expr(expr.a);
+            collect_typed_expr(expr.b);
+            break;
+        case kTypedExpressionConditional:
+            collect_typed_expr(expr.a);
+            collect_typed_expr(expr.b);
+            collect_typed_expr(expr.c);
+            break;
+        case kTypedExpressionConstructor:
+        case kTypedExpressionIntrinsic:
+        case kTypedExpressionCallableCall:
+        case kTypedExpressionTextureSample:
+            collect_typed_args(expr);
+            break;
+        case kTypedExpressionAtomic:
+            collect_lvalue_read(expr.a);
+            collect_lvalue_write(expr.a);
+            collect_typed_args(expr);
+            break;
+        default:
+            break;
+        }
+    };
+
+    collect_lvalue_read = [&](uint32_t lvalue_id) {
+        if (lvalue_id >= typed.lvalues.size()) {
+            return;
+        }
+
+        const auto& lvalue = typed.lvalues[lvalue_id];
+        switch (lvalue.kind) {
+        case kTypedLValueResourceElement:
+            if (const auto* name = typed_string(lvalue.name_id)) {
+                mark_read_name(*name);
+            }
+            collect_typed_expr(lvalue.a);
+            break;
+        case kTypedLValueField:
+        case kTypedLValueMemberAccess:
+            collect_lvalue_read(lvalue.a);
+            break;
+        case kTypedLValueIndexAccess:
+            collect_lvalue_read(lvalue.a);
+            collect_typed_expr(lvalue.b);
+            break;
+        case kTypedLValueSwizzle:
+        case kTypedLValueMatrixColumn:
+            collect_typed_expr(lvalue.a);
+            collect_typed_expr(lvalue.b);
+            break;
+        case kTypedLValueSharedMemoryElement:
+            collect_typed_expr(lvalue.a);
+            break;
+        default:
+            break;
+        }
+    };
+
+    collect_lvalue_write = [&](uint32_t lvalue_id) {
+        if (lvalue_id >= typed.lvalues.size()) {
+            return;
+        }
+
+        const auto& lvalue = typed.lvalues[lvalue_id];
+        switch (lvalue.kind) {
+        case kTypedLValueResourceElement:
+            if (const auto* name = typed_string(lvalue.name_id)) {
+                mark_write_name(*name);
+            }
+            collect_typed_expr(lvalue.a);
+            break;
+        case kTypedLValueField:
+        case kTypedLValueMemberAccess:
+            collect_lvalue_write(lvalue.a);
+            break;
+        case kTypedLValueIndexAccess:
+            collect_lvalue_write(lvalue.a);
+            collect_typed_expr(lvalue.b);
+            break;
+        case kTypedLValueSwizzle:
+        case kTypedLValueMatrixColumn:
+            collect_typed_expr(lvalue.a);
+            collect_typed_expr(lvalue.b);
+            break;
+        case kTypedLValueSharedMemoryElement:
+            collect_typed_expr(lvalue.a);
+            break;
+        default:
+            break;
+        }
+    };
+
+    collect_statement = [&](uint32_t statement_id) {
+        if (statement_id >= typed.statements.size()) {
+            return;
+        }
+
+        const auto& statement = typed.statements[statement_id];
+        switch (statement.kind) {
+        case kTypedStatementBlock:
+            if (statement.first_child != Feather::TypedIR::NoIndex &&
+                statement.first_child <= typed.children.size() &&
+                statement.child_count <= typed.children.size() - statement.first_child) {
+                for (uint32_t i = 0; i < statement.child_count; ++i) {
+                    collect_statement(typed.children[statement.first_child + i]);
+                }
+            }
+            break;
+        case kTypedStatementLocalDeclaration:
+            collect_typed_expr(statement.a);
+            break;
+        case kTypedStatementAssignment:
+            collect_lvalue_write(statement.a);
+            collect_typed_expr(statement.b);
+            break;
+        case kTypedStatementCompoundAssignment:
+            collect_lvalue_read(statement.a);
+            collect_lvalue_write(statement.a);
+            collect_typed_expr(statement.b);
+            break;
+        case kTypedStatementIf:
+            collect_typed_expr(statement.a);
+            collect_statement(statement.b);
+            collect_statement(statement.c);
+            break;
+        case kTypedStatementFor:
+            collect_statement(statement.a);
+            collect_typed_expr(statement.b);
+            collect_statement(statement.c);
+            collect_statement(statement.op);
+            break;
+        case kTypedStatementWhile:
+            collect_typed_expr(statement.a);
+            collect_statement(statement.b);
+            break;
+        case kTypedStatementDoWhile:
+            collect_statement(statement.a);
+            collect_typed_expr(statement.b);
+            break;
+        case kTypedStatementReturn:
+        case kTypedStatementExpression:
+            collect_typed_expr(statement.a);
+            break;
+        case kTypedStatementIncrementDecrement:
+            collect_lvalue_read(statement.a);
+            collect_lvalue_write(statement.a);
+            break;
+        default:
+            break;
+        }
+    };
+
+    for (const auto& function : typed.functions) {
+        collect_statement(function.body_statement_index);
+    }
+
+    return usage;
 }
 
 std::string trim_copy(const std::string& source) {
@@ -5066,8 +5386,14 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
     for (const auto& gradient : next_gradients) {
         parameter_bindings.insert(gradient.source_binding);
     }
+
+    const auto buffer_usage = collect_ad_buffer_usage(ir);
     for (const auto& resource : ir.resources) {
-        if (resource.kind != kIrResourceKindBuffer || parameter_bindings.count(resource.binding) != 0) {
+        if (resource.kind != kIrResourceKindBuffer ||
+            resource.access != 3 ||
+            parameter_bindings.count(resource.binding) != 0 ||
+            buffer_usage.reads.count(resource.binding) == 0 ||
+            buffer_usage.writes.count(resource.binding) == 0) {
             continue;
         }
         const auto bound = kernel.buffers.find(resource.binding);
