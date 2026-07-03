@@ -180,6 +180,20 @@ The first pass clears and fills the floor. The second pass loads that color targ
 
 With MSAA enabled, Feather keeps an internal multisampled color attachment for each resolved render target. A later `ColorLoadOp.Load` draw against the same target loads that multisampled attachment, preserves the earlier pass, rasterizes more geometry, and resolves back into the target at the end of the draw.
 
+## Uniform Layout
+
+Graphics shader constructor parameters of type `Uniform<T>` are uploaded as push constants. Feather handles the GPU layout for you, including Vulkan's 16-byte alignment requirement for GLSL `vec3` members. You can pass multiple `Uniform<float3>` values mixed with scalar uniforms without adding padding fields in C#:
+
+```csharp
+new RectLightFS(
+    new Uniform<float>(roughness),
+    new Uniform<float3>(light.P0),
+    new Uniform<float3>(light.P1),
+    new Uniform<float>(intensity));
+```
+
+This is useful for rectangle lights, camera vectors, and other compact graphics state that changes per draw.
+
 ## Pipeline State
 
 `GraphicsPipelineDesc` controls fixed-function state:

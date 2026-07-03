@@ -65,6 +65,108 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedGraphicsPipelineAlignsMixedFloat3UniformPushConstants()
+    {
+        var descriptor = GetGraphicsDescriptor<GeneratedVertexShader, GeneratedMixedFloat3UniformFragmentShader, float4>();
+        var pushConstants = descriptor.PushConstants.ToDictionary(static pushConstant => pushConstant.Name);
+
+        Assert.Equal(8, pushConstants.Count);
+        Assert.Equal(0u, pushConstants["aspect"].Offset);
+        Assert.Equal(4u, pushConstants["roughness"].Offset);
+        Assert.Equal(16u, pushConstants["lightP0"].Offset);
+        Assert.Equal(32u, pushConstants["lightP1"].Offset);
+        Assert.Equal(48u, pushConstants["lightP2"].Offset);
+        Assert.Equal(64u, pushConstants["lightP3"].Offset);
+        Assert.Equal(76u, pushConstants["intensity"].Offset);
+        Assert.Equal(80u, pushConstants["twoSided"].Offset);
+        Assert.Equal(12u, pushConstants["lightP0"].Size);
+        Assert.Equal(12u, pushConstants["lightP1"].Size);
+        Assert.Equal(12u, pushConstants["lightP2"].Size);
+        Assert.Equal(12u, pushConstants["lightP3"].Size);
+
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 16)]);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedMixedFloat3UniformFragmentShader, float4>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "MixedFloat3UniformPushConstants" });
+
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedMixedFloat3UniformFragmentShader(
+                new Uniform<float>(0.10f),
+                new Uniform<float>(0.20f),
+                new Uniform<float3>(new float3(0.01f, 0.02f, 0.03f)),
+                new Uniform<float3>(new float3(0.04f, 0.05f, 0.06f)),
+                new Uniform<float3>(new float3(0.07f, 0.08f, 0.09f)),
+                new Uniform<float3>(new float3(0.11f, 0.12f, 0.13f)),
+                new Uniform<float>(0.14f),
+                new Uniform<int>(1)),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[16];
+        target.Read(readback);
+        var expected = new float4(0.15f, 0.21f, 0.34f, 1.0f);
+        Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedGraphicsPipelinePreservesAlignedFloat3UniformsAcrossVertexAndFragmentStages()
+    {
+        var descriptor = GetGraphicsDescriptor<GeneratedCrossStageFloat3UniformVertexShader, GeneratedCrossStageFloat3UniformFragmentShader, GeneratedCrossStageFloat3Varyings>();
+        var pushConstants = descriptor.PushConstants.ToDictionary(static pushConstant => pushConstant.Name);
+
+        Assert.Equal(7, pushConstants.Count);
+        Assert.Equal(0u, pushConstants["fragmentScalar0"].Offset);
+        Assert.Equal(4u, pushConstants["vertexScalar0"].Offset);
+        Assert.Equal(16u, pushConstants["fragmentVector0"].Offset);
+        Assert.Equal(32u, pushConstants["vertexVector"].Offset);
+        Assert.Equal(48u, pushConstants["fragmentVector1"].Offset);
+        Assert.Equal(60u, pushConstants["vertexScalar1"].Offset);
+        Assert.Equal(64u, pushConstants["fragmentScalar1"].Offset);
+        Assert.Equal(12u, pushConstants["fragmentVector0"].Size);
+        Assert.Equal(12u, pushConstants["vertexVector"].Size);
+        Assert.Equal(12u, pushConstants["fragmentVector1"].Size);
+
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 16)]);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedCrossStageFloat3UniformVertexShader, GeneratedCrossStageFloat3UniformFragmentShader, GeneratedCrossStageFloat3Varyings>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "CrossStageFloat3UniformPushConstants" });
+
+        pipeline.Draw(
+            new GeneratedCrossStageFloat3UniformVertexShader(
+                vertices.AsReadOnly(),
+                new Uniform<float>(0.01f),
+                new Uniform<float3>(new float3(0.02f, 0.03f, 0.04f)),
+                new Uniform<float>(0.05f)),
+            new GeneratedCrossStageFloat3UniformFragmentShader(
+                new Uniform<float>(0.06f),
+                new Uniform<float3>(new float3(0.07f, 0.08f, 0.09f)),
+                new Uniform<float3>(new float3(0.10f, 0.11f, 0.12f)),
+                new Uniform<float>(0.13f)),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[16];
+        target.Read(readback);
+        var expected = new float4(0.21f, 0.14f, 0.36f, 1.0f);
+        Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineUsesEntryAttributedShaders()
     {
         using var vertices = GPU.CreateBuffer<float4>(
@@ -1406,6 +1508,12 @@ public class GeneratedGraphicsPipelineTests
            System.Math.Abs(actual.Z - expected.Z) <= tolerance &&
            System.Math.Abs(actual.W - expected.W) <= tolerance;
 
+    private static GraphicsPipelineDescriptor GetGraphicsDescriptor<TVertexShader, TFragmentShader, TVaryings>()
+        where TVertexShader : struct, IVertexShader<TVaryings>, IGeneratedGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>
+        where TFragmentShader : struct, IGeneratedGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>
+        where TVaryings : unmanaged
+        => TVertexShader.Descriptor;
+
     private readonly record struct Rgba32(byte R, byte G, byte B, byte A);
 }
 
@@ -1442,6 +1550,75 @@ public readonly partial struct GeneratedUniformFragmentShader(SamplerState sampl
     public float4 Execute(float4 input)
     {
         return input;
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedMixedFloat3UniformFragmentShader(
+    Uniform<float> aspect,
+    Uniform<float> roughness,
+    Uniform<float3> lightP0,
+    Uniform<float3> lightP1,
+    Uniform<float3> lightP2,
+    Uniform<float3> lightP3,
+    Uniform<float> intensity,
+    Uniform<int> twoSided) : IFragmentShader<float4>
+{
+    public float4 Execute(float4 input)
+    {
+        var alpha = twoSided.Value > 0 ? 1.0f : 0.25f;
+        return new float4(
+            lightP0.Value.X + lightP1.Value.Y + lightP2.Value.Z,
+            lightP3.Value.X + aspect.Value,
+            roughness.Value + intensity.Value,
+            alpha);
+    }
+}
+
+[GpuStruct]
+public partial struct GeneratedCrossStageFloat3Varyings
+{
+    [Position]
+    public float4 Position;
+
+    public float4 Data;
+}
+
+[VertexShader]
+public readonly partial struct GeneratedCrossStageFloat3UniformVertexShader(
+    ReadOnlyBuffer<float4> vertices,
+    Uniform<float> vertexScalar0,
+    Uniform<float3> vertexVector,
+    Uniform<float> vertexScalar1) : IVertexShader<GeneratedCrossStageFloat3Varyings>
+{
+    public GeneratedCrossStageFloat3Varyings Execute()
+    {
+        return new GeneratedCrossStageFloat3Varyings
+        {
+            Position = vertices[VertexIds.Index],
+            Data = new float4(
+                vertexScalar0.Value + vertexVector.Value.X,
+                vertexVector.Value.Y + vertexScalar1.Value,
+                vertexVector.Value.Z,
+                1.0f)
+        };
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedCrossStageFloat3UniformFragmentShader(
+    Uniform<float> fragmentScalar0,
+    Uniform<float3> fragmentVector0,
+    Uniform<float3> fragmentVector1,
+    Uniform<float> fragmentScalar1) : IFragmentShader<GeneratedCrossStageFloat3Varyings>
+{
+    public float4 Execute(GeneratedCrossStageFloat3Varyings input)
+    {
+        return new float4(
+            input.Data.X + fragmentVector0.Value.X + fragmentVector1.Value.Y,
+            input.Data.Y + fragmentScalar0.Value,
+            input.Data.Z + fragmentVector0.Value.Z + fragmentVector1.Value.X + fragmentScalar1.Value,
+            input.Data.W);
     }
 }
 

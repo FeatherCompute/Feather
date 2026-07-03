@@ -2661,7 +2661,10 @@ size_t push_constant_type_size(const ParsedIr& ir, const IrResource& resource) {
     if (normalized_type == "Feather.Math.bool2") {
         return 8;
     }
-    if (normalized_type == "Feather.Math.bool3" || normalized_type == "Feather.Math.bool4") {
+    if (normalized_type == "Feather.Math.bool3") {
+        return 12;
+    }
+    if (normalized_type == "Feather.Math.bool4") {
         return 16;
     }
     if (normalized_type == "Feather.Math.float2x2") {
@@ -6429,6 +6432,9 @@ bool same_graphics_resource(const GraphicsPushConstantLayoutEntry& entry, uint32
     return entry.binding == binding && entry.name == name;
 }
 
+const IrResource* find_graphics_resource_by_binding_and_name(const ParsedIr& ir, uint32_t binding,
+                                                             const std::string& name);
+
 bool append_graphics_push_constants(const ParsedIr& ir, std::vector<GraphicsPushConstantLayoutEntry>* entries) {
     if (entries == nullptr) {
         return false;
@@ -6484,6 +6490,23 @@ bool build_graphics_push_constant_layout(const ParsedIr& vertex_ir, const Parsed
 
     size_t offset = 0;
     for (auto& entry : *entries) {
+        const ParsedIr* resource_ir = &vertex_ir;
+        const auto* resource = find_graphics_resource_by_binding_and_name(vertex_ir, entry.binding, entry.name);
+        if (resource == nullptr) {
+            resource_ir = &fragment_ir;
+            resource = find_graphics_resource_by_binding_and_name(fragment_ir, entry.binding, entry.name);
+        }
+
+        if (resource == nullptr) {
+            return false;
+        }
+
+        const auto alignment = push_constant_type_alignment(*resource_ir, *resource);
+        if (alignment == 0) {
+            return false;
+        }
+
+        offset = align_offset(offset, alignment);
         entry.offset = offset;
         offset += entry.size;
     }

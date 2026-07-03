@@ -78,7 +78,7 @@ Create or open a C# project that references the package:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="FeatherCompute" Version="0.1.0-preview.15" />
+  <PackageReference Include="FeatherCompute" Version="0.1.0-preview.16" />
 </ItemGroup>
 ```
 

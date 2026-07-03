@@ -73,6 +73,26 @@ This clears before the first pass, then preserves the first pass anywhere the se
 
 For MSAA pipelines, Feather preserves an internal multisampled color attachment per resolved render target, so a later `Load` draw against the same target keeps previous multisampled color before resolving again.
 
+## Graphics Uniforms
+
+Graphics shaders can use `Uniform<T>` constructor parameters for small per-draw values. Feather packs these values into a Vulkan push-constant block. Vector uniforms such as `Uniform<float3>` keep the public three-component API, while the generated layout aligns the corresponding GLSL `vec3` member to a 16-byte boundary. Scalars and multiple `float3` uniforms can be mixed without manual padding:
+
+```csharp
+[FragmentShader]
+public readonly partial struct RectLightFS(
+    Uniform<float> roughness,
+    Uniform<float3> lightP0,
+    Uniform<float3> lightP1,
+    Uniform<float> intensity) : IFragmentShader<Varyings>
+{
+    public float4 Execute(Varyings input)
+    {
+        var edge = lightP1.Value - lightP0.Value;
+        return new float4(edge * intensity.Value, 1);
+    }
+}
+```
+
 ## Pipeline State
 
 `GraphicsPipelineDesc`:
