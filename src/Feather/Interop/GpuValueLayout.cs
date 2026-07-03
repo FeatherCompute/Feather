@@ -348,7 +348,7 @@ internal static class EasyGpuBuiltinLayout<T>
 
         if (type == typeof(float3x3))
         {
-            layout = new BlittableGpuValueLayout<T>(cpuSize, 48, 48, 16, bufferCopySize: 36, valueCopySize: 36);
+            layout = (IGpuValueLayout<T>)(object)new Float3x3GpuValueLayout();
             return true;
         }
 
@@ -361,6 +361,71 @@ internal static class EasyGpuBuiltinLayout<T>
         layout = null!;
         return false;
     }
+}
+
+internal sealed class Float3x3GpuValueLayout : IGpuValueLayout<float3x3>
+{
+    public int CpuSizeInBytes => Unsafe.SizeOf<float3x3>();
+
+    public int BufferElementStride => 48;
+
+    public int FieldSizeInBytes => 48;
+
+    public int Alignment => 16;
+
+    public bool RequiresBufferRepacking => true;
+
+    public void PackBuffer(ReadOnlySpan<float3x3> source, Span<byte> destination)
+    {
+        destination.Clear();
+        for (var i = 0; i < source.Length; i++)
+        {
+            Pack(source[i], destination.Slice(checked(i * BufferElementStride), FieldSizeInBytes));
+        }
+    }
+
+    public void UnpackBuffer(ReadOnlySpan<byte> source, Span<float3x3> destination)
+    {
+        for (var i = 0; i < destination.Length; i++)
+        {
+            destination[i] = Unpack(source.Slice(checked(i * BufferElementStride), FieldSizeInBytes));
+        }
+    }
+
+    public void PackValue(in float3x3 value, Span<byte> destination)
+    {
+        destination.Clear();
+        Pack(value, destination);
+    }
+
+    public float3x3 UnpackValue(ReadOnlySpan<byte> source)
+        => Unpack(source);
+
+    private static void Pack(float3x3 value, Span<byte> destination)
+    {
+        WriteFloat3(destination.Slice(0, 12), value.C0);
+        WriteFloat3(destination.Slice(16, 12), value.C1);
+        WriteFloat3(destination.Slice(32, 12), value.C2);
+    }
+
+    private static float3x3 Unpack(ReadOnlySpan<byte> source)
+        => new(
+            ReadFloat3(source.Slice(0, 12)),
+            ReadFloat3(source.Slice(16, 12)),
+            ReadFloat3(source.Slice(32, 12)));
+
+    private static void WriteFloat3(Span<byte> destination, float3 value)
+    {
+        BinaryPrimitives.WriteSingleLittleEndian(destination.Slice(0, 4), value.X);
+        BinaryPrimitives.WriteSingleLittleEndian(destination.Slice(4, 4), value.Y);
+        BinaryPrimitives.WriteSingleLittleEndian(destination.Slice(8, 4), value.Z);
+    }
+
+    private static float3 ReadFloat3(ReadOnlySpan<byte> source)
+        => new(
+            BinaryPrimitives.ReadSingleLittleEndian(source.Slice(0, 4)),
+            BinaryPrimitives.ReadSingleLittleEndian(source.Slice(4, 4)),
+            BinaryPrimitives.ReadSingleLittleEndian(source.Slice(8, 4)));
 }
 
 internal sealed class BoolGpuValueLayout : IGpuValueLayout<bool>

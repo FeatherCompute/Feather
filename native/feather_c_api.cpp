@@ -2445,6 +2445,11 @@ GPU::IR::Type easygpu_module_type(const std::string& type_name) {
         return GPU::IR::Type::Float4();
     }
 
+    if (type_name == "Feather.Math.float3x3" || type_name == "global::Feather.Math.float3x3" ||
+        type_name == "float3x3") {
+        return GPU::IR::Type::Float3x3();
+    }
+
     // GpuStruct types with 4 byte fields (Rgba32 etc.) → vec4 in GLSL.
     if (type_name.find("Rgba32") != std::string::npos ||
         type_name.find("Rgba") != std::string::npos) {
@@ -5051,9 +5056,29 @@ bool can_dispatch_easygpu_buffer_kernel(const KernelState& kernel) {
         if (resource.kind == kIrResourceKindPushConstant) {
             size_t offset = 0;
             size_t size = 0;
-            if (!is_easygpu_push_constant_resource(ir, resource.binding) ||
-                !find_push_constant_offset(ir, resource.binding, &offset, &size) ||
-                offset + size > kernel.push_constants.size()) {
+            const auto* type = get_string(ir, resource.element_type_string_id);
+            if (!is_easygpu_push_constant_resource(ir, resource.binding)) {
+                fail(FE_ERROR_UNSUPPORTED,
+                     "EasyGPU typed dispatch does not support push constant binding " +
+                         std::to_string(resource.binding) + " of type '" +
+                         (type == nullptr ? std::string("<unknown>") : *type) + "'.");
+                return false;
+            }
+
+            if (!find_push_constant_offset(ir, resource.binding, &offset, &size)) {
+                fail(FE_ERROR_UNSUPPORTED,
+                     "EasyGPU typed dispatch could not compute a push constant range for binding " +
+                         std::to_string(resource.binding) + " of type '" +
+                         (type == nullptr ? std::string("<unknown>") : *type) + "'.");
+                return false;
+            }
+
+            if (offset + size > kernel.push_constants.size()) {
+                fail(FE_ERROR_UNSUPPORTED,
+                     "EasyGPU typed dispatch push constant binding " + std::to_string(resource.binding) +
+                         " requires bytes [" + std::to_string(offset) + ", " +
+                         std::to_string(offset + size) + ") but only " +
+                         std::to_string(kernel.push_constants.size()) + " bytes were uploaded.");
                 return false;
             }
 
