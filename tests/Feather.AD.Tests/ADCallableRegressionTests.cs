@@ -169,6 +169,69 @@ public class ADCallableRegressionTests
     }
 
     [Fact]
+    public void ReadOnlyFloat2BufferSwizzlesDoNotBecomeGradientTargets()
+    {
+        var sample = new float2(0.2f, 0.7f);
+        const float p = 0.4f;
+        using var samples = GPU.CreateBuffer<float2>([sample]);
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new ReadOnlyFloat2SwizzleAdKernel(
+            samples.AsReadOnly(),
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float expectedLoss = (sample.X * p) + (sample.Y * p * p);
+        float expectedGradient = sample.X + (2f * sample.Y * p);
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-5f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
+        Assert.False(ad.Gradients.Contains("samples"));
+
+        string backward = ad.GetBackwardGLSL();
+        Assert.DoesNotContain("grad_samples", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_fe_0", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_fe_0[i]", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("vec2(1.0, 0.0)", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("vec2(0.0, 1.0)", backward, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadOnlyFloat2BufferSwizzlesThroughNestedCallablesDoNotBecomeGradientTargets()
+    {
+        var sample = new float2(0.25f, 0.6f);
+        const float p = 0.35f;
+        using var samples = GPU.CreateBuffer<float2>([sample]);
+        using var parameters = GPU.CreateBuffer<float>([p]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new ReadOnlyFloat2NestedCallableAdKernel(
+            samples.AsReadOnly(),
+            parameters.AsReadWrite(),
+            loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        float value = (sample.X * p) + (sample.Y * p * p);
+        float expectedLoss = value * value;
+        float expectedGradient = 2f * value * (sample.X + (2f * sample.Y * p));
+
+        AssertNear(expectedLoss, loss.ToArray()[0], 1e-5f);
+        AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
+        Assert.False(ad.Gradients.Contains("samples"));
+
+        string backward = ad.GetBackwardGLSL();
+        Assert.DoesNotContain("grad_samples", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_fe_0", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("grad_fe_0[i]", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("vec2(1.0, 0.0)", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("vec2(0.0, 1.0)", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("+()", backward, StringComparison.Ordinal);
+        Assert.DoesNotContain("d_(", backward, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CallableLocalNamedLikeGlslIntrinsicDoesNotRemapFunctionName()
     {
         const float p = 0.4f;
@@ -599,6 +662,23 @@ public static class NestedSwizzleArgumentShaderLibrary
     }
 }
 
+[ShaderLibrary]
+public static class ReadOnlySampleAdShaderLibrary
+{
+    [Callable]
+    public static float Outer(float2 sample, float parameter)
+    {
+        float model = (sample.X * parameter) + (sample.Y * parameter * parameter);
+        return Square(model);
+    }
+
+    [Callable]
+    public static float Square(float value)
+    {
+        return value * value;
+    }
+}
+
 [Kernel]
 [ThreadGroupSize(1, 1, 1)]
 [AutoDiff]
@@ -652,6 +732,45 @@ public readonly partial struct ReadOnlyTargetMisLikeAdKernel(
         float denominator = ShaderMath.Max(pdfs[0] + model, 1e-5f);
         float y = error2 * error / denominator;
         loss[0] = y;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(y);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct ReadOnlyFloat2SwizzleAdKernel(
+    ReadOnlyBuffer<float2> samples,
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float2 sample = samples[i];
+        float p = parameters[0];
+        float y = (sample.X * p) + (sample.Y * p * p);
+        loss[i] = y;
+        ADMarker.Parameter(parameters[0]);
+        ADMarker.Loss(y);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct ReadOnlyFloat2NestedCallableAdKernel(
+    ReadOnlyBuffer<float2> samples,
+    ReadWriteBuffer<float> parameters,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float p = parameters[0];
+        float y = ReadOnlySampleAdShaderLibrary.Outer(samples[i], p);
+        loss[i] = y;
         ADMarker.Parameter(parameters[0]);
         ADMarker.Loss(y);
     }
