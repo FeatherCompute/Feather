@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.1.0</VersionPrefix>
-    <VersionSuffix>preview.18</VersionSuffix>
+    <VersionSuffix>preview.19</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -18,7 +18,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds typed compute support for Uniform&lt;float3x3&gt; push constants, fixes float3x3 push-constant packing to use 16-byte column stride, and improves typed push-constant dispatch diagnostics.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds complete square matrix uniform push-constant support for float2x2, float3x3, and float4x4 across typed compute and graphics paths, including 16-byte matrix column layout packing.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true'">

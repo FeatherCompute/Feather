@@ -57,7 +57,7 @@ internal static class GpuStructLayoutRules
             "global::Feather.Math.int2" or "global::Feather.Math.float2" or "global::Feather.Math.bool2" => new GpuStructTypeLayout(8, 8),
             "global::Feather.Math.int3" or "global::Feather.Math.float3" or "global::Feather.Math.bool3" => new GpuStructTypeLayout(12, 16),
             "global::Feather.Math.int4" or "global::Feather.Math.float4" or "global::Feather.Math.bool4" => new GpuStructTypeLayout(16, 16),
-            "global::Feather.Math.float2x2" => new GpuStructTypeLayout(32, 16),
+            "global::Feather.Math.float2x2" => new GpuStructTypeLayout(16, 8),
             "global::Feather.Math.float3x3" => new GpuStructTypeLayout(48, 16),
             "global::Feather.Math.float4x4" => new GpuStructTypeLayout(64, 16),
             _ => GetNestedStructLayout(type)

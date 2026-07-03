@@ -2445,9 +2445,19 @@ GPU::IR::Type easygpu_module_type(const std::string& type_name) {
         return GPU::IR::Type::Float4();
     }
 
+    if (type_name == "Feather.Math.float2x2" || type_name == "global::Feather.Math.float2x2" ||
+        type_name == "float2x2") {
+        return GPU::IR::Type::Float2x2();
+    }
+
     if (type_name == "Feather.Math.float3x3" || type_name == "global::Feather.Math.float3x3" ||
         type_name == "float3x3") {
         return GPU::IR::Type::Float3x3();
+    }
+
+    if (type_name == "Feather.Math.float4x4" || type_name == "global::Feather.Math.float4x4" ||
+        type_name == "float4x4") {
+        return GPU::IR::Type::Float4x4();
     }
 
     // GpuStruct types with 4 byte fields (Rgba32 etc.) → vec4 in GLSL.
@@ -2672,13 +2682,13 @@ size_t push_constant_type_size(const ParsedIr& ir, const IrResource& resource) {
     if (normalized_type == "Feather.Math.bool4") {
         return 16;
     }
-    if (normalized_type == "Feather.Math.float2x2") {
-        return 32;
+    if (normalized_type == "Feather.Math.float2x2" || normalized_type == "float2x2") {
+        return 16;
     }
-    if (normalized_type == "Feather.Math.float3x3") {
+    if (normalized_type == "Feather.Math.float3x3" || normalized_type == "float3x3") {
         return 48;
     }
-    if (normalized_type == "Feather.Math.float4x4") {
+    if (normalized_type == "Feather.Math.float4x4" || normalized_type == "float4x4") {
         return 64;
     }
 
@@ -2710,9 +2720,12 @@ size_t push_constant_type_alignment(const ParsedIr& ir, const IrResource& resour
         return 8;
     }
     if (normalized_type == "Feather.Math.bool3" || normalized_type == "Feather.Math.bool4" ||
-        normalized_type == "Feather.Math.float2x2" || normalized_type == "Feather.Math.float3x3" ||
-        normalized_type == "Feather.Math.float4x4") {
+        normalized_type == "Feather.Math.float3x3" || normalized_type == "float3x3" ||
+        normalized_type == "Feather.Math.float4x4" || normalized_type == "float4x4") {
         return 16;
+    }
+    if (normalized_type == "Feather.Math.float2x2" || normalized_type == "float2x2") {
+        return 8;
     }
 
     const auto float_vector_components = float_vector_component_count(*type);
@@ -7527,6 +7540,12 @@ bool graphics_find_type_by_name(const Feather::TypedIR::Module& module, const st
             (type_name == "Feather.Math.float4" && glsl_type == "vec4") ||
             (type_name == "global::Feather.Math.float4" && glsl_type == "vec4") ||
             (type_name == "float4" && glsl_type == "vec4") ||
+            (type_name == "Feather.Math.float2x2" && glsl_type == "mat2") ||
+            (type_name == "global::Feather.Math.float2x2" && glsl_type == "mat2") ||
+            (type_name == "float2x2" && glsl_type == "mat2") ||
+            (type_name == "Feather.Math.float3x3" && glsl_type == "mat3") ||
+            (type_name == "global::Feather.Math.float3x3" && glsl_type == "mat3") ||
+            (type_name == "float3x3" && glsl_type == "mat3") ||
             (type_name == "Feather.Math.float4x4" && glsl_type == "mat4") ||
             (type_name == "global::Feather.Math.float4x4" && glsl_type == "mat4") ||
             (type_name == "float4x4" && glsl_type == "mat4")) {

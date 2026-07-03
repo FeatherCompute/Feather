@@ -342,7 +342,7 @@ internal static class EasyGpuBuiltinLayout<T>
 
         if (type == typeof(float2x2))
         {
-            layout = new BlittableGpuValueLayout<T>(cpuSize, 32, 32, 16, bufferCopySize: 16, valueCopySize: 16);
+            layout = new BlittableGpuValueLayout<T>(cpuSize, 16, 16, 8);
             return true;
         }
 

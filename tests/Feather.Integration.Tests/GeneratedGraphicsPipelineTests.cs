@@ -167,6 +167,56 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedGraphicsPipelineBindsSquareMatrixUniformPushConstants()
+    {
+        var descriptor = GetGraphicsDescriptor<GeneratedMatrixUniformVertexShader, GeneratedMatrixUniformFragmentShader, GeneratedMatrixUniformVaryings>();
+        var pushConstants = descriptor.PushConstants.ToDictionary(static pushConstant => pushConstant.Name);
+
+        Assert.Equal(5, pushConstants.Count);
+        Assert.Equal(16u, pushConstants["vertexMatrix2"].Size);
+        Assert.Equal(64u, pushConstants["vertexMatrix4"].Size);
+        Assert.Equal(16u, pushConstants["fragmentMatrix2"].Size);
+        Assert.Equal(48u, pushConstants["fragmentMatrix3"].Size);
+        Assert.Equal(4u, pushConstants["scalar"].Size);
+        Assert.Equal(0u, pushConstants["vertexMatrix2"].Offset % 8u);
+        Assert.Equal(0u, pushConstants["vertexMatrix4"].Offset % 16u);
+        Assert.Equal(0u, pushConstants["fragmentMatrix2"].Offset % 8u);
+        Assert.Equal(0u, pushConstants["fragmentMatrix3"].Offset % 16u);
+
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(4, 4, PixelFormat.Rgba32Float);
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 16)]);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedMatrixUniformVertexShader, GeneratedMatrixUniformFragmentShader, GeneratedMatrixUniformVaryings>(
+            new GraphicsPipelineDesc { SampleCount = SampleCount.X4, DebugName = "SquareMatrixUniformPushConstants" });
+
+        pipeline.Draw(
+            new GeneratedMatrixUniformVertexShader(
+                vertices.AsReadOnly(),
+                new Uniform<float2x2>(new float2x2(new float2(0.01f, 0.02f), new float2(0.03f, 0.04f))),
+                new Uniform<float4x4>(float4x4.Identity)),
+            new GeneratedMatrixUniformFragmentShader(
+                new Uniform<float2x2>(new float2x2(new float2(0.1f, 0.2f), new float2(0.3f, 0.4f))),
+                new Uniform<float3x3>(new float3x3(
+                    new float3(0.01f, 0.02f, 0.03f),
+                    new float3(0.04f, 0.05f, 0.06f),
+                    new float3(0.07f, 0.08f, 0.09f))),
+                new Uniform<float>(0.2f)),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[16];
+        target.Read(readback);
+        var expected = new float4(0.7747f, 1.0864f, 0.2981f, 1.0f);
+        Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineUsesEntryAttributedShaders()
     {
         using var vertices = GPU.CreateBuffer<float4>(
@@ -1619,6 +1669,46 @@ public readonly partial struct GeneratedCrossStageFloat3UniformFragmentShader(
             input.Data.Y + fragmentScalar0.Value,
             input.Data.Z + fragmentVector0.Value.Z + fragmentVector1.Value.X + fragmentScalar1.Value,
             input.Data.W);
+    }
+}
+
+[GpuStruct]
+public partial struct GeneratedMatrixUniformVaryings
+{
+    [Position]
+    public float4 Position;
+
+    public float4 Data;
+}
+
+[VertexShader]
+public readonly partial struct GeneratedMatrixUniformVertexShader(
+    ReadOnlyBuffer<float4> vertices,
+    Uniform<float2x2> vertexMatrix2,
+    Uniform<float4x4> vertexMatrix4) : IVertexShader<GeneratedMatrixUniformVaryings>
+{
+    public GeneratedMatrixUniformVaryings Execute()
+    {
+        var data = vertexMatrix2.Value * new float2(1.0f, 2.0f);
+        return new GeneratedMatrixUniformVaryings
+        {
+            Position = vertexMatrix4.Value * vertices[VertexIds.Index],
+            Data = new float4(data.X, data.Y, 0.0f, 1.0f)
+        };
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedMatrixUniformFragmentShader(
+    Uniform<float2x2> fragmentMatrix2,
+    Uniform<float3x3> fragmentMatrix3,
+    Uniform<float> scalar) : IFragmentShader<GeneratedMatrixUniformVaryings>
+{
+    public float4 Execute(GeneratedMatrixUniformVaryings input)
+    {
+        var from2 = fragmentMatrix2.Value * new float2(1.0f, 2.0f);
+        var from3 = fragmentMatrix3.Value * new float3(input.Data.X, input.Data.Y, 1.0f);
+        return new float4(from2.X + from3.X, from2.Y + from3.Y, from3.Z + scalar.Value, input.Data.W);
     }
 }
 

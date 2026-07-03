@@ -1248,6 +1248,72 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void ShaderInspectionBuildsSquareMatrixPushConstantsFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<SquareMatrixUniformKernel>();
+
+            Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
+            Assert.Contains("mat2 u0;", glsl, StringComparison.Ordinal);
+            Assert.Contains("mat3 u1;", glsl, StringComparison.Ordinal);
+            Assert.Contains("mat4 u2;", glsl, StringComparison.Ordinal);
+            Assert.Contains("float u3;", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesSquareMatrixPushConstantsFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var output = GPU.CreateBuffer<float4>(4);
+
+            var matrix2 = new float2x2(
+                new float2(1, 2),
+                new float2(3, 4));
+            var matrix3 = new float3x3(
+                new float3(1, 0, 0),
+                new float3(0, 2, 0),
+                new float3(5, 6, 7));
+            var matrix4 = new float4x4(
+                new float4(1, 0, 0, 0),
+                new float4(0, 1, 0, 0),
+                new float4(0, 0, 2, 0),
+                new float4(10, 20, 30, 1));
+
+            var path = DispatchAndGetPath(
+                new SquareMatrixUniformKernel(
+                    output.AsReadWrite(),
+                    new Uniform<float2x2>(matrix2),
+                    new Uniform<float3x3>(matrix3),
+                    new Uniform<float4x4>(matrix4),
+                    new Uniform<float>(3.0f)),
+                4);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([
+                new float4(13, 18, 36, 3),
+                new float4(14, 22, 36, 3),
+                new float4(15, 26, 36, 3),
+                new float4(16, 30, 36, 3)
+            ], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void DispatchExecutesMatrixMathIntrinsicsFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -2675,24 +2741,24 @@ public class GeneratedComputeDispatchTests
 
         GpuStructPack<MatrixScene>([value], bytes);
 
-        Assert.Equal(64, layout.SizeInBytes);
-        Assert.Equal(16, layout.Alignment);
+        Assert.Equal(32, layout.SizeInBytes);
+        Assert.Equal(8, layout.Alignment);
         Assert.Equal(0, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Weight)).Offset);
         Assert.Equal(4, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Weight)).SizeInBytes);
-        Assert.Equal(16, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).Offset);
-        Assert.Equal(32, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).SizeInBytes);
-        Assert.Equal(16, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).Alignment);
-        Assert.Equal(48, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Bias)).Offset);
+        Assert.Equal(8, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).Offset);
+        Assert.Equal(16, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).SizeInBytes);
+        Assert.Equal(8, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Transform)).Alignment);
+        Assert.Equal(24, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Bias)).Offset);
         Assert.Equal(4, layout.Fields.Single(field => field.Name == nameof(MatrixScene.Bias)).SizeInBytes);
 
         Assert.Equal(5, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(0, 4)));
-        Assert.Equal(1, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(16, 4)));
-        Assert.Equal(2, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(20, 4)));
-        Assert.Equal(3, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(24, 4)));
-        Assert.Equal(4, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(28, 4)));
-        Assert.All(bytes[32..48], value => Assert.Equal(0, value));
-        Assert.Equal(7, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(48, 4)));
-        Assert.All(bytes[52..64], value => Assert.Equal(0, value));
+        Assert.All(bytes[4..8], value => Assert.Equal(0, value));
+        Assert.Equal(1, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(8, 4)));
+        Assert.Equal(2, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(12, 4)));
+        Assert.Equal(3, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(16, 4)));
+        Assert.Equal(4, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(20, 4)));
+        Assert.Equal(7, BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(24, 4)));
+        Assert.All(bytes[28..32], value => Assert.Equal(0, value));
 
         var unpacked = new MatrixScene[1];
         GpuStructUnpack<MatrixScene>(bytes, unpacked);
@@ -2797,21 +2863,60 @@ public class GeneratedComputeDispatchTests
         Assert.Equal(16, GpuValueLayout<float3>.Alignment);
         Assert.True(GpuValueLayout<float3>.RequiresBufferRepacking);
 
-        Assert.Equal(32, GpuValueLayout<float2x2>.BufferElementStride);
-        Assert.Equal(32, GpuValueLayout<float2x2>.FieldSizeInBytes);
-        Assert.Equal(16, GpuValueLayout<float2x2>.Alignment);
-        Assert.True(GpuValueLayout<float2x2>.RequiresBufferRepacking);
+        Assert.Equal(16, GpuValueLayout<float2x2>.CpuSizeInBytes);
+        Assert.Equal(16, GpuValueLayout<float2x2>.BufferElementStride);
+        Assert.Equal(16, GpuValueLayout<float2x2>.FieldSizeInBytes);
+        Assert.Equal(8, GpuValueLayout<float2x2>.Alignment);
+        Assert.False(GpuValueLayout<float2x2>.RequiresBufferRepacking);
 
         Assert.Equal(36, GpuValueLayout<float3x3>.CpuSizeInBytes);
         Assert.Equal(48, GpuValueLayout<float3x3>.BufferElementStride);
         Assert.Equal(48, GpuValueLayout<float3x3>.FieldSizeInBytes);
         Assert.Equal(16, GpuValueLayout<float3x3>.Alignment);
         Assert.True(GpuValueLayout<float3x3>.RequiresBufferRepacking);
+
+        Assert.Equal(64, GpuValueLayout<float4x4>.CpuSizeInBytes);
+        Assert.Equal(64, GpuValueLayout<float4x4>.BufferElementStride);
+        Assert.Equal(64, GpuValueLayout<float4x4>.FieldSizeInBytes);
+        Assert.Equal(16, GpuValueLayout<float4x4>.Alignment);
+        Assert.False(GpuValueLayout<float4x4>.RequiresBufferRepacking);
     }
 
     [Fact]
-    public void Float3x3ValueLayoutPacksColumnsWithSixteenByteStride()
+    public void MatrixValueLayoutsPackColumnsWithSixteenByteStride()
     {
+        var matrix2 = new float2x2(
+            new float2(1, 2),
+            new float2(3, 4));
+        var matrix2Bytes = Enumerable.Repeat((byte)0xCD, GpuValueLayout<float2x2>.FieldSizeInBytes).ToArray();
+
+        GpuValueLayout<float2x2>.PackValue(in matrix2, matrix2Bytes);
+
+        Assert.Equal(1, BinaryPrimitives.ReadSingleLittleEndian(matrix2Bytes.AsSpan(0, 4)));
+        Assert.Equal(2, BinaryPrimitives.ReadSingleLittleEndian(matrix2Bytes.AsSpan(4, 4)));
+        Assert.Equal(3, BinaryPrimitives.ReadSingleLittleEndian(matrix2Bytes.AsSpan(8, 4)));
+        Assert.Equal(4, BinaryPrimitives.ReadSingleLittleEndian(matrix2Bytes.AsSpan(12, 4)));
+        Assert.Equal(matrix2, GpuValueLayout<float2x2>.UnpackValue(matrix2Bytes));
+
+        var matrix2Array = new[]
+        {
+            matrix2,
+            new float2x2(
+                new float2(5, 6),
+                new float2(7, 8))
+        };
+        var matrix2BufferBytes = Enumerable.Repeat((byte)0xCD, GpuValueLayout<float2x2>.BufferElementStride * matrix2Array.Length).ToArray();
+
+        GpuValueLayout<float2x2>.PackBuffer(matrix2Array, matrix2BufferBytes);
+
+        Assert.Equal(5, BinaryPrimitives.ReadSingleLittleEndian(matrix2BufferBytes.AsSpan(16, 4)));
+        Assert.Equal(6, BinaryPrimitives.ReadSingleLittleEndian(matrix2BufferBytes.AsSpan(20, 4)));
+        Assert.Equal(7, BinaryPrimitives.ReadSingleLittleEndian(matrix2BufferBytes.AsSpan(24, 4)));
+        Assert.Equal(8, BinaryPrimitives.ReadSingleLittleEndian(matrix2BufferBytes.AsSpan(28, 4)));
+        var unpackedMatrix2 = new float2x2[2];
+        GpuValueLayout<float2x2>.UnpackBuffer(matrix2BufferBytes, unpackedMatrix2);
+        Assert.Equal(matrix2Array, unpackedMatrix2);
+
         var matrix3 = new float3x3(
             new float3(1, 2, 3),
             new float3(4, 5, 6),
@@ -2833,6 +2938,21 @@ public class GeneratedComputeDispatchTests
         Assert.Equal(9, BinaryPrimitives.ReadSingleLittleEndian(matrix3Bytes.AsSpan(40, 4)));
         Assert.All(matrix3Bytes[44..48], value => Assert.Equal(0, value));
         Assert.Equal(matrix3, GpuValueLayout<float3x3>.UnpackValue(matrix3Bytes));
+
+        var matrix4 = new float4x4(
+            new float4(1, 2, 3, 4),
+            new float4(5, 6, 7, 8),
+            new float4(9, 10, 11, 12),
+            new float4(13, 14, 15, 16));
+        var matrix4Bytes = Enumerable.Repeat((byte)0xCD, GpuValueLayout<float4x4>.FieldSizeInBytes).ToArray();
+
+        GpuValueLayout<float4x4>.PackValue(in matrix4, matrix4Bytes);
+
+        Assert.Equal(1, BinaryPrimitives.ReadSingleLittleEndian(matrix4Bytes.AsSpan(0, 4)));
+        Assert.Equal(5, BinaryPrimitives.ReadSingleLittleEndian(matrix4Bytes.AsSpan(16, 4)));
+        Assert.Equal(9, BinaryPrimitives.ReadSingleLittleEndian(matrix4Bytes.AsSpan(32, 4)));
+        Assert.Equal(13, BinaryPrimitives.ReadSingleLittleEndian(matrix4Bytes.AsSpan(48, 4)));
+        Assert.Equal(matrix4, GpuValueLayout<float4x4>.UnpackValue(matrix4Bytes));
 
         var matrices = new[]
         {
@@ -4461,6 +4581,25 @@ public readonly partial struct Matrix3UniformMultiplyKernel(
         float3 transformed = transform.Value * new float3(i, i + 1, 1);
         float3 offset = offsetTransform.Value * new float3(1, 2, 1);
         output[i] = transformed + (offset * scale.Value);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct SquareMatrixUniformKernel(
+    ReadWriteBuffer<float4> output,
+    Uniform<float2x2> matrix2,
+    Uniform<float3x3> matrix3,
+    Uniform<float4x4> matrix4,
+    Uniform<float> scale) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float2 from2 = matrix2.Value * new float2(i + 1, 2);
+        float3 from3 = matrix3.Value * new float3(1, i + 1, 1);
+        float4 from4 = matrix4.Value * new float4(1, 2, 3, 1);
+        output[i] = new float4(from2.X + from3.X, from2.Y + from3.Y, from4.Z, from4.W * scale.Value);
     }
 }
 

@@ -4570,8 +4570,8 @@ public class GeneratorAndAnalyzerTests
         var section = ReadTypedIrSection(ShaderIrModuleWriter.WriteModule(module));
         var structure = Assert.Single(section.Structs);
 
-        Assert.Equal(64u, structure.SizeInBytes);
-        Assert.Equal(16u, structure.Alignment);
+        Assert.Equal(32u, structure.SizeInBytes);
+        Assert.Equal(8u, structure.Alignment);
         Assert.Equal(3u, structure.FieldCount);
         Assert.InRange(structure.FirstField, 0u, (uint)section.StructFields.Count - structure.FieldCount);
 
@@ -4581,8 +4581,8 @@ public class GeneratorAndAnalyzerTests
             .ToArray();
 
         AssertField("Weight", 0, 4, fields[0], section);
-        AssertField("Transform", 16, 32, fields[1], section);
-        AssertField("Bias", 48, 4, fields[2], section);
+        AssertField("Transform", 8, 16, fields[1], section);
+        AssertField("Bias", 24, 4, fields[2], section);
 
         static void AssertField(string name, uint offset, uint size, TypedIrStructField field, TypedIrSection section)
         {
