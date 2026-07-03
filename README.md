@@ -38,6 +38,12 @@ Feather is designed for C# developers who want to stay inside .NET while writing
 - Preview NN helpers for tensors, modules, optimizers, checkpoints, and AD-backed training loops.
 - IR/GLSL inspection for debugging generated kernels and understanding the compiler pipeline.
 
+## Built With Feather
+
+[LTC](https://github.com/FeatherCompute/LTC/tree/main) is a Feather-based reproduction of Linearly Transformed Cosines for real-time area-light shading. It uses Feather shader libraries for reusable BRDF/math code, graphics pipelines for the viewer, texture lookup tables, and AD-backed fitting kernels for LTC parameters.
+
+[![LTC viewer rendered with Feather](docs/img/LTC.png)](https://github.com/FeatherCompute/LTC/tree/main)
+
 ## Quick Start
 
 Prerequisites:
