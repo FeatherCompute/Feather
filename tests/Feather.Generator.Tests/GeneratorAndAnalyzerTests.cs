@@ -1494,6 +1494,104 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
+    public void GeneratorMonomorphizesMutatingGenericInterfaceCallableWithValueReceiverSemantics()
+    {
+        var module = LowerTypedModule("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            public interface IAccumulator
+            {
+                void Add(float delta);
+                float Read();
+            }
+
+            [GpuStruct]
+            public partial struct Accumulator : IAccumulator
+            {
+                public float Value;
+
+                [Callable]
+                public void Add(float delta)
+                {
+                    Value += delta;
+                }
+
+                [Callable]
+                public float Read()
+                {
+                    return Value;
+                }
+            }
+
+            [ShaderLibrary]
+            public static class AccumulatorOps
+            {
+                [Callable]
+                public static float AddThenRead<TAccumulator>(TAccumulator accumulator, float delta)
+                    where TAccumulator : IAccumulator
+                {
+                    accumulator.Add(delta);
+                    return accumulator.Read();
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct GenericMutatingAccumulatorKernel(
+                ReadOnlyBuffer<Accumulator> accumulators,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = AccumulatorOps.AddThenRead(accumulators[i], input[i]);
+                }
+            }
+            """);
+
+        var addThenRead = Assert.Single(module.Callables.Items, callable => callable.Name == "AddThenRead");
+        var add = Assert.Single(module.Callables.Items, callable => callable.Name == "Add");
+        var read = Assert.Single(module.Callables.Items, callable => callable.Name == "Read");
+
+        Assert.Collection(addThenRead.Parameters.Items,
+            parameter =>
+            {
+                Assert.Equal("accumulator", parameter.Name);
+                Assert.Equal(ShaderParameterDirection.In, parameter.Direction);
+                Assert.IsType<ShaderStructType>(parameter.Type);
+            },
+            parameter =>
+            {
+                Assert.Equal("delta", parameter.Name);
+                Assert.Equal(ShaderParameterDirection.In, parameter.Direction);
+            });
+        Assert.Equal(ShaderParameterDirection.InOut, add.Parameters.Items[0].Direction);
+        Assert.Equal(ShaderParameterDirection.In, read.Parameters.Items[0].Direction);
+
+        Assert.Collection(addThenRead.Body.Statements.Items,
+            statement =>
+            {
+                var expression = Assert.IsType<ShaderExpressionStatement>(statement);
+                var call = Assert.IsType<ShaderCallableCallExpression>(expression.Expression);
+                Assert.Equal(add.MangledName, call.CallableName);
+                Assert.Collection(call.Arguments.Items,
+                    argument => Assert.IsType<ShaderParameterReferenceExpression>(argument),
+                    argument => Assert.IsType<ShaderParameterReferenceExpression>(argument));
+            },
+            statement =>
+            {
+                var returned = Assert.IsType<ShaderReturnStatement>(statement);
+                var call = Assert.IsType<ShaderCallableCallExpression>(returned.Value);
+                Assert.Equal(read.MangledName, call.CallableName);
+                Assert.IsType<ShaderParameterReferenceExpression>(Assert.Single(call.Arguments.Items));
+            });
+    }
+
+    [Fact]
     public void GeneratorRejectsUnconstrainedGenericCallableInsteadOfMonomorphizingUnknownTypeParameter()
     {
         var compilation = CreateCompilation("""

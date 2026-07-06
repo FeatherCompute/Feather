@@ -2696,6 +2696,61 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void ShaderInspectionBuildsMutatingGenericInterfaceCallableMonomorphizationFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<GenericMutatingInterfaceShapeKernel>();
+
+            Assert.Contains("MonoMutableOps_EvalAfterOffset_T_global__Feather_Integration_Tests_MonoMutableOffset", glsl, StringComparison.Ordinal);
+            Assert.Contains("inout MonoMutableOffset fe_this", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoMutableOffset_Offset", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoMutableOffset_Measure", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("IMonoMutableShape", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("switch", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesMutatingGenericInterfaceCallableOnValueCopyFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var shapes = GPU.CreateBuffer<MonoMutableOffset>(
+            [
+                new MonoMutableOffset { Current = 10, Scale = 2 },
+                new MonoMutableOffset { Current = 5, Scale = 6 }
+            ]);
+            using var deltas = GPU.CreateBuffer<float>([3, -2]);
+            using var output = GPU.CreateBuffer<float>(2);
+
+            var path = DispatchAndGetPath(new GenericMutatingInterfaceShapeKernel(
+                shapes.AsReadOnly(),
+                deltas.AsReadOnly(),
+                output.AsReadWrite()), 2);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            AssertNear([16, -7], output.ToArray());
+
+            var unchanged = shapes.ToArray();
+            AssertNear([10, 5], unchanged.Select(shape => shape.Current).ToArray());
+            AssertNear([2, 6], unchanged.Select(shape => shape.Scale).ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsNestedGpuStructInstanceCallableGraphFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -4329,6 +4384,43 @@ public static class MonoShapeOps
     }
 }
 
+public interface IMonoMutableShape
+{
+    void Offset(float delta);
+    float Measure();
+}
+
+[GpuStruct]
+public partial struct MonoMutableOffset : IMonoMutableShape
+{
+    public float Current;
+    public float Scale;
+
+    [Callable]
+    public void Offset(float delta)
+    {
+        Current += delta * Scale;
+    }
+
+    [Callable]
+    public float Measure()
+    {
+        return Current;
+    }
+}
+
+[ShaderLibrary]
+public static class MonoMutableOps
+{
+    [Callable]
+    public static float EvalAfterOffset<TShape>(TShape shape, float delta)
+        where TShape : IMonoMutableShape
+    {
+        shape.Offset(delta);
+        return shape.Measure();
+    }
+}
+
 [GpuStruct]
 public readonly partial record struct ComplexScaleBias(float Scale, float Bias, int Mode)
 {
@@ -4536,6 +4628,20 @@ public readonly partial struct GenericInterfaceShapeKernel(
         int i = ThreadIds.X;
         output[i] = MonoShapeOps.Eval(spheres[i], points[i])
             + MonoShapeOps.Eval(planes[i], points[i]);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct GenericMutatingInterfaceShapeKernel(
+    ReadOnlyBuffer<MonoMutableOffset> shapes,
+    ReadOnlyBuffer<float> deltas,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = MonoMutableOps.EvalAfterOffset(shapes[i], deltas[i]);
     }
 }
 
