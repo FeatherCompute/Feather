@@ -23,20 +23,22 @@ public enum NnActivationKind
 
 public static class NnDispatchTrace
 {
+    private static readonly List<string> operations = [];
+
     public static long DispatchCount { get; private set; }
 
     public static DispatchPath LastPath { get; private set; }
 
     public static string LastOperation { get; private set; } = string.Empty;
 
-    public static string[] Operations { get; private set; } = [];
+    public static string[] Operations => operations.ToArray();
 
     public static void Reset()
     {
         DispatchCount = 0;
         LastPath = DispatchPath.None;
         LastOperation = string.Empty;
-        Operations = [];
+        operations.Clear();
     }
 
     internal static void Record(string operation, DispatchPath path)
@@ -44,7 +46,7 @@ public static class NnDispatchTrace
         DispatchCount++;
         LastPath = path;
         LastOperation = operation;
-        Operations = [.. Operations, operation];
+        operations.Add(operation);
     }
 }
 
@@ -382,8 +384,8 @@ internal static class NnDeviceOps
             throw new ArgumentException($"{operation} expects a rank-2 [batch, classes] tensor.");
         }
 
-        var rows = shape.Dimensions[0];
-        var columns = shape.Dimensions[1];
+        var rows = shape[0];
+        var columns = shape[1];
         if (rows <= 0 || columns <= 0)
         {
             throw new ArgumentException($"{operation} tensor dimensions must be positive.");

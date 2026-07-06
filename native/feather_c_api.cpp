@@ -15,6 +15,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -259,6 +260,10 @@ struct KernelState {
     GPU::Backend::BufferHandle ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
     size_t ad_adj_pool_size = 0;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
+};
+
+struct ComputeKernelCache {
+    std::unique_ptr<GPU::Kernel::KernelBuildContext> context;
 };
 
 struct IrResource {
@@ -542,6 +547,7 @@ std::unordered_map<FeBufferHandle, BufferState> g_buffers;
 std::unordered_map<FeTextureHandle, TextureState> g_textures;
 std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
 std::unordered_map<FeKernelHandle, KernelState> g_kernels;
+std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
 #if FEATHER_BUILD_WINDOW
 std::unordered_map<FeWindowHandle, WindowState> g_windows;
@@ -617,6 +623,33 @@ class EasyGpuBufferGuard {
     GPU::Backend::BufferHandle buffer_;
 };
 
+void reset_compute_kernel_cache(ComputeKernelCache& cache, bool abandon_backend_resources) {
+    if (abandon_backend_resources && cache.context != nullptr) {
+        cache.context->SetCachedPipeline(GPU::Backend::INVALID_PIPELINE_HANDLE);
+    }
+
+    cache.context.reset();
+}
+
+void erase_compute_kernel_cache(FeKernelHandle kernel, bool abandon_backend_resources = false) {
+    auto it = g_compute_kernel_caches.find(kernel);
+    if (it == g_compute_kernel_caches.end()) {
+        return;
+    }
+
+    reset_compute_kernel_cache(it->second, abandon_backend_resources);
+    g_compute_kernel_caches.erase(it);
+}
+
+void clear_compute_kernel_caches(bool abandon_backend_resources = false) {
+    for (auto& [handle, cache] : g_compute_kernel_caches) {
+        (void)handle;
+        reset_compute_kernel_cache(cache, abandon_backend_resources);
+    }
+
+    g_compute_kernel_caches.clear();
+}
+
 void destroy_graphics_pipeline_cache(GraphicsPipelineState& pipeline) {
     auto* backend = GPU::Runtime::Context::GetBackend();
     if (backend == nullptr) {
@@ -680,6 +713,8 @@ void destroy_backend_resources_for_shutdown() {
     g_texture_presenters.clear();
     g_windows.clear();
 #endif
+
+    clear_compute_kernel_caches();
 
     for (auto& [handle, pipeline] : g_pipelines) {
         (void)handle;
@@ -751,6 +786,8 @@ void abandon_native_resources_for_process_exit() {
     }
     g_windows.clear();
 #endif
+
+    clear_compute_kernel_caches(/*abandon_backend_resources*/ true);
 
     for (auto& [handle, pipeline] : g_pipelines) {
         (void)handle;
@@ -5142,23 +5179,6 @@ bool can_dispatch_easygpu_buffer_kernel(const KernelState& kernel) {
     }
 
     if (ir.has_section7) {
-        Feather::TypedIR::LoweringInputs inputs;
-        if (!build_typed_ir_lowering_inputs(ir, kernel, &inputs)) {
-            fail(FE_ERROR_UNSUPPORTED,
-                 "Section 7 typed IR resources could not be matched to bound native resources.");
-            return false;
-        }
-
-        std::string typed_error;
-        if (Feather::TypedIR::TryLowerToEasyGpuModule(ir.typed_module, inputs, &typed_error) == nullptr) {
-            fail(FE_ERROR_UNSUPPORTED,
-                 "Section 7 typed IR could not be lowered to an EasyGPU module: " +
-                     (typed_error.empty()
-                          ? std::string("the native typed IR lowerer rejected the module")
-                          : typed_error));
-            return false;
-        }
-
         return true;
     }
 
@@ -5248,14 +5268,9 @@ GPU::Backend::PipelineHandle create_easygpu_compute_pipeline(GPU::Kernel::Kernel
     return pipeline;
 }
 
-bool try_dispatch_easygpu_buffer_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
-                                        bool wait) {
+bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x,
+                                        uint32_t group_y, uint32_t group_z, bool wait) {
     if (!can_dispatch_easygpu_buffer_kernel(kernel)) {
-        return false;
-    }
-
-    auto context = try_build_easygpu_kernel_context(kernel);
-    if (context == nullptr) {
         return false;
     }
 
@@ -5266,11 +5281,39 @@ bool try_dispatch_easygpu_buffer_kernel(KernelState& kernel, uint32_t group_x, u
         return false;
     }
 
+    GPU::Kernel::KernelBuildContext* context = nullptr;
+    auto cache_it = g_compute_kernel_caches.find(kernel_handle);
+    if (cache_it != g_compute_kernel_caches.end() &&
+        cache_it->second.context != nullptr &&
+        cache_it->second.context->HasCachedPipeline()) {
+        context = cache_it->second.context.get();
+    }
+
+    std::unique_ptr<GPU::Kernel::KernelBuildContext> local_context;
+    if (context == nullptr) {
+        local_context = try_build_easygpu_kernel_context(kernel);
+        if (local_context == nullptr) {
+            return false;
+        }
+
+        context = local_context.get();
+    }
+
     bind_easygpu_runtime_buffers(kernel, *context, *backend);
     bind_easygpu_runtime_textures(kernel, *context, *backend);
 
-    const auto pipeline = create_easygpu_compute_pipeline(*context, *backend);
-    context->SetCachedPipeline(pipeline);
+    if (!context->HasCachedPipeline()) {
+        const auto pipeline = create_easygpu_compute_pipeline(*context, *backend);
+        context->SetCachedPipeline(pipeline);
+    }
+
+    if (local_context != nullptr && local_context->GetTextureInfos().empty()) {
+        auto& cache = g_compute_kernel_caches[kernel_handle];
+        cache.context = std::move(local_context);
+        context = cache.context.get();
+    }
+
+    const auto pipeline = context->GetCachedPipeline();
     backend->BindPipeline(pipeline);
     context->UploadUniformValues(pipeline);
 
@@ -9693,7 +9736,7 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
     vertex_shader_desc.type = GPU::Backend::ShaderType::Vertex;
     vertex_shader_desc.sourceCode = vertex_shader_source;
     vertex_shader_desc.entryPoint = "main";
-    vertex_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::None;
+    vertex_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::Aggressive;
     trace_graphics_step("create vertex shader");
     const auto vertex_shader = backend.CreateShader(vertex_shader_desc);
     if (vertex_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
@@ -9704,7 +9747,7 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
     fragment_shader_desc.type = GPU::Backend::ShaderType::Fragment;
     fragment_shader_desc.sourceCode = fragment_shader_source;
     fragment_shader_desc.entryPoint = "main";
-    fragment_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::None;
+    fragment_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::Aggressive;
     trace_graphics_step("create fragment shader");
     const auto fragment_shader = backend.CreateShader(fragment_shader_desc);
     if (fragment_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
@@ -9873,6 +9916,7 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     if (draw.count < minimum_count) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw count is too small for the selected topology.");
     }
+    const uint32_t instance_count = draw.instance_count == 0 ? 1u : draw.instance_count;
     if (draw.color_targets == nullptr || draw.color_target_count == 0 ||
         draw.color_target_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires one to eight color targets.");
@@ -9959,7 +10003,9 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
         if (index_stride != sizeof(uint32_t) && index_stride != sizeof(uint16_t)) {
             return fail(FE_ERROR_UNSUPPORTED, "EasyGPU graphics bridge currently requires uint or ushort index buffers.");
         }
-        if (index_it->second.bytes.size() < static_cast<size_t>(draw.count) * index_stride) {
+        const auto required_index_elements = static_cast<uint64_t>(draw.first_index) + draw.count;
+        if (required_index_elements > std::numeric_limits<size_t>::max() / index_stride ||
+            index_it->second.bytes.size() < static_cast<size_t>(required_index_elements) * index_stride) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Index buffer is too small for the requested indexed draw.");
         }
         index_buffer_is_uint16 = index_stride == sizeof(uint16_t);
@@ -10018,8 +10064,10 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     if (draw.indexed != 0 && index_buffer != nullptr) {
         if (index_buffer_is_uint16) {
             std::vector<uint32_t> expanded(draw.count);
+            const auto first_index_byte_offset = static_cast<size_t>(draw.first_index) * sizeof(uint16_t);
             for (uint32_t i = 0; i < draw.count; ++i) {
-                expanded[i] = read_u16_unaligned(index_buffer->bytes.data() + static_cast<size_t>(i) * sizeof(uint16_t));
+                expanded[i] = read_u16_unaligned(index_buffer->bytes.data() + first_index_byte_offset +
+                                                  static_cast<size_t>(i) * sizeof(uint16_t));
             }
 
             GPU::Backend::BufferDesc desc;
@@ -10225,10 +10273,11 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     if (draw.indexed != 0) {
         trace_graphics_step("draw indexed");
         backend->BindIndexBuffer(index_backend_buffer);
-        backend->DrawIndexed(draw.count, 1, 0, 0, 0);
+        const uint32_t first_index = index_buffer_is_uint16 ? 0u : draw.first_index;
+        backend->DrawIndexed(draw.count, instance_count, first_index, draw.vertex_offset, draw.first_instance);
     } else {
         trace_graphics_step("draw");
-        backend->Draw(draw.count, 1, 0, 0);
+        backend->Draw(draw.count, instance_count, draw.first_vertex, draw.first_instance);
     }
     trace_graphics_step("end rendering");
     backend->EndRendering();
@@ -11621,6 +11670,7 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
         }
+        erase_compute_kernel_cache(kernel);
         release_ad_gradient_buffers(it->second);
         g_kernels.erase(it);
         return ok();
@@ -11670,8 +11720,15 @@ FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* 
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
         }
-        const auto* bytes = static_cast<const unsigned char*>(data);
-        it->second.push_constants.assign(bytes, bytes + size);
+        auto& kernel_state = it->second;
+        if (size > kernel_state.push_constants.capacity()) {
+            erase_compute_kernel_cache(kernel);
+        }
+
+        kernel_state.push_constants.resize(static_cast<size_t>(size));
+        if (size != 0) {
+            std::memcpy(kernel_state.push_constants.data(), data, static_cast<size_t>(size));
+        }
         return ok();
     });
 }
@@ -11713,7 +11770,7 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
                 it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
                 result = g_last_result == FE_OK ? fail(FE_ERROR_UNSUPPORTED, "AD dispatch failed.") : g_last_result;
             }
-        } else if (try_dispatch_easygpu_buffer_kernel(it->second, group_x, group_y, group_z, wait)) {
+        } else if (try_dispatch_easygpu_buffer_kernel(kernel, it->second, group_x, group_y, group_z, wait)) {
             it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
         } else if (has_typed_section7_semantics(it->second)) {
             it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;

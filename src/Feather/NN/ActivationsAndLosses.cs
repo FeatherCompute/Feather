@@ -327,7 +327,7 @@ public static class Losses
         ArgumentNullException.ThrowIfNull(values);
         ArgumentNullException.ThrowIfNull(labels);
         ValidateProbabilityShape(values, valuesParamName, operation, out var batch, out var classes);
-        if (labels.Shape.Rank != 1 || labels.Shape.Dimensions[0] != batch)
+        if (labels.Shape.Rank != 1 || labels.Shape[0] != batch)
         {
             throw new ArgumentException("Label tensor must be rank-1 with length matching the batch dimension.", labelsParamName);
         }
@@ -342,8 +342,8 @@ public static class Losses
             throw new ArgumentException($"{operation} expects a rank-2 [batch, classes] tensor.", paramName);
         }
 
-        batch = values.Shape.Dimensions[0];
-        classes = values.Shape.Dimensions[1];
+        batch = values.Shape[0];
+        classes = values.Shape[1];
     }
 }
 

@@ -185,47 +185,59 @@ public static class GPU
 
     public static void Dispatch<TKernel>(TKernel kernel, int x, bool wait = true)
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
-        => GpuKernel.Dispatch(Context, kernel, new GpuDispatchSize(x, 1, 1), wait);
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(x, 1, 1), wait);
 
     /// <summary>
     /// Dispatches a generated one-dimensional kernel and returns the native route used for the dispatch.
     /// </summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int x, bool wait = true)
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
-    {
-        using var gpuKernel = GpuKernel.Create<TKernel>(Context);
-        GpuKernel.Dispatch(Context, gpuKernel, kernel, new GpuDispatchSize(x, 1, 1), wait);
-        return gpuKernel.LastDispatchPath;
-    }
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(x, 1, 1), wait);
 
     public static void Dispatch<TKernel>(TKernel kernel, int2 size, bool wait = true)
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
-        => GpuKernel.Dispatch(Context, kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
 
     /// <summary>
     /// Dispatches a generated two-dimensional kernel and returns the native route used for the dispatch.
     /// </summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int2 size, bool wait = true)
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
-    {
-        using var gpuKernel = GpuKernel.Create<TKernel>(Context);
-        GpuKernel.Dispatch(Context, gpuKernel, kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
-        return gpuKernel.LastDispatchPath;
-    }
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
 
     public static void Dispatch<TKernel>(TKernel kernel, int3 size, bool wait = true)
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
-        => GpuKernel.Dispatch(Context, kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
 
     /// <summary>
     /// Dispatches a generated three-dimensional kernel and returns the native route used for the dispatch.
     /// </summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int3 size, bool wait = true)
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
+        => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
+
+    private static class CachedKernelDispatcher<TKernel>
+        where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        using var gpuKernel = GpuKernel.Create<TKernel>(Context);
-        GpuKernel.Dispatch(Context, gpuKernel, kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
-        return gpuKernel.LastDispatchPath;
+        private static readonly object Gate = new();
+        private static GpuKernel? cachedKernel;
+
+        public static DispatchPath Dispatch(TKernel kernel, GpuDispatchSize size, bool wait)
+        {
+            if (GpuKernel.IrTransformForTesting is not null)
+            {
+                using var uncachedKernel = GpuKernel.Create<TKernel>(Context);
+                GpuKernel.Dispatch(Context, uncachedKernel, kernel, size, wait);
+                return uncachedKernel.LastDispatchPath;
+            }
+
+            lock (Gate)
+            {
+                cachedKernel ??= GpuKernel.Create<TKernel>(Context);
+                GpuKernel.Dispatch(Context, cachedKernel, kernel, size, wait);
+                return cachedKernel.LastDispatchPath;
+            }
+        }
     }
 }
 

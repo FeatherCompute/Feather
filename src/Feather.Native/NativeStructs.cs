@@ -415,7 +415,12 @@ public readonly struct FeGraphicsDrawDesc
         float clearColorG,
         float clearColorB,
         float clearColorA,
-        uint colorLoadOp)
+        uint colorLoadOp,
+        uint instanceCount,
+        uint firstVertex,
+        uint firstIndex,
+        int vertexOffset,
+        uint firstInstance)
     {
         ColorTargets = colorTargets;
         ColorTargetCount = colorTargetCount;
@@ -443,6 +448,11 @@ public readonly struct FeGraphicsDrawDesc
         ClearColorB = clearColorB;
         ClearColorA = clearColorA;
         ColorLoadOp = colorLoadOp;
+        InstanceCount = instanceCount;
+        FirstVertex = firstVertex;
+        FirstIndex = firstIndex;
+        VertexOffset = vertexOffset;
+        FirstInstance = firstInstance;
     }
 
     public readonly IntPtr ColorTargets;
@@ -471,6 +481,11 @@ public readonly struct FeGraphicsDrawDesc
     public readonly float ClearColorB;
     public readonly float ClearColorA;
     public readonly uint ColorLoadOp;
+    public readonly uint InstanceCount;
+    public readonly uint FirstVertex;
+    public readonly uint FirstIndex;
+    public readonly int VertexOffset;
+    public readonly uint FirstInstance;
 }
 
 /// <summary>

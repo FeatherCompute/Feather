@@ -96,6 +96,7 @@ public sealed class Tensor<T> : IDisposable
 public readonly record struct TensorShape : IEquatable<TensorShape>
 {
     private readonly int[]? dimensions;
+    private readonly int elementCount;
 
     /// <summary>
     /// Initializes a new tensor shape and validates that every dimension is positive.
@@ -105,12 +106,16 @@ public readonly record struct TensorShape : IEquatable<TensorShape>
         : this()
     {
         ArgumentNullException.ThrowIfNull(dimensions);
-        foreach (var dimension in dimensions)
+        var copy = dimensions.ToArray();
+        var count = 1;
+        foreach (var dimension in copy)
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dimension);
+            count = checked(count * dimension);
         }
 
-        this.dimensions = dimensions.ToArray();
+        this.dimensions = copy;
+        elementCount = count;
     }
 
     /// <summary>
@@ -121,36 +126,31 @@ public readonly record struct TensorShape : IEquatable<TensorShape>
     /// <summary>
     /// Gets the number of dimensions in the tensor shape.
     /// </summary>
-    public int Rank => Dimensions.Length;
+    public int Rank => dimensions?.Length ?? 0;
 
     /// <summary>
     /// Gets the total number of elements represented by the dimensions.
     /// </summary>
-    public int ElementCount
-    {
-        get
-        {
-            var count = 1;
-            foreach (var dimension in Dimensions)
-            {
-                count = checked(count * dimension);
-            }
+    public int ElementCount => dimensions is null ? 1 : elementCount;
 
-            return count;
-        }
-    }
+    /// <summary>
+    /// Gets a dimension by index without allocating a copy of the dimension array.
+    /// </summary>
+    public int this[int index] => dimensions is null ? throw new IndexOutOfRangeException() : dimensions[index];
+
+    internal ReadOnlySpan<int> AsSpan() => dimensions.AsSpan();
 
     /// <summary>
     /// Compares tensor shapes by dimension values.
     /// </summary>
     public bool Equals(TensorShape other)
-        => Dimensions.AsSpan().SequenceEqual(other.Dimensions);
+        => AsSpan().SequenceEqual(other.AsSpan());
 
     /// <inheritdoc />
     public override int GetHashCode()
     {
         var hash = new HashCode();
-        foreach (var dimension in Dimensions)
+        foreach (var dimension in AsSpan())
         {
             hash.Add(dimension);
         }

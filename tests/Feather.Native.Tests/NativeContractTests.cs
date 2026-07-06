@@ -138,7 +138,7 @@ public class NativeContractTests
     [Fact]
     public void GraphicsDrawDescriptorHasStableSequentialLayout()
     {
-        Assert.Equal(128, Marshal.SizeOf<FeGraphicsDrawDesc>());
+        Assert.Equal(144, Marshal.SizeOf<FeGraphicsDrawDesc>());
         Assert.Equal(0, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.ColorTargets)).ToInt32());
         Assert.Equal(8, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.ColorTargetCount)).ToInt32());
         Assert.Equal(16, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.DepthTarget)).ToInt32());
@@ -165,6 +165,11 @@ public class NativeContractTests
         Assert.Equal(112, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.ClearColorB)).ToInt32());
         Assert.Equal(116, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.ClearColorA)).ToInt32());
         Assert.Equal(120, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.ColorLoadOp)).ToInt32());
+        Assert.Equal(124, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.InstanceCount)).ToInt32());
+        Assert.Equal(128, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.FirstVertex)).ToInt32());
+        Assert.Equal(132, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.FirstIndex)).ToInt32());
+        Assert.Equal(136, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.VertexOffset)).ToInt32());
+        Assert.Equal(140, Marshal.OffsetOf<FeGraphicsDrawDesc>(nameof(FeGraphicsDrawDesc.FirstInstance)).ToInt32());
     }
 
     [Fact]

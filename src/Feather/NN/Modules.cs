@@ -1183,8 +1183,8 @@ internal static class TensorShapeValidator
             throw new ArgumentException($"{moduleName} input must be a rank-1 vector or rank-2 batch.", nameof(shape));
         }
 
-        var rows = shape.Rank == 1 ? 1 : shape.Dimensions[0];
-        var features = shape.Rank == 1 ? shape.Dimensions[0] : shape.Dimensions[1];
+        var rows = shape.Rank == 1 ? 1 : shape[0];
+        var features = shape.Rank == 1 ? shape[0] : shape[1];
         if (rows <= 0 || features <= 0)
         {
             throw new ArgumentException($"{moduleName} input dimensions must be positive.", nameof(shape));
@@ -1207,7 +1207,7 @@ internal static class TensorShapeValidator
         }
 
         var dimensions = new int[shape.Rank + 1];
-        Array.Copy(shape.Dimensions, dimensions, shape.Rank);
+        shape.AsSpan().CopyTo(dimensions);
         dimensions[^1] = dimension;
         return new TensorShape(dimensions);
     }

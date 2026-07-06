@@ -43,6 +43,34 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedGraphicsPipelineDrawSupportsInstancing()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.6f, -0.8f, 0, 1),
+            new float4(0.6f, -0.8f, 0, 1),
+            new float4(0.0f, 0.8f, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(16, 16, PixelFormat.Rgba32Float);
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 256)]);
+
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedInstancedVertexShader, GeneratedInstancedFragmentShader, GeneratedInstancedVaryings>();
+
+        pipeline.Draw(
+            new GeneratedInstancedVertexShader(vertices.AsReadOnly()),
+            new GeneratedInstancedFragmentShader(),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc { InstanceCount = 2 });
+
+        var readback = new float4[256];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => pixel.X < 0.2f && pixel.Y > 0.8f && pixel.W > 0.9f);
+        Assert.Contains(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.W > 0.9f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineBindsUniformPushConstants()
     {
         using var vertices = GPU.CreateBuffer<float4>([new float4(0, 0, 0, 1), new float4(1, 0, 0, 1), new float4(0, 1, 0, 1)]);
@@ -1582,6 +1610,39 @@ public readonly partial struct GeneratedFragmentShader(SamplerState sampler) : I
     public float4 Execute(float4 input)
     {
         return input;
+    }
+}
+
+[GpuStruct]
+public partial struct GeneratedInstancedVaryings
+{
+    [Position]
+    public float4 Position;
+
+    public float4 Color;
+}
+
+[VertexShader]
+public readonly partial struct GeneratedInstancedVertexShader(ReadOnlyBuffer<float4> vertices) : IVertexShader<GeneratedInstancedVaryings>
+{
+    public GeneratedInstancedVaryings Execute()
+    {
+        var position = vertices[VertexIds.Index];
+        var offset = VertexIds.Instance == 0 ? -0.5f : 0.5f;
+        return new GeneratedInstancedVaryings
+        {
+            Position = new float4(position.X + offset, position.Y, position.Z, position.W),
+            Color = VertexIds.Instance == 0 ? new float4(0.0f, 1.0f, 0.0f, 1.0f) : new float4(1.0f, 0.0f, 0.0f, 1.0f)
+        };
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedInstancedFragmentShader : IFragmentShader<GeneratedInstancedVaryings>
+{
+    public float4 Execute(GeneratedInstancedVaryings input)
+    {
+        return input.Color;
     }
 }
 

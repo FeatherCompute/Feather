@@ -221,6 +221,11 @@ typedef struct FeGraphicsDrawDesc {
     float clear_color_b;
     float clear_color_a;
     uint32_t color_load_op;
+    uint32_t instance_count;
+    uint32_t first_vertex;
+    uint32_t first_index;
+    int32_t vertex_offset;
+    uint32_t first_instance;
 } FeGraphicsDrawDesc;
 
 typedef struct FeProfilerQueryResult {

@@ -151,13 +151,13 @@ public sealed class SelfAttention : Module
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(input);
-        var dimensions = input.Shape.Dimensions;
-        if (input.Shape.Rank != 2 || dimensions[1] != EmbeddingSize)
+        var shape = input.Shape;
+        if (shape.Rank != 2 || shape[1] != EmbeddingSize)
         {
-            throw new ArgumentException($"SelfAttention expected a rank-2 [sequence, {EmbeddingSize}] tensor, but received [{string.Join(", ", dimensions)}].", nameof(input));
+            throw new ArgumentException($"SelfAttention expected a rank-2 [sequence, {EmbeddingSize}] tensor, but received [{string.Join(", ", shape.Dimensions)}].", nameof(input));
         }
 
-        var output = RunHost(input.Buffer.ToArray(), dimensions[0], includeOutputProjection: true);
+        var output = RunHost(input.Buffer.ToArray(), shape[0], includeOutputProjection: true);
         return new Tensor<float>(input.Shape, GPU.CreateBuffer<float>(output), input.RequiresGrad || Weights.Value.RequiresGrad);
     }
 
@@ -276,13 +276,13 @@ public sealed class TransformerBlock : Module
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(input);
-        var dimensions = input.Shape.Dimensions;
-        if (input.Shape.Rank != 2 || dimensions[0] > BlockSize || dimensions[1] != EmbeddingSize)
+        var shape = input.Shape;
+        if (shape.Rank != 2 || shape[0] > BlockSize || shape[1] != EmbeddingSize)
         {
-            throw new ArgumentException($"TransformerBlock expected [sequence <= {BlockSize}, {EmbeddingSize}], but received [{string.Join(", ", dimensions)}].", nameof(input));
+            throw new ArgumentException($"TransformerBlock expected [sequence <= {BlockSize}, {EmbeddingSize}], but received [{string.Join(", ", shape.Dimensions)}].", nameof(input));
         }
 
-        var output = RunHost(input.Buffer.ToArray(), dimensions[0]);
+        var output = RunHost(input.Buffer.ToArray(), shape[0]);
         return new Tensor<float>(input.Shape, GPU.CreateBuffer<float>(output), input.RequiresGrad || Parameters.Any(parameter => parameter is Parameter<float> { Value.RequiresGrad: true }));
     }
 

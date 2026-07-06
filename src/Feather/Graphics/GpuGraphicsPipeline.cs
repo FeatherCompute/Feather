@@ -408,7 +408,12 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                 clearColor.Y,
                 clearColor.Z,
                 clearColor.W,
-                (uint)drawDesc.ColorLoadOp);
+                (uint)drawDesc.ColorLoadOp,
+                drawDesc.InstanceCount,
+                drawDesc.FirstVertex,
+                drawDesc.FirstIndex,
+                drawDesc.VertexOffset,
+                drawDesc.FirstInstance);
             NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_draw_ex(Handle, in nativeDraw));
         }
     }
@@ -659,6 +664,11 @@ public readonly record struct GraphicsDrawDesc
     public float4? ClearColor { get; init; }
     public GraphicsDepthLoadOp DepthLoadOp { get; init; }
     public float? ClearDepth { get; init; }
+    public uint InstanceCount { get; init; }
+    public uint FirstVertex { get; init; }
+    public uint FirstIndex { get; init; }
+    public int VertexOffset { get; init; }
+    public uint FirstInstance { get; init; }
 }
 
 public sealed class GpuGraphicsCommand
