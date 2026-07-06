@@ -21,6 +21,8 @@ internal sealed class ShaderIrLoweringException : Exception
 /// </summary>
 internal static class ShaderIrLowerer
 {
+    private const string ThisParameterName = "this";
+
     public static ShaderModuleModel? Lower(ShaderModel model, SemanticModel semanticModel, CancellationToken ct)
     {
         var entry = model.EntryPointSyntax;
@@ -78,23 +80,36 @@ internal static class ShaderIrLowerer
                 ? semanticModel
                 : semanticModel.Compilation.GetSemanticModel(callable.Syntax.SyntaxTree);
             var callCtx = new LowerCtx(model, callableSemanticModel, ct);
+            callCtx.RegisterCurrentMethod(callable.Symbol);
+            var callableParameters = new List<ShaderParameterModel>();
+            if (RequiresLoweredThisParameter(callable.Symbol))
+            {
+                var thisType = ToTy(callable.Symbol.ContainingType, callable.Syntax, callCtx);
+                callCtx.RegisterThis(thisType, callable.Symbol.ContainingType);
+                var thisDirection = ShaderSemanticFacts.MutatesGpuStructInstanceCallable(
+                    callable.Symbol,
+                    callableSemanticModel.Compilation,
+                    ct)
+                    ? ShaderParameterDirection.InOut
+                    : ShaderParameterDirection.In;
+                callableParameters.Add(new ShaderParameterModel(ThisParameterName, thisType, thisDirection));
+            }
+
             foreach (var parameter in callable.Symbol.Parameters)
             {
-                callCtx.Register(parameter, ToTy(parameter.Type, callable.Syntax));
+                callCtx.Register(parameter, ToTy(parameter.Type, callable.Syntax, callCtx));
+                callableParameters.Add(new ShaderParameterModel(
+                    parameter.Name,
+                    ToTy(parameter.Type, callable.Syntax, callCtx),
+                    parameter.RefKind is RefKind.Ref or RefKind.Out ? ShaderParameterDirection.InOut : ShaderParameterDirection.In));
             }
 
             var callBlock = LowerMethodBody(callable.Syntax, callableSemanticModel, callCtx, ct);
-            var retType = ShaderTypeFactory.FromTypeSymbol(callable.Symbol.ReturnType) ?? ShaderTypeFactory.Void;
-            var pars = callable.Symbol.Parameters.Select(p =>
-                new ShaderParameterModel(
-                    p.Name,
-                    ToTy(p.Type, callable.Syntax),
-                    p.RefKind is RefKind.Ref or RefKind.Out ? ShaderParameterDirection.InOut : ShaderParameterDirection.In))
-                .ToArray();
+            var retType = ShaderTypeFactory.FromTypeSymbol(callCtx.ResolveType(callable.Symbol.ReturnType)) ?? ShaderTypeFactory.Void;
 
             callableFuncs.Add(new ShaderFunctionModel(
                 callable.Name, callable.MangledName, ShaderFunctionKind.Callable,
-                retType, new EquatableArray<ShaderParameterModel>(pars), callBlock));
+                retType, new EquatableArray<ShaderParameterModel>(callableParameters.ToArray()), callBlock));
         }
 
         return new ShaderModuleModel(
@@ -163,7 +178,7 @@ internal static class ShaderIrLowerer
         {
             foreach (var decl in d.Declarators)
             {
-                var t = ToTy(decl.Symbol.Type, decl.Syntax);
+                var t = ToTy(decl.Symbol.Type, decl.Syntax, ctx);
                 if (TryCreateSharedMemoryDeclaration(decl, t, ctx, out var shared))
                 {
                     declarations.Add(shared);
@@ -301,7 +316,7 @@ internal static class ShaderIrLowerer
     {
         if (op is IConversionOperation conversion && IsSemanticConversion(conversion))
         {
-            return new ShaderConversionExpression(ToTy(conversion.Type), LowerExpr(conversion.Operand, ctx));
+            return new ShaderConversionExpression(ToTy(conversion.Type, ctx), LowerExpr(conversion.Operand, ctx));
         }
 
         var u = ShaderSemanticFacts.TryUnwrapConversion(op, out var uw) ? uw : op;
@@ -312,13 +327,14 @@ internal static class ShaderIrLowerer
 
         return u switch
         {
-            ILiteralOperation lit => new ShaderLiteralExpression(ToTy(lit.Type), FormatLit(lit)),
+            ILiteralOperation lit => new ShaderLiteralExpression(ToTy(lit.Type, ctx), FormatLit(lit)),
             ILocalReferenceOperation loc when ctx.IsResource(loc.Local.Name)
-                => new ShaderLocalReferenceExpression(ToTy(loc.Type), loc.Local.Name, loc.Local),
-            ILocalReferenceOperation loc => new ShaderLocalReferenceExpression(ToTy(loc.Type), loc.Local.Name, loc.Local),
+                => new ShaderLocalReferenceExpression(ToTy(loc.Type, ctx), loc.Local.Name, loc.Local),
+            ILocalReferenceOperation loc => new ShaderLocalReferenceExpression(ToTy(loc.Type, ctx), loc.Local.Name, loc.Local),
             IParameterReferenceOperation p when ctx.IsResource(p.Parameter.Name)
-                => new ShaderParameterReferenceExpression(ToTy(p.Type), p.Parameter.Name, p.Parameter),
-            IParameterReferenceOperation p => new ShaderParameterReferenceExpression(ToTy(p.Type), p.Parameter.Name, p.Parameter),
+                => new ShaderParameterReferenceExpression(ToTy(p.Type, ctx), p.Parameter.Name, p.Parameter),
+            IParameterReferenceOperation p => new ShaderParameterReferenceExpression(ToTy(p.Type, ctx), p.Parameter.Name, p.Parameter),
+            IInstanceReferenceOperation self => LowerInstanceReference(self, ctx),
             IFieldReferenceOperation f => LowerFieldRef(f, ctx),
             IArrayElementReferenceOperation a => LowerArrayElem(a, ctx),
             IInlineArrayAccessOperation a => LowerInlineArrayElem(a, ctx),
@@ -327,15 +343,15 @@ internal static class ShaderIrLowerer
             IInvocationOperation inv => LowerInvoke(inv, ctx),
             IPropertyReferenceOperation prop => LowerPropRef(prop, ctx),
             IObjectCreationOperation ctor => LowerCtor(ctor, ctx),
-            IDefaultValueOperation def => LowerDefaultValue(def),
+            IDefaultValueOperation def => LowerDefaultValue(def, ctx),
             IConditionalOperation { IsRef: false } tern => LowerTernary(tern, ctx),
             _ => throw Unsupported(u, $"unsupported expression operation '{u.Kind}'")
         };
     }
 
-    private static ShaderExpression LowerDefaultValue(IDefaultValueOperation operation)
+    private static ShaderExpression LowerDefaultValue(IDefaultValueOperation operation, LowerCtx ctx)
     {
-        var type = ToTy(operation.Type);
+        var type = ToTy(operation.Type, ctx);
         if (TryLowerZeroValue(type, out var expression))
         {
             return expression;
@@ -349,12 +365,12 @@ internal static class ShaderIrLowerer
         if (TryLowerConstantExpression(f, ctx, out var constant))
             return constant;
         if (f.Field.IsStatic && ShaderSemanticFacts.IsBuiltinField(f.Field, out var bk))
-            return new ShaderBuiltinExpression(ToTy(f.Type), bk);
+            return new ShaderBuiltinExpression(ToTy(f.Type, ctx), bk);
         if (f.Instance is IInstanceReferenceOperation && ctx.IsResource(f.Field.Name))
-            return new ShaderLocalReferenceExpression(ToTy(f.Type), f.Field.Name, f.Field);
+            return new ShaderLocalReferenceExpression(ToTy(f.Type, ctx), f.Field.Name, f.Field);
         var inst = f.Instance is { } i ? LowerExpr(i, ctx)
             : new ShaderLocalReferenceExpression(ShaderTypeFactory.Void, "this", f.Field);
-        return new ShaderFieldReferenceExpression(ToTy(f.Type), inst, f.Field);
+        return new ShaderFieldReferenceExpression(ToTy(f.Type, ctx), inst, f.Field);
     }
 
     private static bool TryLowerConstantExpression(IOperation operation, LowerCtx ctx, out ShaderExpression expression)
@@ -418,26 +434,26 @@ internal static class ShaderIrLowerer
         var arr = LowerExpr(a.ArrayReference, ctx);
         var idx = LowerExpr(a.Indices[0], ctx);
         if (arr is ShaderLocalReferenceExpression { Name: var n } && ctx.IsResource(n))
-            return new ShaderResourceElementExpression(ToTy(a.Type), n, idx, null!);
+            return new ShaderResourceElementExpression(ToTy(a.Type, ctx), n, idx, null!);
         if (arr is ShaderFieldReferenceExpression { Instance: ShaderLocalReferenceExpression { Name: var fn } } && ctx.IsResource(fn))
-            return new ShaderResourceElementExpression(ToTy(a.Type), fn, idx, null!);
+            return new ShaderResourceElementExpression(ToTy(a.Type, ctx), fn, idx, null!);
         if (arr is ShaderLocalReferenceExpression { Name: var sharedName } && ctx.IsShared(sharedName))
-            return new ShaderSharedMemoryElementExpression(ToTy(a.Type), sharedName, idx);
-        return new ShaderIndexAccessExpression(ToTy(a.Type), arr, idx);
+            return new ShaderSharedMemoryElementExpression(ToTy(a.Type, ctx), sharedName, idx);
+        return new ShaderIndexAccessExpression(ToTy(a.Type, ctx), arr, idx);
     }
 
     private static ShaderExpression LowerInlineArrayElem(IInlineArrayAccessOperation a, LowerCtx ctx)
     {
         var arr = LowerExpr(a.Instance, ctx);
         var idx = LowerExpr(a.Argument, ctx);
-        return new ShaderIndexAccessExpression(ToTy(a.Type), arr, idx);
+        return new ShaderIndexAccessExpression(ToTy(a.Type, ctx), arr, idx);
     }
 
     private static ShaderExpression LowerBinary(IBinaryOperation bin, LowerCtx ctx)
     {
         var l = LowerExpr(bin.LeftOperand, ctx);
         var r = LowerExpr(bin.RightOperand, ctx);
-        var t = ToTy(bin.Type);
+        var t = ToTy(bin.Type, ctx);
         if (IsCmp(bin.OperatorKind))
         {
             var op = MapCmpOp(bin.OperatorKind);
@@ -458,7 +474,7 @@ internal static class ShaderIrLowerer
     private static ShaderExpression LowerUnary(IUnaryOperation un, LowerCtx ctx)
     {
         var operand = LowerExpr(un.Operand, ctx);
-        var t = ToTy(un.Type);
+        var t = ToTy(un.Type, ctx);
         var op = un.OperatorKind switch
         {
             UnaryOperatorKind.Minus => ShaderUnaryOperator.Negate,
@@ -471,18 +487,21 @@ internal static class ShaderIrLowerer
 
     private static ShaderExpression LowerInvoke(IInvocationOperation inv, LowerCtx ctx)
     {
-        var mn = ShaderSemanticFacts.GetMethodMetadataName(inv.TargetMethod);
-        var ret = ToTy(inv.Type);
+        var ret = ToTy(inv.Type, ctx);
         if (TryLowerAtomic(inv, ret, ctx, out var atomic))
             return atomic;
 
-        var args = LowerInvocationArguments(inv, ctx);
+        var callableTarget = ShaderSemanticFacts.TryResolveCallableInvocationTarget(inv, ctx.CurrentMethod, out var resolvedCallable)
+            ? resolvedCallable
+            : null;
+        var mn = ShaderSemanticFacts.GetMethodMetadataName(callableTarget ?? inv.TargetMethod);
+        var args = LowerInvocationArguments(inv, ctx, callableTarget);
         if (TryLowerTextureSample(inv, ret, args, out var textureSample))
             return textureSample;
         if (ShaderInvocationLowerer.TryLowerKnownInvocation(inv, out _))
             return new ShaderIntrinsicCallExpression(ret, mn, new EquatableArray<ShaderExpression>(args));
-        if (IsCallable(inv.TargetMethod))
-            return new ShaderCallableCallExpression(ret, ShaderModelFactory.GetCallableMangledName(inv.TargetMethod), inv.TargetMethod,
+        if (callableTarget is not null)
+            return new ShaderCallableCallExpression(ret, ShaderModelFactory.GetCallableMangledName(callableTarget), callableTarget,
                 new EquatableArray<ShaderExpression>(args));
         throw Unsupported(inv, $"unsupported invocation '{mn}'");
     }
@@ -619,10 +638,12 @@ internal static class ShaderIrLowerer
             _ => "target"
         };
 
-    private static ShaderExpression[] LowerInvocationArguments(IInvocationOperation inv, LowerCtx ctx)
+    private static ShaderExpression[] LowerInvocationArguments(IInvocationOperation inv, LowerCtx ctx, IMethodSymbol? callableTarget = null)
     {
+        var targetMethod = callableTarget ?? inv.TargetMethod;
         var args = new List<ShaderExpression>();
-        if (inv.Instance is not null && !IsCallable(inv.TargetMethod))
+        if (inv.Instance is not null &&
+            (RequiresLoweredThisParameter(targetMethod) || !IsCallable(targetMethod)))
         {
             args.Add(LowerExpr(inv.Instance, ctx));
         }
@@ -664,34 +685,34 @@ internal static class ShaderIrLowerer
         }
 
         if (ShaderSemanticFacts.TryGetBuiltinKind(prop, out var lbk))
-            return new ShaderBuiltinExpression(ToTy(prop.Type), (ShaderBuiltinKind)(byte)lbk);
+            return new ShaderBuiltinExpression(ToTy(prop.Type, ctx), (ShaderBuiltinKind)(byte)lbk);
         if (TryLowerBuiltinVector(prop, ctx, out var builtinVector))
             return builtinVector;
-        if (prop.Property.IsStatic && TryLowerStaticMathProperty(prop, out var staticMathProperty))
+        if (prop.Property.IsStatic && TryLowerStaticMathProperty(prop, ctx, out var staticMathProperty))
             return staticMathProperty;
         if (prop.Property.Name == "Value" && prop.Instance is { } inst
             && ShaderSemanticFacts.IsUniformResourceType(inst.Type))
         {
             var rn = ResName(inst);
-            return new ShaderPushConstantExpression(ToTy(prop.Type), rn, ctx.Binding(rn));
+            return new ShaderPushConstantExpression(ToTy(prop.Type, ctx), rn, ctx.Binding(rn));
         }
-        if (prop.Instance is { } matrixInstance && TryGetMatrixColumnIndex(ToTy(matrixInstance.Type), prop.Property.Name, out var column))
+        if (prop.Instance is { } matrixInstance && TryGetMatrixColumnIndex(ToTy(matrixInstance.Type, ctx), prop.Property.Name, out var column))
         {
             return new ShaderMatrixColumnExpression(
-                ToTy(prop.Type),
+                ToTy(prop.Type, ctx),
                 LowerExpr(matrixInstance, ctx),
                 new ShaderLiteralExpression(ShaderTypeFactory.Int, column.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         }
-        if (prop.Instance is { } structInstance && TryGetStructField(ToTy(structInstance.Type), prop.Property.Name, out var field))
+        if (prop.Instance is { } structInstance && TryGetStructField(ToTy(structInstance.Type, ctx), prop.Property.Name, out var field))
             return new ShaderMemberAccessExpression(field.Type, LowerExpr(structInstance, ctx), field);
-        if (prop.Instance is { } i && IsSwiz(prop.Property.Name, ToTy(i.Type)))
-            return new ShaderSwizzleExpression(ToTy(prop.Type), LowerExpr(i, ctx), prop.Property.Name.ToUpperInvariant());
+        if (prop.Instance is { } i && IsSwiz(prop.Property.Name, ToTy(i.Type, ctx)))
+            return new ShaderSwizzleExpression(ToTy(prop.Type, ctx), LowerExpr(i, ctx), prop.Property.Name.ToUpperInvariant());
         throw Unsupported(prop, $"unsupported property '{prop.Property.Name}'");
     }
 
     private static ShaderExpression LowerCtor(IObjectCreationOperation ctor, LowerCtx ctx)
     {
-        var t = ToTy(ctor.Type);
+        var t = ToTy(ctor.Type, ctx);
         if (t is ShaderStructType structType && ctor.Initializer is { } initializer)
         {
             var values = new Dictionary<string, ShaderExpression>(StringComparer.Ordinal);
@@ -739,7 +760,7 @@ internal static class ShaderIrLowerer
             throw Unsupported(tern, "conditional expressions must have a false branch");
         }
 
-        return new ShaderConditionalExpression(ToTy(tern.Type),
+        return new ShaderConditionalExpression(ToTy(tern.Type, ctx),
             LowerExpr(tern.Condition, ctx), LowerExpr(tern.WhenTrue, ctx), LowerExpr(tern.WhenFalse, ctx));
     }
 
@@ -750,12 +771,13 @@ internal static class ShaderIrLowerer
         var u = ShaderSemanticFacts.TryUnwrapConversion(target, out var uw) ? uw : target;
         return u switch
         {
-            ILocalReferenceOperation l => new ShaderLocalLValue(ToTy(l.Type), l.Local.Name, l.Local),
-            IParameterReferenceOperation p => new ShaderParameterLValue(ToTy(p.Type), p.Parameter.Name, p.Parameter),
+            ILocalReferenceOperation l => new ShaderLocalLValue(ToTy(l.Type, ctx), l.Local.Name, l.Local),
+            IParameterReferenceOperation p => new ShaderParameterLValue(ToTy(p.Type, ctx), p.Parameter.Name, p.Parameter),
+            IInstanceReferenceOperation self => LowerInstanceLValue(self, ctx),
             IFieldReferenceOperation f => f.Instance is IInstanceReferenceOperation && ctx.IsResource(f.Field.Name)
-                ? new ShaderLocalLValue(ToTy(f.Type), f.Field.Name, f.Field)
-                : f.Instance is { } i ? new ShaderFieldLValue(ToTy(f.Type), LowerLVal(i, ctx), f.Field)
-                : new ShaderFieldLValue(ToTy(f.Type), null, f.Field),
+                ? new ShaderLocalLValue(ToTy(f.Type, ctx), f.Field.Name, f.Field)
+                : f.Instance is { } i ? new ShaderFieldLValue(ToTy(f.Type, ctx), LowerLVal(i, ctx), f.Field)
+                : new ShaderFieldLValue(ToTy(f.Type, ctx), null, f.Field),
             IArrayElementReferenceOperation a => LowerArrayLVal(a, ctx),
             IInlineArrayAccessOperation a => LowerInlineArrayLVal(a, ctx),
             IPropertyReferenceOperation prop => LowerPropLVal(prop, ctx),
@@ -768,18 +790,18 @@ internal static class ShaderIrLowerer
         if (a.Indices.Length != 1) return null;
         var idx = LowerExpr(a.Indices[0], ctx);
         if (a.ArrayReference is ILocalReferenceOperation lr && ctx.IsResource(lr.Local.Name))
-            return new ShaderResourceElementLValue(ToTy(a.Type), lr.Local.Name, idx, null!);
+            return new ShaderResourceElementLValue(ToTy(a.Type, ctx), lr.Local.Name, idx, null!);
         if (a.ArrayReference is ILocalReferenceOperation shared && ctx.IsShared(shared.Local.Name))
-            return new ShaderSharedMemoryElementLValue(ToTy(a.Type), shared.Local.Name, idx);
+            return new ShaderSharedMemoryElementLValue(ToTy(a.Type, ctx), shared.Local.Name, idx);
         var arrLv = LowerLVal(a.ArrayReference, ctx);
-        return arrLv is { } ? new ShaderIndexAccessLValue(ToTy(a.Type), arrLv, idx) : null;
+        return arrLv is { } ? new ShaderIndexAccessLValue(ToTy(a.Type, ctx), arrLv, idx) : null;
     }
 
     private static ShaderLValue? LowerInlineArrayLVal(IInlineArrayAccessOperation a, LowerCtx ctx)
     {
         var idx = LowerExpr(a.Argument, ctx);
         var arrLv = LowerLVal(a.Instance, ctx);
-        return arrLv is { } ? new ShaderIndexAccessLValue(ToTy(a.Type), arrLv, idx) : null;
+        return arrLv is { } ? new ShaderIndexAccessLValue(ToTy(a.Type, ctx), arrLv, idx) : null;
     }
 
     private static ShaderLValue? LowerPropLVal(IPropertyReferenceOperation prop, LowerCtx ctx)
@@ -789,26 +811,41 @@ internal static class ShaderIrLowerer
             return LowerIndexerLValue(prop, ctx);
         }
 
-        if (prop.Instance is { } structInstance && TryGetStructField(ToTy(structInstance.Type), prop.Property.Name, out var field))
+        if (prop.Instance is { } structInstance && TryGetStructField(ToTy(structInstance.Type, ctx), prop.Property.Name, out var field))
         {
             var instance = LowerLVal(structInstance, ctx);
             return instance is null ? null : new ShaderMemberAccessLValue(field.Type, instance, field);
         }
 
-        if (prop.Instance is { } matrixInstance && TryGetMatrixColumnIndex(ToTy(matrixInstance.Type), prop.Property.Name, out var column))
+        if (prop.Instance is { } matrixInstance && TryGetMatrixColumnIndex(ToTy(matrixInstance.Type, ctx), prop.Property.Name, out var column))
         {
             return new ShaderMatrixColumnLValue(
-                ToTy(prop.Type),
+                ToTy(prop.Type, ctx),
                 LowerExpr(matrixInstance, ctx),
                 new ShaderLiteralExpression(ShaderTypeFactory.Int, column.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         }
 
-        if (prop.Instance is { } i && IsSwiz(prop.Property.Name, ToTy(i.Type)))
-            return new ShaderSwizzleLValue(ToTy(prop.Type), LowerExpr(i, ctx), prop.Property.Name.ToUpperInvariant());
+        if (prop.Instance is { } i && IsSwiz(prop.Property.Name, ToTy(i.Type, ctx)))
+            return new ShaderSwizzleLValue(ToTy(prop.Type, ctx), LowerExpr(i, ctx), prop.Property.Name.ToUpperInvariant());
         return null;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    private static ShaderExpression LowerInstanceReference(IInstanceReferenceOperation instance, LowerCtx ctx)
+    {
+        if (ctx.TryGetThis(out var thisType, out var thisSymbol))
+        {
+            return new ShaderParameterReferenceExpression(thisType, ThisParameterName, thisSymbol);
+        }
+
+        throw Unsupported(instance, "implicit instance values are supported only for [GpuStruct] instance callables");
+    }
+
+    private static ShaderLValue? LowerInstanceLValue(IInstanceReferenceOperation instance, LowerCtx ctx)
+        => ctx.TryGetThis(out var thisType, out var thisSymbol)
+            ? new ShaderParameterLValue(thisType, ThisParameterName, thisSymbol)
+            : null;
 
     private static ShaderExpression LowerIndexerExpression(IPropertyReferenceOperation prop, LowerCtx ctx)
     {
@@ -826,17 +863,17 @@ internal static class ShaderIrLowerer
         var index = LowerExpr(prop.Arguments[0].Value, ctx);
         if (TryResourceName(instance, ctx, out var resourceName))
         {
-            return new ShaderResourceElementExpression(ToTy(prop.Type), resourceName, index, null!);
+            return new ShaderResourceElementExpression(ToTy(prop.Type, ctx), resourceName, index, null!);
         }
         if (instance is ShaderLocalReferenceExpression { Name: var sharedName } && ctx.IsShared(sharedName))
         {
-            return new ShaderSharedMemoryElementExpression(ToTy(prop.Type), sharedName, index);
+            return new ShaderSharedMemoryElementExpression(ToTy(prop.Type, ctx), sharedName, index);
         }
 
-        return new ShaderIndexAccessExpression(ToTy(prop.Type), instance, index);
+        return new ShaderIndexAccessExpression(ToTy(prop.Type, ctx), instance, index);
     }
 
-    private static bool TryLowerStaticMathProperty(IPropertyReferenceOperation prop, out ShaderExpression expression)
+    private static bool TryLowerStaticMathProperty(IPropertyReferenceOperation prop, LowerCtx ctx, out ShaderExpression expression)
     {
         expression = null!;
         if (!ShaderSemanticFacts.IsFeatherVectorType(prop.Property.ContainingType) &&
@@ -845,7 +882,7 @@ internal static class ShaderIrLowerer
             return false;
         }
 
-        var type = ToTy(prop.Type);
+        var type = ToTy(prop.Type, ctx);
         return prop.Property.Name switch
         {
             "Zero" => TryLowerZeroValue(type, out expression),
@@ -990,15 +1027,15 @@ internal static class ShaderIrLowerer
         var index = LowerExpr(prop.Arguments[0].Value, ctx);
         if (TryResourceName(instance, ctx, out var resourceName))
         {
-            return new ShaderResourceElementLValue(ToTy(prop.Type), resourceName, index, null!);
+            return new ShaderResourceElementLValue(ToTy(prop.Type, ctx), resourceName, index, null!);
         }
         if (instance is ShaderLocalReferenceExpression { Name: var sharedName } && ctx.IsShared(sharedName))
         {
-            return new ShaderSharedMemoryElementLValue(ToTy(prop.Type), sharedName, index);
+            return new ShaderSharedMemoryElementLValue(ToTy(prop.Type, ctx), sharedName, index);
         }
 
         var array = LowerLVal(prop.Instance, ctx);
-        return array is null ? null : new ShaderIndexAccessLValue(ToTy(prop.Type), array, index);
+        return array is null ? null : new ShaderIndexAccessLValue(ToTy(prop.Type, ctx), array, index);
     }
 
     private static bool TryCreateSharedMemoryDeclaration(
@@ -1073,7 +1110,7 @@ internal static class ShaderIrLowerer
             .Select(offset => new ShaderBuiltinExpression(ShaderTypeFactory.Int, (ShaderBuiltinKind)((byte)first + offset)))
             .Cast<ShaderExpression>()
             .ToArray();
-        expression = new ShaderConstructorExpression(ToTy(prop.Type), new EquatableArray<ShaderExpression>(args));
+        expression = new ShaderConstructorExpression(ToTy(prop.Type, ctx), new EquatableArray<ShaderExpression>(args));
         return true;
     }
 
@@ -1159,13 +1196,20 @@ internal static class ShaderIrLowerer
     private static ShaderIrLoweringException Unsupported(IOperation operation, string message)
         => new(message, operation.Syntax.GetLocation());
 
-    private static ShaderType ToTy(ITypeSymbol? t) => ToTy(t, null);
+    private static ShaderType ToTy(ITypeSymbol? t) => ToTy(t, null, null);
 
-    private static ShaderType ToTy(ITypeSymbol? t, SyntaxNode? syntax)
-        => ShaderTypeFactory.FromTypeSymbol(t)
+    private static ShaderType ToTy(ITypeSymbol? t, LowerCtx ctx) => ToTy(t, null, ctx);
+
+    private static ShaderType ToTy(ITypeSymbol? t, SyntaxNode? syntax) => ToTy(t, syntax, null);
+
+    private static ShaderType ToTy(ITypeSymbol? t, SyntaxNode? syntax, LowerCtx? ctx)
+    {
+        var resolved = ctx?.ResolveType(t) ?? t;
+        return ShaderTypeFactory.FromTypeSymbol(resolved)
             ?? throw new ShaderIrLoweringException(
-                $"unsupported shader type '{t?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? "<unknown>"}'",
-                syntax?.GetLocation() ?? t?.Locations.FirstOrDefault());
+                $"unsupported shader type '{resolved?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? "<unknown>"}'",
+                syntax?.GetLocation() ?? resolved?.Locations.FirstOrDefault());
+    }
 
     private static string FormatLit(ILiteralOperation lit)
     {
@@ -1238,8 +1282,10 @@ internal static class ShaderIrLowerer
     };
 
     private static bool IsCallable(IMethodSymbol m)
-        => m.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
-            is "global::Feather.CallableAttribute" or "global::Feather.ShaderFunctionAttribute");
+        => ShaderSemanticFacts.IsCallableMethod(m);
+
+    private static bool RequiresLoweredThisParameter(IMethodSymbol method)
+        => ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(method);
 
     private static bool IsSwiz(string name, ShaderType? vt)
     {
@@ -1277,6 +1323,9 @@ internal static class ShaderIrLowerer
         private readonly Dictionary<string, ShaderType> _shared = new(StringComparer.Ordinal);
         private readonly Dictionary<string, uint> _bindings;
         private readonly Dictionary<string, ShaderType> _locals = new(StringComparer.Ordinal);
+        private ShaderType? _thisType;
+        private ISymbol? _thisSymbol;
+        private IMethodSymbol? _currentMethod;
         public SemanticModel SemanticModel { get; }
         public CancellationToken CT { get; }
 
@@ -1289,6 +1338,31 @@ internal static class ShaderIrLowerer
         }
 
         public void Register(ISymbol s, ShaderType t) => _locals[s.Name] = t;
+        public void RegisterCurrentMethod(IMethodSymbol method) => _currentMethod = method;
+        public IMethodSymbol? CurrentMethod => _currentMethod;
+        public ITypeSymbol? ResolveType(ITypeSymbol? type)
+            => ShaderSemanticFacts.SubstituteMethodTypeParameters(type, _currentMethod);
+
+        public void RegisterThis(ShaderType type, ISymbol symbol)
+        {
+            _thisType = type;
+            _thisSymbol = symbol;
+        }
+
+        public bool TryGetThis(out ShaderType type, out ISymbol symbol)
+        {
+            if (_thisType is not null && _thisSymbol is not null)
+            {
+                type = _thisType;
+                symbol = _thisSymbol;
+                return true;
+            }
+
+            type = null!;
+            symbol = null!;
+            return false;
+        }
+
         public void RegisterShared(string name, ShaderType elementType) => _shared[name] = elementType;
         public bool IsResource(string n) => _resources.Contains(n);
         public bool IsShared(string n) => _shared.ContainsKey(n);

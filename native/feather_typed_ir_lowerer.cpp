@@ -114,6 +114,19 @@ GPU::IR::ResourceAccess ToResourceAccess(uint8_t access) {
     }
 }
 
+std::optional<GPU::IR::CallableParameterDirection> ToCallableParameterDirection(uint8_t direction) {
+    switch (direction) {
+    case 0:
+        return GPU::IR::CallableParameterDirection::In;
+    case 1:
+        return GPU::IR::CallableParameterDirection::Out;
+    case 2:
+        return GPU::IR::CallableParameterDirection::InOut;
+    default:
+        return std::nullopt;
+    }
+}
+
 GPU::IR::Type TypeFromName(const std::string& name) {
     if (name == "System.Boolean" || name == "bool") {
         return GPU::IR::Type::Bool();
@@ -437,7 +450,7 @@ private:
             auto previous_declared_locals = declared_locals_;
             auto previous_local_glsl_names = local_glsl_names_;
             auto previous_shared_values = shared_values_;
-            std::vector<std::pair<std::string, GPU::IR::Type>> parameters;
+            std::vector<GPU::IR::CallableParameter> parameters;
             parameters.reserve(function.parameter_count);
 
             if (function.parameter_count > 0) {
@@ -452,8 +465,9 @@ private:
                 const auto& parameter = typed_.parameters[function.first_parameter + i];
                 const auto* parameter_name = GetString(parameter.name_id);
                 const auto parameter_type = ToModuleType(parameter.type_id);
+                const auto parameter_direction = ToCallableParameterDirection(parameter.direction);
                 if (parameter_name == nullptr || parameter_name->empty() || !parameter_type.IsValid() ||
-                    parameter.direction != 0) {
+                    !parameter_direction.has_value()) {
                     return false;
                 }
 
@@ -462,7 +476,11 @@ private:
                     return false;
                 }
 
-                parameters.emplace_back(sanitized_parameter_name, parameter_type);
+                parameters.push_back(GPU::IR::CallableParameter{
+                    sanitized_parameter_name,
+                    parameter_type,
+                    *parameter_direction
+                });
                 local_values_[*parameter_name] = builder_.LocalVariable(parameter_type, sanitized_parameter_name);
                 declared_locals_[*parameter_name] = parameter_type;
                 local_glsl_names_[*parameter_name] = sanitized_parameter_name;

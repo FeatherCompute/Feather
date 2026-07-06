@@ -38,7 +38,7 @@ internal sealed record ShaderBodyDiagnosticModel(
     Location? Location,
     EquatableArray<string> Arguments);
 
-/// <summary>A [Callable] or [ShaderFunction] method discovered inside a kernel struct.</summary>
+/// <summary>A [Callable] or [ShaderFunction] method imported into a shader module.</summary>
 internal sealed record CallableMethodModel(
     MethodDeclarationSyntax Syntax,
     IMethodSymbol Symbol,

@@ -649,7 +649,7 @@ internal static class ShaderModelFactory
             yield return diagnostic;
         }
 
-        if (symbol.IsGenericMethod)
+        if (symbol.IsGenericMethod && !IsCallable(symbol))
         {
             yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedGenericUsage, invocation.GetLocation(), symbol.Name);
             yield break;
@@ -667,14 +667,26 @@ internal static class ShaderModelFactory
             yield break;
         }
 
-        if ((symbol.IsVirtual || symbol.IsOverride || symbol.ContainingType?.TypeKind == TypeKind.Interface) && !IsAllowedShaderViewCall(symbol))
+        if ((symbol.IsVirtual || symbol.IsOverride || symbol.ContainingType?.TypeKind == TypeKind.Interface) &&
+            !IsAllowedShaderViewCall(symbol) &&
+            !IsAllowedGenericInterfaceConstraintCall(invocation, symbol, semanticModel, cancellationToken))
         {
             yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedVirtualCall, invocation.GetLocation(), symbol.Name);
             yield break;
         }
 
+        if (IsAllowedGenericInterfaceConstraintCall(invocation, symbol, semanticModel, cancellationToken))
+        {
+            yield break;
+        }
+
         if (IsCallable(symbol))
         {
+            foreach (var diagnostic in ValidateMutatingGpuStructReceiver(invocation, symbol, semanticModel, cancellationToken))
+            {
+                yield return diagnostic;
+            }
+
             foreach (var diagnostic in ValidateCallableInvocation(invocation, symbol, semanticModel, cancellationToken))
             {
                 yield return diagnostic;
@@ -703,7 +715,7 @@ internal static class ShaderModelFactory
             yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, method.Identifier.GetLocation(), $"{symbol.Name} must have a source body");
         }
 
-        if (symbol.IsGenericMethod)
+        if (symbol.IsGenericMethod && !HasSupportedGenericCallableShape(symbol))
         {
             yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedGenericUsage, method.Identifier.GetLocation(), symbol.Name);
         }
@@ -716,7 +728,16 @@ internal static class ShaderModelFactory
                 $"{symbol.Name} must be static because it belongs to a [ShaderLibrary]");
         }
 
-        if (!IsSupportedCallableType(symbol.ReturnType))
+        if (ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(symbol) &&
+            !IsSupportedCallableType(symbol.ContainingType))
+        {
+            yield return BodyDiagnostic(
+                FeatherDiagnostics.UnsupportedCall,
+                method.Identifier.GetLocation(),
+                symbol.Name);
+        }
+
+        if (!IsSupportedCallableTypeOrGenericParameter(symbol.ReturnType))
         {
             yield return BodyDiagnostic(
                 FeatherDiagnostics.UnsupportedCall,
@@ -726,7 +747,7 @@ internal static class ShaderModelFactory
 
         foreach (var parameter in symbol.Parameters)
         {
-            if (parameter.RefKind is RefKind.Ref or RefKind.Out or RefKind.In || !IsSupportedCallableType(parameter.Type))
+            if (parameter.RefKind is RefKind.Ref or RefKind.Out or RefKind.In || !IsSupportedCallableTypeOrGenericParameter(parameter.Type))
             {
                 var parameterSyntax = method.ParameterList.Parameters
                     .FirstOrDefault(candidate => candidate.Identifier.ValueText == parameter.Name);
@@ -735,6 +756,133 @@ internal static class ShaderModelFactory
                     parameterSyntax?.GetLocation() ?? method.Identifier.GetLocation(),
                     symbol.Name);
             }
+        }
+    }
+
+    private static IEnumerable<ShaderBodyDiagnosticModel> ValidateMutatingGpuStructReceiver(
+        InvocationExpressionSyntax invocation,
+        IMethodSymbol symbol,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (!ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(symbol) ||
+            !ShaderSemanticFacts.MutatesGpuStructInstanceCallable(symbol, semanticModel.Compilation, cancellationToken) ||
+            semanticModel.GetOperation(invocation, cancellationToken) is not IInvocationOperation operation ||
+            operation.Instance is null)
+        {
+            yield break;
+        }
+
+        if (!IsAddressableShaderValue(operation.Instance))
+        {
+            yield return BodyDiagnostic(
+                FeatherDiagnostics.UnsupportedCall,
+                invocation.GetLocation(),
+                $"{symbol.Name} mutates its receiver, so the receiver must be an addressable shader value");
+            yield break;
+        }
+
+        if (TryGetRootResourceAccess(operation.Instance, out var access, out var resourceName) &&
+            access is ResourceAccessModel.Read or ResourceAccessModel.Sample)
+        {
+            yield return BodyDiagnostic(
+                FeatherDiagnostics.ResourceAccessViolation,
+                invocation.GetLocation(),
+                resourceName);
+        }
+    }
+
+    private static bool IsAllowedGenericInterfaceConstraintCall(
+        InvocationExpressionSyntax invocation,
+        IMethodSymbol symbol,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (symbol.ContainingType.TypeKind != TypeKind.Interface ||
+            semanticModel.GetOperation(invocation, cancellationToken) is not IInvocationOperation operation ||
+            operation.Instance?.Type is not ITypeParameterSymbol receiverType)
+        {
+            return false;
+        }
+
+        var containingMethodSyntax = invocation.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+        if (containingMethodSyntax is null ||
+            semanticModel.GetDeclaredSymbol(containingMethodSyntax, cancellationToken) is not IMethodSymbol containingMethod ||
+            !containingMethod.IsGenericMethod ||
+            !IsCallable(containingMethod))
+        {
+            return false;
+        }
+
+        return receiverType.ConstraintTypes.Any(constraint =>
+            SymbolEqualityComparer.Default.Equals(constraint, symbol.ContainingType));
+    }
+
+    private static bool HasSupportedGenericCallableShape(IMethodSymbol symbol)
+        => !symbol.IsGenericMethod ||
+           symbol.TypeParameters.All(static parameter =>
+               parameter.ConstraintTypes.Any(static constraint => constraint.TypeKind == TypeKind.Interface));
+
+    private static bool IsSupportedCallableTypeOrGenericParameter(ITypeSymbol type)
+        => type is ITypeParameterSymbol || IsSupportedCallableType(type);
+
+    private static bool IsAddressableShaderValue(IOperation operation)
+    {
+        if (ShaderSemanticFacts.TryUnwrapConversion(operation, out var unwrapped))
+        {
+            operation = unwrapped;
+        }
+
+        return operation switch
+        {
+            ILocalReferenceOperation or IParameterReferenceOperation or IInstanceReferenceOperation => true,
+            IFieldReferenceOperation { Instance: null } => false,
+            IFieldReferenceOperation { Instance: { } instance } => IsAddressableShaderValue(instance),
+            IPropertyReferenceOperation { Arguments.Length: 0, Instance: null } => false,
+            IPropertyReferenceOperation { Instance: { } instance } => IsAddressableShaderValue(instance),
+            IArrayElementReferenceOperation array => IsAddressableShaderValue(array.ArrayReference),
+            IInlineArrayAccessOperation inlineArray => IsAddressableShaderValue(inlineArray.Instance),
+            _ => false
+        };
+    }
+
+    private static bool TryGetRootResourceAccess(
+        IOperation operation,
+        out ResourceAccessModel access,
+        out string resourceName)
+    {
+        if (ShaderSemanticFacts.TryUnwrapConversion(operation, out var unwrapped))
+        {
+            operation = unwrapped;
+        }
+
+        switch (operation)
+        {
+            case ILocalReferenceOperation local when GetShaderResourceViewKind(local.Local.Type) != ShaderResourceViewKind.None:
+                access = GetShaderResourceAccess(local.Local.Type).GetValueOrDefault();
+                resourceName = local.Local.Name;
+                return true;
+            case IParameterReferenceOperation parameter when GetShaderResourceViewKind(parameter.Parameter.Type) != ShaderResourceViewKind.None:
+                access = GetShaderResourceAccess(parameter.Parameter.Type).GetValueOrDefault();
+                resourceName = parameter.Parameter.Name;
+                return true;
+            case IFieldReferenceOperation { Instance: IInstanceReferenceOperation, Field: var field }
+                when GetShaderResourceViewKind(field.Type) != ShaderResourceViewKind.None:
+                access = GetShaderResourceAccess(field.Type).GetValueOrDefault();
+                resourceName = field.Name;
+                return true;
+            case IFieldReferenceOperation { Instance: { } instance }:
+                return TryGetRootResourceAccess(instance, out access, out resourceName);
+            case IPropertyReferenceOperation { Instance: { } instance }:
+                return TryGetRootResourceAccess(instance, out access, out resourceName);
+            case IArrayElementReferenceOperation array:
+                return TryGetRootResourceAccess(array.ArrayReference, out access, out resourceName);
+            case IInlineArrayAccessOperation inlineArray:
+                return TryGetRootResourceAccess(inlineArray.Instance, out access, out resourceName);
+            default:
+                access = default;
+                resourceName = string.Empty;
+                return false;
         }
     }
 
@@ -851,37 +999,71 @@ internal static class ShaderModelFactory
             .Select(structSyntax => semanticModel.GetDeclaredSymbol(structSyntax, cancellationToken))
             .FirstOrDefault(type => type is not null);
 
-        if (containingShader is null || !SymbolEqualityComparer.Default.Equals(symbol.ContainingType, containingShader))
+        var isKernelLocalCallable = containingShader is not null &&
+            SymbolEqualityComparer.Default.Equals(symbol.ContainingType, containingShader);
+
+        if (!isKernelLocalCallable)
         {
-            if (!IsShaderLibraryCallable(symbol))
+            if (ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(symbol))
+            {
+                if (!HasSourceAvailableMethodBody(symbol))
+                {
+                    yield return BodyDiagnostic(
+                        FeatherDiagnostics.UnsupportedCall,
+                        invocation.GetLocation(),
+                        $"{symbol.Name} must be source-available to be imported from a [GpuStruct]");
+                    yield break;
+                }
+
+                if (!IsSupportedCallableType(symbol.ContainingType))
+                {
+                    yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
+                    yield break;
+                }
+            }
+            else if (!IsShaderLibraryCallable(symbol))
             {
                 yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
                 yield break;
             }
-
-            if (!symbol.IsStatic)
+            else
             {
-                yield return BodyDiagnostic(
-                    FeatherDiagnostics.UnsupportedCall,
-                    invocation.GetLocation(),
-                    $"{symbol.Name} must be static because it belongs to a [ShaderLibrary]");
-                yield break;
-            }
+                if (!symbol.IsStatic)
+                {
+                    yield return BodyDiagnostic(
+                        FeatherDiagnostics.UnsupportedCall,
+                        invocation.GetLocation(),
+                        $"{symbol.Name} must be static because it belongs to a [ShaderLibrary]");
+                    yield break;
+                }
 
-            if (!HasSourceAvailableMethodBody(symbol))
-            {
-                yield return BodyDiagnostic(
-                    FeatherDiagnostics.UnsupportedCall,
-                    invocation.GetLocation(),
-                    $"{symbol.Name} must be source-available to be imported from a [ShaderLibrary]");
-                yield break;
+                if (!HasSourceAvailableMethodBody(symbol))
+                {
+                    yield return BodyDiagnostic(
+                        FeatherDiagnostics.UnsupportedCall,
+                        invocation.GetLocation(),
+                        $"{symbol.Name} must be source-available to be imported from a [ShaderLibrary]");
+                    yield break;
+                }
             }
         }
 
-        if (!SymbolEqualityComparer.Default.Equals(symbol.ContainingType, containingShader) && !IsShaderLibraryCallable(symbol))
+        if (symbol.IsGenericMethod)
         {
-            yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
-            yield break;
+            if (!HasSupportedGenericCallableShape(symbol))
+            {
+                yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedGenericUsage, invocation.GetLocation(), symbol.Name);
+                yield break;
+            }
+
+            foreach (var typeArgument in symbol.TypeArguments)
+            {
+                if (typeArgument is not ITypeParameterSymbol && !IsSupportedCallableType(typeArgument))
+                {
+                    yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
+                    yield break;
+                }
+            }
         }
 
         foreach (var parameter in symbol.Parameters)
@@ -1097,22 +1279,20 @@ internal static class ShaderModelFactory
 
         void AddCallable(MethodDeclarationSyntax method, IMethodSymbol methodSymbol)
         {
-            var id = GetCallableId(methodSymbol.OriginalDefinition);
+            var id = GetCallableId(methodSymbol);
             if (byId.ContainsKey(id))
             {
                 return;
             }
 
-            var pars = methodSymbol.Parameters.Select(p => new CallableParameterModel(
-                p.Name,
-                p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                p.RefKind is RefKind.Ref or RefKind.Out or RefKind.In)).ToArray();
+            var pars = GetCallableParameterModels(methodSymbol, compilation, cancellationToken).ToArray();
             var model = new CallableMethodModel(
                 method,
                 methodSymbol,
                 methodSymbol.Name,
                 GetCallableMangledName(methodSymbol),
-                methodSymbol.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                (ShaderSemanticFacts.SubstituteMethodTypeParameters(methodSymbol.ReturnType, methodSymbol) ?? methodSymbol.ReturnType)
+                    .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                 methodSymbol.IsStatic,
                 new EquatableArray<CallableParameterModel>(pars));
             byId.Add(id, model);
@@ -1133,14 +1313,14 @@ internal static class ShaderModelFactory
                 return;
             }
 
-            var id = GetCallableId(methodSymbol.OriginalDefinition);
+            var id = GetCallableId(methodSymbol);
             if (queued.Add(id))
             {
                 pending.Enqueue(methodSymbol);
             }
         }
 
-        void Scan(MethodDeclarationSyntax? method, SemanticModel methodSemanticModel)
+        void Scan(MethodDeclarationSyntax? method, IMethodSymbol? containingMethod, SemanticModel methodSemanticModel)
         {
             if (method is null)
             {
@@ -1161,7 +1341,8 @@ internal static class ShaderModelFactory
             foreach (var invocation in root.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (methodSemanticModel.GetSymbolInfo(invocation, cancellationToken).Symbol is IMethodSymbol target)
+                if (methodSemanticModel.GetOperation(invocation, cancellationToken) is IInvocationOperation operation &&
+                    ShaderSemanticFacts.TryResolveCallableInvocationTarget(operation, containingMethod, out var target))
                 {
                     Enqueue(target);
                 }
@@ -1180,31 +1361,37 @@ internal static class ShaderModelFactory
                 continue;
             }
 
+            if (methodSymbol.IsGenericMethod)
+            {
+                continue;
+            }
+
             AddCallable(method, methodSymbol);
-            Scan(method, semanticModel);
+            Scan(method, methodSymbol, semanticModel);
         }
 
-        Scan(entryPointSyntax, semanticModel);
+        Scan(entryPointSyntax, entryPoint, semanticModel);
 
         while (pending.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var methodSymbol = pending.Dequeue();
-            var id = GetCallableId(methodSymbol.OriginalDefinition);
+            var id = GetCallableId(methodSymbol);
             if (byId.TryGetValue(id, out var existing))
             {
-                Scan(existing.Syntax, compilation.GetSemanticModel(existing.Syntax.SyntaxTree));
+                Scan(existing.Syntax, existing.Symbol, compilation.GetSemanticModel(existing.Syntax.SyntaxTree));
                 continue;
             }
 
-            if (!IsShaderLibraryCallable(methodSymbol) ||
-                !TryGetMethodSyntax(methodSymbol, cancellationToken, out var methodSyntax))
+            if (!TryGetMethodSyntax(methodSymbol, cancellationToken, out var methodSyntax) ||
+                (!IsShaderLibraryCallable(methodSymbol) &&
+                 !ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(methodSymbol)))
             {
                 continue;
             }
 
             AddCallable(methodSyntax, methodSymbol);
-            Scan(methodSyntax, compilation.GetSemanticModel(methodSyntax.SyntaxTree));
+            Scan(methodSyntax, methodSymbol, compilation.GetSemanticModel(methodSyntax.SyntaxTree));
         }
 
         return new EquatableArray<CallableMethodModel>(results);
@@ -1227,6 +1414,29 @@ internal static class ShaderModelFactory
 
         method = null!;
         return false;
+    }
+
+    private static IEnumerable<CallableParameterModel> GetCallableParameterModels(
+        IMethodSymbol methodSymbol,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        if (ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(methodSymbol))
+        {
+            yield return new CallableParameterModel(
+                "this",
+                methodSymbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                ShaderSemanticFacts.MutatesGpuStructInstanceCallable(methodSymbol, compilation, cancellationToken));
+        }
+
+        foreach (var parameter in methodSymbol.Parameters)
+        {
+            yield return new CallableParameterModel(
+                parameter.Name,
+                (ShaderSemanticFacts.SubstituteMethodTypeParameters(parameter.Type, methodSymbol) ?? parameter.Type)
+                    .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                parameter.RefKind is RefKind.Ref or RefKind.Out or RefKind.In);
+        }
     }
 
     private static IEnumerable<ResourceModel> GetPrimaryConstructorResources(StructDeclarationSyntax syntax, INamedTypeSymbol symbol)
@@ -1529,13 +1739,13 @@ internal static class ShaderModelFactory
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (callableSemanticModel.GetSymbolInfo(invocation, cancellationToken).Symbol is not IMethodSymbol target
-                    || !IsCallable(target))
+                if (callableSemanticModel.GetOperation(invocation, cancellationToken) is not IInvocationOperation operation ||
+                    !ShaderSemanticFacts.TryResolveCallableInvocationTarget(operation, callable.Symbol, out var target))
                 {
                     continue;
                 }
 
-                var targetId = GetCallableId(target.OriginalDefinition);
+                var targetId = GetCallableId(target);
                 if (callableIds.ContainsKey(targetId))
                 {
                     adjacency[id].Add(new CallableEdge(targetId, target.Name, invocation.GetLocation()));
@@ -1601,7 +1811,7 @@ internal static class ShaderModelFactory
     }
 
     private static string GetCallableId(IMethodSymbol symbol)
-        => GetCallableMangledName(symbol.OriginalDefinition);
+        => GetCallableMangledName(symbol);
 
     internal static string GetCallableMangledName(IMethodSymbol symbol)
     {
@@ -1609,10 +1819,21 @@ internal static class ShaderModelFactory
         builder.Append(symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
         builder.Append('.');
         builder.Append(symbol.Name);
+        if (symbol.IsGenericMethod)
+        {
+            foreach (var typeArgument in symbol.TypeArguments)
+            {
+                builder.Append("_T_");
+                builder.Append(typeArgument.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+            }
+        }
+
         foreach (var parameter in symbol.Parameters)
         {
             builder.Append('_');
-            builder.Append(parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+            var parameterType = ShaderSemanticFacts.SubstituteMethodTypeParameters(parameter.Type, symbol);
+            builder.Append(parameterType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ??
+                           parameter.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
         }
 
         return SanitizeMangledName(builder.ToString());
@@ -1630,11 +1851,10 @@ internal static class ShaderModelFactory
     }
 
     private static bool IsCallable(IMethodSymbol symbol)
-        => symbol.GetAttributes().Any(static a => a.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
-            is "global::Feather.CallableAttribute" or "global::Feather.ShaderFunctionAttribute");
+        => ShaderSemanticFacts.IsCallableMethod(symbol);
 
     private static bool IsShaderLibraryCallable(IMethodSymbol symbol)
-        => IsCallable(symbol) && ShaderSemanticFacts.IsShaderLibraryType(symbol.ContainingType);
+        => ShaderSemanticFacts.IsShaderLibraryCallableMethod(symbol);
 
     private static ShaderBodyDiagnosticModel BodyDiagnostic(
         DiagnosticDescriptor descriptor,

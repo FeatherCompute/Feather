@@ -2531,6 +2531,230 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void ShaderInspectionBuildsGpuStructInstanceCallableFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<GpuStructInstanceCallableKernel>();
+
+            Assert.Contains("struct ScaleBias", glsl, StringComparison.Ordinal);
+            Assert.Contains("ScaleBias fe_this", glsl, StringComparison.Ordinal);
+            Assert.Contains(".Scale", glsl, StringComparison.Ordinal);
+            Assert.Contains(".Bias", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesGpuStructInstanceCallableFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var parameters = GPU.CreateBuffer<ScaleBias>(
+            [
+                new ScaleBias(2, 1),
+                new ScaleBias(3, -4)
+            ]);
+            using var input = GPU.CreateBuffer<float>([5, 6]);
+            using var output = GPU.CreateBuffer<float>(2);
+
+            var path = DispatchAndGetPath(new GpuStructInstanceCallableKernel(
+                parameters.AsReadOnly(),
+                input.AsReadOnly(),
+                output.AsReadWrite()), 2);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([11, 14], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void ShaderInspectionBuildsMutatingGpuStructInstanceCallableWithInOutReceiverFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<GpuStructMutatingInstanceCallableKernel>();
+
+            Assert.Contains("inout MutableCounter fe_this", glsl, StringComparison.Ordinal);
+            Assert.Contains("inout MutableCounterNested fe_this", glsl, StringComparison.Ordinal);
+            Assert.Contains("MutableCounter_Advance", glsl, StringComparison.Ordinal);
+            Assert.Contains("MutableCounterNested_Accumulate", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesMutatingGpuStructInstanceCallableWithBufferAndLocalWritebackFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var counters = GPU.CreateBuffer<MutableCounter>(
+            [
+                new MutableCounter { Value = 10, Hits = 1, Nested = new MutableCounterNested { Inner = 5 } },
+                new MutableCounter { Value = -3, Hits = 4, Nested = new MutableCounterNested { Inner = 1 } }
+            ]);
+            using var input = GPU.CreateBuffer<float>([2, 5]);
+            using var output = GPU.CreateBuffer<float>(2);
+
+            var path = DispatchAndGetPath(new GpuStructMutatingInstanceCallableKernel(
+                counters.AsReadWrite(),
+                input.AsReadOnly(),
+                output.AsReadWrite()), 2);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            AssertNear([24.5f, 20.5f], output.ToArray());
+
+            var updated = counters.ToArray();
+            Assert.Equal(2, updated[0].Hits);
+            Assert.Equal(5, updated[1].Hits);
+            AssertNear([13.5f, 3.5f], updated.Select(counter => counter.Value).ToArray());
+            AssertNear([9.0f, 12.0f], updated.Select(counter => counter.Nested.Inner).ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void ShaderInspectionBuildsGenericInterfaceCallableMonomorphizationsFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<GenericInterfaceShapeKernel>();
+
+            Assert.Contains("MonoShapeOps_Eval_T_global__Feather_Integration_Tests_MonoSphere", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoShapeOps_Eval_T_global__Feather_Integration_Tests_MonoPlane", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoSphere_Sdf", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoPlane_Sdf", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("IMonoShape", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("switch", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesGenericInterfaceCallableMonomorphizationsFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var spheres = GPU.CreateBuffer<MonoSphere>(
+            [
+                new MonoSphere(2),
+                new MonoSphere(1.5f)
+            ]);
+            using var planes = GPU.CreateBuffer<MonoPlane>(
+            [
+                new MonoPlane(1),
+                new MonoPlane(-2)
+            ]);
+            using var points = GPU.CreateBuffer<float3>(
+            [
+                new float3(3, 4, 0),
+                new float3(0, 0, 6)
+            ]);
+            using var output = GPU.CreateBuffer<float>(2);
+
+            var path = DispatchAndGetPath(new GenericInterfaceShapeKernel(
+                spheres.AsReadOnly(),
+                planes.AsReadOnly(),
+                points.AsReadOnly(),
+                output.AsReadWrite()), 2);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            AssertNear([8.0f, 2.5f], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void ShaderInspectionBuildsNestedGpuStructInstanceCallableGraphFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<ComplexGpuStructInstanceCallableKernel>();
+
+            Assert.Contains("struct ComplexScaleBias", glsl, StringComparison.Ordinal);
+            Assert.Contains("struct CallableGain", glsl, StringComparison.Ordinal);
+            Assert.Contains("ComplexScaleBias fe_this", glsl, StringComparison.Ordinal);
+            Assert.Contains("CallableGain gain", glsl, StringComparison.Ordinal);
+            Assert.Contains(".Mode", glsl, StringComparison.Ordinal);
+            Assert.Contains(".Multiplier", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("ScaleOnly_int", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Unused", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesNestedGpuStructInstanceCallableGraphFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var curves = GPU.CreateBuffer<ComplexScaleBias>(
+            [
+                new ComplexScaleBias(2, 1, 0),
+                new ComplexScaleBias(3, -2, 1)
+            ]);
+            using var gains = GPU.CreateBuffer<CallableGain>(
+            [
+                new CallableGain(10),
+                new CallableGain(4)
+            ]);
+            using var input = GPU.CreateBuffer<float>([3, 5]);
+            using var output = GPU.CreateBuffer<float>(2);
+
+            var path = DispatchAndGetPath(new ComplexGpuStructInstanceCallableKernel(
+                curves.AsReadOnly(),
+                gains.AsReadOnly(),
+                input.AsReadOnly(),
+                output.AsReadWrite()), 2);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([70, 50], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsGpuStructArrayAccessFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -4016,6 +4240,132 @@ public partial struct NestedScene
 public readonly partial record struct CallableHitInfo(float Closest, float3 Normal, float3 Color);
 
 [GpuStruct]
+public readonly partial record struct ScaleBias(float Scale, float Bias)
+{
+    [Callable]
+    public float Apply(float value)
+    {
+        return (value * Scale) + Bias;
+    }
+}
+
+[GpuStruct]
+public readonly partial record struct CallableGain(float Multiplier)
+{
+    [Callable]
+    public float Apply(float value)
+    {
+        return value * Multiplier;
+    }
+}
+
+[GpuStruct]
+public partial struct MutableCounterNested
+{
+    public float Inner;
+
+    [Callable]
+    public void Accumulate(float amount)
+    {
+        Inner += amount;
+    }
+}
+
+[GpuStruct]
+public partial struct MutableCounter
+{
+    public float Value;
+    public int Hits;
+    public MutableCounterNested Nested;
+
+    [Callable]
+    public void Advance(float delta, int lane)
+    {
+        Value += delta;
+        Hits++;
+        Nested.Accumulate((delta * 2.0f) + lane);
+    }
+
+    [Callable]
+    public void AddLocalBias(float amount)
+    {
+        this.Value += amount;
+    }
+}
+
+public interface IMonoShape
+{
+    float Sdf(float3 p);
+}
+
+[GpuStruct]
+public readonly partial record struct MonoSphere(float Radius) : IMonoShape
+{
+    [Callable]
+    public float Sdf(float3 p)
+    {
+        return ShaderMath.Length(p) - Radius;
+    }
+}
+
+[GpuStruct]
+public readonly partial record struct MonoPlane(float Offset) : IMonoShape
+{
+    [Callable]
+    public float Sdf(float3 p)
+    {
+        return p.Y + Offset;
+    }
+}
+
+[ShaderLibrary]
+public static class MonoShapeOps
+{
+    [Callable]
+    public static float Eval<TShape>(TShape shape, float3 p)
+        where TShape : IMonoShape
+    {
+        return shape.Sdf(p);
+    }
+}
+
+[GpuStruct]
+public readonly partial record struct ComplexScaleBias(float Scale, float Bias, int Mode)
+{
+    [Callable]
+    public float Apply(CallableGain gain, float value)
+    {
+        float shaped = this.Shape(value);
+        float adjusted = gain.Apply(shaped);
+        return Mode == 0 ? adjusted : adjusted + Bias;
+    }
+
+    [Callable]
+    public float Shape(float value)
+    {
+        return this.ScaleOnly(value) + Bias;
+    }
+
+    [Callable]
+    public float ScaleOnly(float value)
+    {
+        return value * Scale;
+    }
+
+    [Callable]
+    public float ScaleOnly(int value)
+    {
+        return value * 100.0f;
+    }
+
+    [Callable]
+    public float Unused(float value)
+    {
+        return value - 1000.0f;
+    }
+}
+
+[GpuStruct]
 public partial struct MatrixScene
 {
     public float Weight;
@@ -4136,6 +4486,73 @@ public readonly partial struct CallableStructReturnKernel(
         }
 
         return new CallableHitInfo(value * 2, normal, new float3(value + 7, 0, 0));
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct GpuStructInstanceCallableKernel(
+    ReadOnlyBuffer<ScaleBias> parameters,
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = parameters[i].Apply(input[i]);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct GpuStructMutatingInstanceCallableKernel(
+    ReadWriteBuffer<MutableCounter> counters,
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        counters[i].Advance(input[i], i);
+
+        MutableCounter local = counters[i];
+        local.AddLocalBias(1.5f);
+        counters[i] = local;
+
+        output[i] = counters[i].Value + counters[i].Nested.Inner + counters[i].Hits;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct GenericInterfaceShapeKernel(
+    ReadOnlyBuffer<MonoSphere> spheres,
+    ReadOnlyBuffer<MonoPlane> planes,
+    ReadOnlyBuffer<float3> points,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = MonoShapeOps.Eval(spheres[i], points[i])
+            + MonoShapeOps.Eval(planes[i], points[i]);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct ComplexGpuStructInstanceCallableKernel(
+    ReadOnlyBuffer<ComplexScaleBias> curves,
+    ReadOnlyBuffer<CallableGain> gains,
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        ComplexScaleBias curve = curves[i];
+        CallableGain gain = gains[i];
+        output[i] = curve.Apply(gain, input[i]);
     }
 }
 

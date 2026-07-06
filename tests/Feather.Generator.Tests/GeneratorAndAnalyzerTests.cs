@@ -1304,6 +1304,227 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
+    public void GeneratorImportsGpuStructInstanceCallableClosureAndOnlyReachableOverloads()
+    {
+        var section = GenerateTypedIrSection("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public readonly partial record struct Gain(float Multiplier)
+            {
+                [Callable]
+                public float Apply(float value)
+                {
+                    return value * Multiplier;
+                }
+            }
+
+            [GpuStruct]
+            public readonly partial record struct ComplexScaleBias(float Scale, float Bias, int Mode)
+            {
+                [Callable]
+                public float Apply(Gain gain, float value)
+                {
+                    float shaped = this.Shape(value);
+                    float adjusted = gain.Apply(shaped);
+                    return Mode == 0 ? adjusted : adjusted + Bias;
+                }
+
+                [Callable]
+                public float Shape(float value)
+                {
+                    return this.ScaleOnly(value) + Bias;
+                }
+
+                [Callable]
+                public float ScaleOnly(float value)
+                {
+                    return value * Scale;
+                }
+
+                [Callable]
+                public float ScaleOnly(int value)
+                {
+                    return value * 100.0f;
+                }
+
+                [Callable]
+                public float Unused(float value)
+                {
+                    return value - 1000.0f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct ComplexGpuStructCallableKernel(
+                ReadOnlyBuffer<ComplexScaleBias> curves,
+                ReadOnlyBuffer<Gain> gains,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    ComplexScaleBias curve = curves[i];
+                    Gain gain = gains[i];
+                    output[i] = curve.Apply(gain, input[i]);
+                }
+            }
+            """, "ComplexGpuStructCallableKernel.Feather.g.cs");
+
+        var functionNames = section.Functions
+            .Select(function => section.Strings[(int)function.NameId])
+            .ToArray();
+        var mangledNames = section.Functions
+            .Select(function => section.Strings[(int)function.MangledNameId])
+            .ToArray();
+        var callableFunctions = section.Functions
+            .Where(function => function.Kind == (byte)ShaderFunctionKind.Callable)
+            .ToArray();
+        var callableArgumentCounts = section.Expressions
+            .Where(expression => expression.Kind == 14)
+            .Select(expression => expression.ArgumentCount)
+            .ToArray();
+
+        Assert.Equal(4, callableFunctions.Length);
+        Assert.Contains(functionNames, name => name == "Apply");
+        Assert.Contains(functionNames, name => name == "Shape");
+        Assert.Contains(functionNames, name => name == "ScaleOnly");
+        Assert.Contains(mangledNames, name => name.Contains("Scratch_ComplexScaleBias_Apply", StringComparison.Ordinal));
+        Assert.Contains(mangledNames, name => name.Contains("Scratch_Gain_Apply", StringComparison.Ordinal));
+        Assert.Contains(mangledNames, name => name.Contains("ScaleOnly_float", StringComparison.Ordinal));
+        Assert.DoesNotContain(mangledNames, name => name.Contains("ScaleOnly_int", StringComparison.Ordinal));
+        Assert.DoesNotContain(mangledNames, name => name.Contains("Unused", StringComparison.Ordinal));
+        Assert.Contains(3u, callableArgumentCounts);
+        Assert.True(callableArgumentCounts.Count(count => count == 2u) >= 3);
+        Assert.All(callableFunctions, function =>
+        {
+            Assert.NotEqual(uint.MaxValue, function.FirstParameter);
+            Assert.Equal("this", section.Strings[(int)section.Parameters[(int)function.FirstParameter].NameId]);
+        });
+    }
+
+    [Fact]
+    public void GeneratorMonomorphizesGenericInterfaceCallablePerGpuStructTypeArgument()
+    {
+        var section = GenerateTypedIrSection("""
+            using Feather;
+            using Feather.Math;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            public interface IShape
+            {
+                float Sdf(float3 p);
+            }
+
+            [GpuStruct]
+            public readonly partial record struct Sphere(float Radius) : IShape
+            {
+                [Callable]
+                public float Sdf(float3 p)
+                {
+                    return ShaderMath.Length(p) - Radius;
+                }
+            }
+
+            [GpuStruct]
+            public readonly partial record struct Plane(float Offset) : IShape
+            {
+                [Callable]
+                public float Sdf(float3 p)
+                {
+                    return p.Y + Offset;
+                }
+            }
+
+            [ShaderLibrary]
+            public static class ShapeOps
+            {
+                [Callable]
+                public static float Eval<TShape>(TShape shape, float3 p)
+                    where TShape : IShape
+                {
+                    return shape.Sdf(p);
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct GenericShapeKernel(
+                ReadOnlyBuffer<Sphere> spheres,
+                ReadOnlyBuffer<Plane> planes,
+                ReadOnlyBuffer<float3> points,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = ShapeOps.Eval(spheres[i], points[i]) + ShapeOps.Eval(planes[i], points[i]);
+                }
+            }
+            """, "GenericShapeKernel.Feather.g.cs");
+
+        var functionNames = section.Functions
+            .Select(function => section.Strings[(int)function.NameId])
+            .ToArray();
+        var mangledNames = section.Functions
+            .Select(function => section.Strings[(int)function.MangledNameId])
+            .ToArray();
+        var callableCalls = section.Expressions
+            .Where(expression => expression.Kind == 14)
+            .Select(expression => section.Strings[(int)expression.NameId])
+            .ToArray();
+
+        Assert.Equal(4, section.Functions.Count(function => function.Kind == (byte)ShaderFunctionKind.Callable));
+        Assert.Equal(2, functionNames.Count(name => name == "Eval"));
+        Assert.Equal(2, functionNames.Count(name => name == "Sdf"));
+        Assert.Contains(mangledNames, name => name.Contains("ShapeOps_Eval_T_global__Scratch_Sphere", StringComparison.Ordinal));
+        Assert.Contains(mangledNames, name => name.Contains("ShapeOps_Eval_T_global__Scratch_Plane", StringComparison.Ordinal));
+        Assert.Contains(mangledNames, name => name.Contains("Scratch_Sphere_Sdf", StringComparison.Ordinal));
+        Assert.Contains(mangledNames, name => name.Contains("Scratch_Plane_Sdf", StringComparison.Ordinal));
+        Assert.DoesNotContain(mangledNames, name => name.Contains("IShape", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Sphere_Sdf", StringComparison.Ordinal));
+        Assert.Contains(callableCalls, name => name.Contains("Scratch_Plane_Sdf", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsUnconstrainedGenericCallableInsteadOfMonomorphizingUnknownTypeParameter()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+
+            namespace Scratch;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel : IKernel1D
+            {
+                public void Execute()
+                {
+                    Helper<int>();
+                }
+
+                [Callable]
+                private static void Helper<T>()
+                {
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "FE0010");
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree => tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void GeneratorRejectsExternalCallableWithoutShaderLibraryAttribute()
     {
         var compilation = CreateCompilation("""
@@ -1331,6 +1552,47 @@ public class GeneratorAndAnalyzerTests
                 {
                     int i = ThreadIds.X;
                     output[i] = Helpers.Twice(input[i]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0008");
+        Assert.Contains("Twice", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsExternalInstanceCallableWithoutGpuStructAttribute()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            public readonly struct Helpers
+            {
+                [Callable]
+                public float Twice(float value)
+                {
+                    return value * 2.0f;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = default(Helpers).Twice(input[i]);
                 }
             }
             """);
@@ -1383,6 +1645,58 @@ public class GeneratorAndAnalyzerTests
         Assert.Contains(diagnostics, diagnostic =>
             diagnostic.Id == "FE0008" &&
             diagnostic.GetMessage().Contains("must be static", StringComparison.Ordinal));
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
+            tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsMetadataOnlyGpuStructInstanceCallable()
+    {
+        var libraryReference = CompileReference("""
+            using Feather;
+
+            namespace External;
+
+            [GpuStruct]
+            public readonly partial record struct ScaleBias(float Scale, float Bias)
+            {
+                [Callable]
+                public float Apply(float value)
+                {
+                    return (value * Scale) + Bias;
+                }
+            }
+            """, "ExternalGpuStructCallableLibrary");
+
+        var compilation = CreateCompilation("""
+            using External;
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<ScaleBias> parameters,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = parameters[i].Apply(input[i]);
+                }
+            }
+            """, [libraryReference]);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Id == "FE0008" &&
+            diagnostic.GetMessage().Contains("source-available", StringComparison.Ordinal) &&
+            diagnostic.GetMessage().Contains("[GpuStruct]", StringComparison.Ordinal));
         Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree =>
             tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
     }
@@ -3783,6 +4097,320 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
+    public void TypedIrLowererLowersGpuStructInstanceCallableWithThisParameter()
+    {
+        var module = LowerTypedModule("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public readonly partial record struct ScaleBias(float Scale, float Bias)
+            {
+                [Callable]
+                public float Apply(float value)
+                {
+                    float scaled = value * Scale;
+                    return scaled + Bias;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct GpuStructCallableKernel(
+                ReadOnlyBuffer<ScaleBias> parameters,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = parameters[i].Apply(input[i]);
+                }
+            }
+            """);
+
+        var callable = Assert.Single(module.Callables.Items);
+        Assert.Equal("Apply", callable.Name);
+        Assert.Collection(callable.Parameters.Items,
+            parameter =>
+            {
+                Assert.Equal("this", parameter.Name);
+                Assert.IsType<ShaderStructType>(parameter.Type);
+            },
+            parameter => Assert.Equal("value", parameter.Name));
+
+        Assert.Collection(callable.Body.Statements.Items,
+            statement => AssertLocal(statement, "scaled"),
+            statement =>
+            {
+                var returned = Assert.IsType<ShaderReturnStatement>(statement);
+                var add = Assert.IsType<ShaderBinaryExpression>(returned.Value);
+                Assert.IsType<ShaderMemberAccessExpression>(add.Right);
+            });
+
+        var assignment = Assert.IsType<ShaderAssignmentStatement>(module.EntryPoint.Body.Statements.Items[1]);
+        var call = Assert.IsType<ShaderCallableCallExpression>(assignment.Value);
+        Assert.Equal(callable.MangledName, call.CallableName);
+        Assert.Collection(call.Arguments.Items,
+            argument => Assert.IsType<ShaderResourceElementExpression>(argument),
+            argument => Assert.IsType<ShaderResourceElementExpression>(argument));
+    }
+
+    [Fact]
+    public void TypedIrLowererMarksOnlyMutatingGpuStructInstanceCallableReceiversAsInOut()
+    {
+        var module = LowerTypedModule("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public partial struct NestedCounter
+            {
+                public float Inner;
+
+                [Callable]
+                public void Add(float value)
+                {
+                    Inner += value;
+                }
+            }
+
+            [GpuStruct]
+            public partial struct Counter
+            {
+                public float Value;
+                public int Hits;
+                public NestedCounter Nested;
+
+                [Callable]
+                public float Read()
+                {
+                    return Value + Nested.Inner;
+                }
+
+                [Callable]
+                public void Advance(float delta)
+                {
+                    Value += delta;
+                    Hits++;
+                    Nested.Add(delta * 2.0f);
+                }
+
+                [Callable]
+                public void AdvanceTwice(float delta)
+                {
+                    this.Advance(delta);
+                    this.Advance(delta + 1.0f);
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct MutatingCounterKernel(
+                ReadWriteBuffer<Counter> counters,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    counters[i].AdvanceTwice(input[i]);
+                    output[i] = counters[i].Read();
+                }
+            }
+            """);
+
+        var callables = module.Callables.Items.ToDictionary(callable => callable.Name);
+
+        Assert.Equal(ShaderParameterDirection.In, callables["Read"].Parameters.Items[0].Direction);
+        Assert.Equal(ShaderParameterDirection.InOut, callables["Add"].Parameters.Items[0].Direction);
+        Assert.Equal(ShaderParameterDirection.InOut, callables["Advance"].Parameters.Items[0].Direction);
+        Assert.Equal(ShaderParameterDirection.InOut, callables["AdvanceTwice"].Parameters.Items[0].Direction);
+
+        var advance = callables["Advance"];
+        Assert.Contains(advance.Body.Statements.Items, statement => statement is ShaderCompoundAssignmentStatement);
+        Assert.Contains(advance.Body.Statements.Items, statement => statement is ShaderIncrementDecrementStatement);
+
+        var entryCall = Assert.IsType<ShaderCallableCallExpression>(
+            Assert.IsType<ShaderExpressionStatement>(module.EntryPoint.Body.Statements.Items[1]).Expression);
+        Assert.Equal(callables["AdvanceTwice"].MangledName, entryCall.CallableName);
+        Assert.IsType<ShaderResourceElementExpression>(entryCall.Arguments.Items[0]);
+    }
+
+    [Fact]
+    public void TypedIrWriterSerializesMutatingGpuStructInstanceCallableReceiverAsInOut()
+    {
+        var section = GenerateTypedIrSection("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public partial struct Counter
+            {
+                public float Value;
+
+                [Callable]
+                public void Advance(float delta)
+                {
+                    Value += delta;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct MutatingCounterKernel(
+                ReadWriteBuffer<Counter> counters,
+                ReadOnlyBuffer<float> input) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    counters[i].Advance(input[i]);
+                }
+            }
+            """, "MutatingCounterKernel.Feather.g.cs");
+
+        var callable = Assert.Single(section.Functions, function => function.Kind == (byte)ShaderFunctionKind.Callable);
+        Assert.Equal(2u, callable.ParameterCount);
+        Assert.NotEqual(uint.MaxValue, callable.FirstParameter);
+        var receiver = section.Parameters[(int)callable.FirstParameter];
+        Assert.Equal("this", section.Strings[(int)receiver.NameId]);
+        Assert.Equal((byte)ShaderParameterDirection.InOut, receiver.Direction);
+    }
+
+    [Fact]
+    public void GeneratorRejectsMutatingGpuStructInstanceCallableOnReadOnlyReceiver()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public partial struct Counter
+            {
+                public float Value;
+
+                [Callable]
+                public void Advance(float delta)
+                {
+                    Value += delta;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(
+                ReadOnlyBuffer<Counter> counters,
+                ReadOnlyBuffer<float> input) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    counters[i].Advance(input[i]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0016");
+        Assert.Contains("counters", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree => tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GeneratorRejectsMutatingGpuStructInstanceCallableOnTemporaryReceiver()
+    {
+        var compilation = CreateCompilation("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public partial struct Counter
+            {
+                public float Value;
+
+                [Callable]
+                public void Advance(float delta)
+                {
+                    Value += delta;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct BadKernel(ReadOnlyBuffer<float> input) : IKernel1D
+            {
+                public void Execute()
+                {
+                    new Counter { Value = 1.0f }.Advance(input[ThreadIds.X]);
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0008");
+        Assert.Contains("receiver must be an addressable shader value", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(outputCompilation.SyntaxTrees, tree => tree.FilePath.EndsWith("BadKernel.Feather.g.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TypedIrWriterSerializesGpuStructInstanceCallableReceiver()
+    {
+        var section = GenerateTypedIrSection("""
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public readonly partial record struct ScaleBias(float Scale, float Bias)
+            {
+                [Callable]
+                public float Apply(float value)
+                {
+                    return (value * Scale) + Bias;
+                }
+            }
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct GpuStructCallableKernel(
+                ReadOnlyBuffer<ScaleBias> parameters,
+                ReadOnlyBuffer<float> input,
+                ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = parameters[i].Apply(input[i]);
+                }
+            }
+            """, "GpuStructCallableKernel.Feather.g.cs");
+
+        var callable = Assert.Single(section.Functions, function => function.Kind == (byte)ShaderFunctionKind.Callable);
+        Assert.Equal(2u, callable.ParameterCount);
+        Assert.NotEqual(uint.MaxValue, callable.FirstParameter);
+        Assert.Equal("this", section.Strings[(int)section.Parameters[(int)callable.FirstParameter].NameId]);
+
+        var call = Assert.Single(section.Expressions, expression => expression.Kind == 14);
+        Assert.Equal(2u, call.ArgumentCount);
+    }
+
+    [Fact]
     public void TypedIrLowererRepresentsTextureSamplingStructurally()
     {
         var module = LowerTypedModule("""
@@ -5881,7 +6509,7 @@ public class GeneratorAndAnalyzerTests
                 attribute.Name.ToString() is "Kernel" or "KernelAttribute"));
         var semanticModel = compilation.GetSemanticModel(syntaxTree);
         var symbol = semanticModel.GetDeclaredSymbol(syntax)!;
-        var model = ShaderModelFactory.Create(syntax, symbol)!;
+        var model = ShaderModelFactory.Create(syntax, symbol, semanticModel, CancellationToken.None)!;
         return ShaderIrLowerer.Lower(model, semanticModel, CancellationToken.None)!;
     }
 

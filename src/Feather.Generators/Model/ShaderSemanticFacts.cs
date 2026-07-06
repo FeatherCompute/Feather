@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 
 namespace Feather.Generators.Model;
@@ -250,6 +251,214 @@ internal static class ShaderSemanticFacts
         => type is not null
             && type.GetAttributes().Any(static a =>
                 a.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == "global::Feather.GpuStructAttribute");
+
+    public static bool IsGpuStructInstanceCallableMethod(IMethodSymbol method)
+        => IsCallableMethod(method) && !method.IsStatic && IsGpuStructType(method.ContainingType);
+
+    public static ITypeSymbol? SubstituteMethodTypeParameters(ITypeSymbol? type, IMethodSymbol? method)
+    {
+        if (type is null || method is null || !method.IsGenericMethod || method.TypeParameters.Length == 0)
+        {
+            return type;
+        }
+
+        if (type is ITypeParameterSymbol typeParameter)
+        {
+            for (var i = 0; i < method.TypeParameters.Length && i < method.TypeArguments.Length; i++)
+            {
+                if (SymbolEqualityComparer.Default.Equals(typeParameter.OriginalDefinition, method.TypeParameters[i].OriginalDefinition) ||
+                    SymbolEqualityComparer.Default.Equals(typeParameter, method.TypeParameters[i]))
+                {
+                    return method.TypeArguments[i];
+                }
+            }
+
+            return type;
+        }
+
+        if (type is INamedTypeSymbol { IsGenericType: true } named)
+        {
+            var changed = false;
+            var arguments = new ITypeSymbol[named.TypeArguments.Length];
+            for (var i = 0; i < named.TypeArguments.Length; i++)
+            {
+                arguments[i] = SubstituteMethodTypeParameters(named.TypeArguments[i], method) ?? named.TypeArguments[i];
+                changed |= !SymbolEqualityComparer.Default.Equals(arguments[i], named.TypeArguments[i]);
+            }
+
+            return changed ? named.ConstructedFrom.Construct(arguments) : type;
+        }
+
+        return type;
+    }
+
+    public static IMethodSymbol SubstituteMethodTypeParameters(IMethodSymbol target, IMethodSymbol? containingMethod)
+    {
+        if (!target.IsGenericMethod || containingMethod is null)
+        {
+            return target;
+        }
+
+        var changed = false;
+        var arguments = new ITypeSymbol[target.TypeArguments.Length];
+        for (var i = 0; i < target.TypeArguments.Length; i++)
+        {
+            arguments[i] = SubstituteMethodTypeParameters(target.TypeArguments[i], containingMethod) ?? target.TypeArguments[i];
+            changed |= !SymbolEqualityComparer.Default.Equals(arguments[i], target.TypeArguments[i]);
+        }
+
+        return changed ? target.Construct(arguments) : target;
+    }
+
+    public static bool TryResolveCallableInvocationTarget(
+        IInvocationOperation invocation,
+        IMethodSymbol? containingMethod,
+        out IMethodSymbol target)
+    {
+        if (TryResolveInterfaceCallableImplementation(invocation, containingMethod, out target))
+        {
+            return true;
+        }
+
+        target = SubstituteMethodTypeParameters(invocation.TargetMethod, containingMethod);
+        return IsCallableMethod(target);
+    }
+
+    public static bool TryResolveInterfaceCallableImplementation(
+        IInvocationOperation invocation,
+        IMethodSymbol? containingMethod,
+        out IMethodSymbol implementation)
+    {
+        implementation = null!;
+        if (invocation.Instance is null ||
+            invocation.TargetMethod.ContainingType.TypeKind != TypeKind.Interface)
+        {
+            return false;
+        }
+
+        if (SubstituteMethodTypeParameters(invocation.Instance.Type, containingMethod) is not INamedTypeSymbol instanceType ||
+            !IsGpuStructType(instanceType))
+        {
+            return false;
+        }
+
+        if (instanceType.FindImplementationForInterfaceMember(invocation.TargetMethod) is not IMethodSymbol method ||
+            !IsCallableMethod(method))
+        {
+            return false;
+        }
+
+        implementation = method;
+        return true;
+    }
+
+    public static bool MutatesGpuStructInstanceCallable(
+        IMethodSymbol method,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+        => MutatesGpuStructInstanceCallable(
+            method,
+            compilation,
+            new HashSet<string>(StringComparer.Ordinal),
+            cancellationToken);
+
+    private static bool MutatesGpuStructInstanceCallable(
+        IMethodSymbol method,
+        Compilation compilation,
+        HashSet<string> visiting,
+        CancellationToken cancellationToken)
+    {
+        if (!IsGpuStructInstanceCallableMethod(method))
+        {
+            return false;
+        }
+
+        var key = CallableMutationKey(method);
+        if (!visiting.Add(key))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var reference in method.DeclaringSyntaxReferences)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (reference.GetSyntax(cancellationToken) is not MethodDeclarationSyntax syntax)
+                {
+                    continue;
+                }
+
+                var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
+                if (semanticModel.GetOperation(syntax, cancellationToken) is { } operation &&
+                    OperationMutatesGpuStructInstance(operation, compilation, visiting, cancellationToken))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            visiting.Remove(key);
+        }
+    }
+
+    private static bool OperationMutatesGpuStructInstance(
+        IOperation operation,
+        Compilation compilation,
+        HashSet<string> visiting,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        switch (operation)
+        {
+            case ISimpleAssignmentOperation simpleAssignment
+                when IsRootedInInstanceReference(simpleAssignment.Target):
+            case ICompoundAssignmentOperation compoundAssignment
+                when IsRootedInInstanceReference(compoundAssignment.Target):
+            case IIncrementOrDecrementOperation increment
+                when IsRootedInInstanceReference(increment.Target):
+                return true;
+            case IInvocationOperation invocation
+                when invocation.Instance is { } instance &&
+                     IsRootedInInstanceReference(instance) &&
+                     MutatesGpuStructInstanceCallable(invocation.TargetMethod, compilation, visiting, cancellationToken):
+                return true;
+        }
+
+        foreach (var child in operation.ChildOperations)
+        {
+            if (OperationMutatesGpuStructInstance(child, compilation, visiting, cancellationToken))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool IsRootedInInstanceReference(IOperation operation)
+    {
+        if (TryUnwrapConversion(operation, out var unwrapped))
+        {
+            operation = unwrapped;
+        }
+
+        return operation switch
+        {
+            IInstanceReferenceOperation => true,
+            IFieldReferenceOperation { Instance: { } instance } => IsRootedInInstanceReference(instance),
+            IPropertyReferenceOperation { Instance: { } instance } => IsRootedInInstanceReference(instance),
+            IArrayElementReferenceOperation array => IsRootedInInstanceReference(array.ArrayReference),
+            IInlineArrayAccessOperation inlineArray => IsRootedInInstanceReference(inlineArray.Instance),
+            _ => false
+        };
+    }
+
+    private static string CallableMutationKey(IMethodSymbol method)
+        => method.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
     /// <summary>Returns the canonical field index (0-based) for a known GpuStruct member.</summary>
     public static bool TryGetGpuStructFieldIndex(IPropertyReferenceOperation propRef, out int fieldIndex, out string fieldTypeName)

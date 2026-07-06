@@ -138,6 +138,7 @@ Rules:
 
 - Local callables can be inside the shader struct.
 - Shared callables must be static methods on a type marked with `[ShaderLibrary]`.
+- `[GpuStruct]` instance methods marked with `[Callable]` are lowered as free shader functions with the receiver passed as an explicit `this` value, so methods can read struct fields and primary-constructor record storage.
 - Shared callables must have source available to the consuming compilation.
 - Recursive callables are not supported.
 - Callable parameters and return values must use supported shader types.
@@ -155,6 +156,51 @@ public readonly partial record struct Vertex(float3 Position, float3 Normal, flo
 Supported members include explicit unmanaged fields and positional record primary-constructor storage. Invalid layouts produce `FE0019` and suppress generated layout source.
 
 Fixed array fields must use Feather fixed-array wrappers such as `GpuArray4<float3>`. Ordinary managed arrays are not shader values.
+
+GPU struct callables give a lightweight object-style pattern:
+
+```csharp
+[GpuStruct]
+public readonly partial record struct ScaleBias(float Scale, float Bias)
+{
+    [Callable]
+    public float Apply(float value)
+    {
+        return (value * Scale) + Bias;
+    }
+}
+```
+
+Inside shader code, `parameters[i].Apply(x)` is compiled as a shader function call that receives `parameters[i]` as its first argument. If the callable modifies `this` or a nested field, Feather emits the receiver as an `inout` shader parameter, so calls on `ReadWriteBuffer<T>` elements and locals write back through the original l-value. Calls that mutate a receiver from a read-only resource, or from a temporary value, are rejected.
+
+Interfaces are supported through generic monomorphization, not runtime dispatch:
+
+```csharp
+public interface IShape
+{
+    float Sdf(float3 p);
+}
+
+[GpuStruct]
+public readonly partial record struct Sphere(float Radius) : IShape
+{
+    [Callable]
+    public float Sdf(float3 p) => ShaderMath.Length(p) - Radius;
+}
+
+[ShaderLibrary]
+public static class ShapeOps
+{
+    [Callable]
+    public static float Eval<TShape>(TShape shape, float3 p)
+        where TShape : IShape
+    {
+        return shape.Sdf(p);
+    }
+}
+```
+
+Each concrete call, such as `Eval<Sphere>` or `Eval<Box>`, gets its own shader callable and directly calls the concrete `[GpuStruct]` implementation. Interface-typed locals such as `IShape shape = ...; shape.Sdf(p);`, virtual dispatch, and class inheritance are not part of this lowering model.
 
 ## Shared Memory, Barriers, Atomics
 
@@ -176,9 +222,9 @@ These are regular .NET features, but not GPU shader features:
 - `try`, `catch`, `throw`.
 - `async` / `await`.
 - Reflection and dynamic dispatch.
-- Virtual or interface calls.
+- Runtime virtual/interface dispatch.
 - Delegates and lambdas inside shader code.
-- Unsupported generic methods.
+- Unsupported generic methods. Generic shader callables are supported only when they can be monomorphized from concrete GPU value type arguments.
 - Arbitrary BCL calls.
 
 Move host-side setup outside the kernel and pass data through buffers, textures, uniforms, and GPU structs.
