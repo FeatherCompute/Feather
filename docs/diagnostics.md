@@ -52,6 +52,26 @@ For shared helper functions:
 - Put one-off helpers inside the shader struct and mark them `[Callable]`.
 - Put reusable helpers on a source-available `[ShaderLibrary]` type and mark each imported method `[Callable]`.
 - Make `[ShaderLibrary]` methods `static`; compiled binary-only helpers cannot be imported because the generator cannot see their method bodies.
+- Generic helper methods must be monomorphizable from concrete GPU value types. Interface constraints implemented by `[GpuStruct]` values are supported; runtime interface dispatch is not.
+
+### `FE0010`: Unsupported generic usage
+
+The generic method or type parameter could not be resolved to a concrete shader value type at the call site. Use a concrete helper, or use a generic `[Callable]` whose type parameters are constrained by interfaces implemented by `[GpuStruct]` types and are called with concrete GPU value arguments.
+
+### `FE0014`: Unsupported virtual/interface call
+
+Runtime virtual dispatch and interface-typed shader values are not supported. For interface-style code, move the call into a generic callable:
+
+```csharp
+[Callable]
+public static float Eval<TShape>(TShape shape, float3 p)
+    where TShape : IShape
+{
+    return shape.Sdf(p);
+}
+```
+
+Each concrete call is emitted as its own shader callable.
 
 ### `FE0016`: Resource access mode violation
 

@@ -68,7 +68,8 @@ These pages are written for users who need to inspect generated output, debug a 
 
 1. Build the native bridge and run `samples/HelloBuffer`.
 2. Read the [Tutorial](tutorial.md) through the texture section.
-3. Run `samples/Mandelbrot` and compare the output with the screenshot above.
-4. Run `samples/WindowCompute` if you want interactive output.
-5. Read [Automatic Differentiation](autodiff.md) and run `samples/AdLinearRegression` if you care about gradients.
-6. Keep [API Reference](api.md) open while writing your first custom kernel.
+3. Run `samples/GpuStructInterfaces` if you want GPU structs and generic interface callables.
+4. Run `samples/Mandelbrot` and compare the output with the screenshot above.
+5. Run `samples/WindowCompute` if you want interactive output.
+6. Read [Automatic Differentiation](autodiff.md) and run `samples/AdLinearRegression` if you care about gradients.
+7. Keep [API Reference](api.md) open while writing your first custom kernel.

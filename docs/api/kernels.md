@@ -78,6 +78,55 @@ public static class Brdf
 
 Callables must use supported shader value types. Overloads bind by generated symbol identity. `[ShaderLibrary]` callables must be static and source-available to the consuming compilation.
 
+`[GpuStruct]` instance callables are supported. Feather lowers the receiver as an explicit first parameter. Read-only receiver methods use an `in` parameter. Methods that assign to `this` or a nested receiver field use an `inout` receiver, so calls on locals and `ReadWriteBuffer<T>` elements can write back through the original l-value.
+
+```csharp
+[GpuStruct]
+public partial struct Counter
+{
+    public float Value;
+
+    [Callable]
+    public void Add(float amount)
+    {
+        Value += amount;
+    }
+}
+```
+
+Mutating receiver calls require an addressable receiver. A call on a temporary value, or on an element from a read-only resource, is rejected by the generator.
+
+## Generic Interface Callables
+
+Shader callables may use generic type parameters when every use can be monomorphized from concrete GPU value types. The supported object-style pattern is an interface constraint implemented by `[GpuStruct]` types:
+
+```csharp
+public interface IShape
+{
+    float Sdf(float3 p);
+}
+
+[GpuStruct]
+public readonly partial record struct Sphere(float Radius) : IShape
+{
+    [Callable]
+    public float Sdf(float3 p) => ShaderMath.Length(p) - Radius;
+}
+
+[ShaderLibrary]
+public static class ShapeOps
+{
+    [Callable]
+    public static float Eval<TShape>(TShape shape, float3 p)
+        where TShape : IShape
+    {
+        return shape.Sdf(p);
+    }
+}
+```
+
+Each concrete call, such as `Eval<Sphere>`, emits a separate callable and directly calls `Sphere.Sdf`. Feather does not lower interface-typed locals, virtual dispatch, reference identity, vtables, or class inheritance into GPU code.
+
 ## Shared Memory
 
 ```csharp
@@ -142,6 +191,7 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 - `ThreadIds`, `LocalIds`, `GroupIds`, `DispatchSize`, `GroupSize`, `GpuBarrier`, `GpuAtomic`, and `SharedMemory<T>` are shader-only markers.
 - `[Callable]` methods are ordinary C# declarations at compile time, but their bodies must fit the shader subset.
 - `[ShaderLibrary]` is a compile-time import marker; it does not register runtime functions.
+- Generic interface callables are compile-time monomorphization only; runtime interface dispatch remains unsupported.
 
 ## Lifetime And Errors
 
@@ -153,6 +203,7 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 ## Samples And Tests
 
 - `samples/HelloBuffer`
+- `samples/GpuStructInterfaces`
 - `samples/ParallelReduction`
 - `samples/Histogram`
 - `tests/Feather.Integration.Tests/GeneratedComputeDispatchTests.cs`

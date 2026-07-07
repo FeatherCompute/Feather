@@ -82,9 +82,43 @@ public static class ColorSpace
 - Library methods must be marked with `[Callable]`.
 - The containing type must be marked with `[ShaderLibrary]`.
 - The method body must be source-available to the generator. Methods from a normal compiled DLL or NuGet package cannot be imported unless their source is also compiled into the consuming project.
-- Generic methods, recursion, virtual/interface dispatch, exceptions, async/await, object allocation, managed collections, and LINQ are not supported.
+- Generic methods are supported only when they can be monomorphized from concrete GPU value type arguments. The main supported pattern is an interface constraint implemented by `[GpuStruct]` types.
+- Recursion, runtime virtual/interface dispatch, exceptions, async/await, object allocation, managed collections, and LINQ are not supported.
 - Parameters and return values must use supported shader types: scalars, Feather vectors/matrices, supported GPU structs, and supported shader resource wrappers where the backend allows them.
 - Overloads are supported; Feather binds by Roslyn symbol identity and emits a generated mangled function name.
+
+## Generic Interface Pattern
+
+Generic shader-library callables can express a small object-style pattern without runtime dispatch:
+
+```csharp
+public interface ISdfShape
+{
+    float Sdf(float3 p);
+}
+
+[GpuStruct]
+public readonly partial record struct Sphere(float Radius) : ISdfShape
+{
+    [Callable]
+    public float Sdf(float3 p) => ShaderMath.Length(p) - Radius;
+}
+
+[ShaderLibrary]
+public static class SdfOps
+{
+    [Callable]
+    public static float Eval<TShape>(TShape shape, float3 p)
+        where TShape : ISdfShape
+    {
+        return shape.Sdf(p);
+    }
+}
+```
+
+When a kernel calls `SdfOps.Eval(sphere, p)`, Feather emits a concrete `Eval<Sphere>` callable and resolves `shape.Sdf(p)` to `Sphere.Sdf`. A second concrete type gets a second generated callable. This is closer to C++ template or Rust-style monomorphization than to C# runtime interface dispatch.
+
+The interface is used only as a compile-time constraint. Do not store interface-typed shader locals such as `ISdfShape shape = ...`; that would require runtime dispatch and is rejected.
 
 ## Source Availability
 
@@ -118,7 +152,7 @@ Common failures:
 | `FE0008` on a helper method | Add `[Callable]`, put the method inside the shader struct, or put it on a `[ShaderLibrary]` type. |
 | `FE0008` says a library method must be static | Make the `[ShaderLibrary]` callable static. |
 | `FE0008` says the method must be source-available | Include the library source in the consuming project. |
-| `FE0010` | Remove generic callable methods. |
+| `FE0010` | Use a concrete callable, or make the generic callable monomorphizable from supported GPU value type arguments. |
 | `FE0015` | Break direct or mutual recursion between callables. |
 | `FE0027` | Inspect the typed IR lowering message; the callable body contains a construct outside the shader subset. |
 

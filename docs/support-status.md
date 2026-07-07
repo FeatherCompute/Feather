@@ -7,6 +7,7 @@ Feather is experimental. This page describes the intended stability of each publ
 | Area | Status | Notes |
 | --- | --- | --- |
 | C# compute kernels over buffers | Preview-stable | Main supported path; generated typed IR dispatches through EasyGPU when the kernel is in the supported subset. |
+| GPU struct callable patterns | Preview-stable | `[GpuStruct]` instance callables, mutable receiver writeback, and monomorphized generic interface callables are supported on the typed compute path. |
 | Vector, matrix, scalar math | Preview-stable | Includes `float2/3/4`, `int2/3/4`, square float matrices, swizzles, and `ShaderMath`/`Hlsl` helpers. |
 | 2D and 3D textures | Preview | Load/store, sampling, mipmap requests, and TGA IO are available for supported formats. |
 | Windows and texture presentation | Preview | Native window support depends on EasyGPU window support and platform libraries. |
@@ -21,6 +22,7 @@ Feather is experimental. This page describes the intended stability of each publ
 | Area | Level | Notes |
 | --- | --- | --- |
 | Buffer compute kernels | Most mature | Core path, samples assert `TypedEasyGpu`. |
+| GPU value object patterns | Mature preview | `[GpuStruct]` data, instance callables, and compile-time interface monomorphization. |
 | 2D texture compute | Mature preview | Core formats are proven; some formats are backend-dependent. |
 | 3D texture compute | Preview | API and native bridge exist; coverage is narrower than 2D. |
 | Windowing | Preview | Presentation shell; platform-thread caveats apply. |

@@ -142,6 +142,10 @@ public static class Pbr
 
 `[Callable]` methods are emitted into the generated shader module. They must stay inside the supported shader subset: no object allocation, no exceptions, no async, no virtual dispatch, and no ordinary .NET collections. Library callables must be static and source-available to the generator. See [Shader Libraries](shader-libraries.md) for the full set of rules.
 
+For object-style shader values, put data and instance `[Callable]` methods on a `[GpuStruct]`. Feather lowers the receiver as an explicit shader parameter. If the method mutates the receiver, the parameter is lowered as `inout` and the call site must be a local or writable resource element.
+
+Generic interface constraints are supported when they can be monomorphized. A callable such as `Eval<TShape>(TShape shape) where TShape : IShape` emits one concrete shader callable for each GPU value type used at call sites. Runtime interface dispatch and interface-typed shader locals remain unsupported. See `samples/GpuStructInterfaces` for a complete example.
+
 ## 6. Textures
 
 Textures are created through `GPU` and passed to kernels as shader-facing views.

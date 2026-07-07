@@ -175,6 +175,7 @@ Run samples from the repository root:
 
 ```bash
 dotnet run --project samples/HelloBuffer/HelloBuffer.csproj
+dotnet run --project samples/GpuStructInterfaces/GpuStructInterfaces.csproj
 dotnet run --project samples/Mandelbrot/Mandelbrot.csproj -- 1024 1024 256
 dotnet run --project samples/WindowCompute/WindowCompute.csproj
 dotnet run --project samples/WindowGraphicsTriangle/WindowGraphicsTriangle.csproj
@@ -189,6 +190,7 @@ of the Feather source repository.
 | Sample group | Samples |
 | --- | --- |
 | First compute | `HelloWorld`, `HelloBuffer`, `ParallelReduction`, `Histogram` |
+| GPU struct interfaces | `GpuStructInterfaces` |
 | Image compute | `Mandelbrot`, `JuliaSet`, `RayTracing`, `SdfRenderer`, `VolumetricFog` |
 | Textures | `TextureCopy`, `ColorFilter` |
 | Windows | `WindowHello`, `WindowCompute`, `WindowPixels` |

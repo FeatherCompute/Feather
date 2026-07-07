@@ -19,7 +19,7 @@ Feather code usually uses these namespaces:
 
 - [Core Runtime](api/core.md): `GPU`, `GpuContext`, capabilities, dispatch, profiler, attributes, diagnostics.
 - [Resources](api/resources.md): buffers, textures, samplers, uniforms, access modes, layout and lifetime.
-- [Kernels](api/kernels.md): kernel interfaces, thread IDs, group IDs, callables, shader libraries, barriers, shared memory, atomics.
+- [Kernels](api/kernels.md): kernel interfaces, thread IDs, group IDs, callables, GPU struct instance helpers, generic interface monomorphization, barriers, shared memory, atomics.
 - [Math](api/math.md): vector and matrix types, swizzles, `ShaderMath`, `Hlsl`.
 - [Graphics](api/graphics.md): vertex/fragment shaders, pipelines, state objects, draw calls.
 - [Windowing](api/windowing.md): `GpuWindow`, events, pixel buffers, texture presenters.

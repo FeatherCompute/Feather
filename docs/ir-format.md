@@ -175,7 +175,7 @@ Section 7 is the production model for modern generated shaders. It represents:
 - Function bodies.
 - Typed statements and expressions.
 - L-values and resources.
-- Callables and overload binding.
+- Callables, overload binding, and parameter directions.
 - Struct metadata and fixed arrays.
 - Shared memory and barriers.
 - Integer atomics.
@@ -190,9 +190,36 @@ Important section 7 conventions:
 - Primitive type records use kind `1` with primitive ids `0` bool, `1` int, `2` uint, and `3` float plus bit width.
 - Array type records use kind `5`; field `A` references the element type and field `B` stores the fixed element count.
 - Callable function records store both display name and mangled identity.
+- Callable parameter records store direction values: `0` `in`, `1` `out`, and `2` `inout`.
+- `[GpuStruct]` instance callables store the lowered receiver as the first parameter named `this`. Mutating receiver methods use direction `2`.
+- Generic callable monomorphizations are represented as ordinary callable function records with constructed mangled identities.
 - Atomic expression kind `22` stores operation and l-value references.
 - Texture-sample expression kind `23` stores sample/sample-level operation and argument ranges.
 - Known math, HLSL aliases, and AD markers are resolved by Roslyn symbol identity.
+
+### Section 7 Callable Tables
+
+The section 7 function table stores one entry point plus any reachable callables. Each function record contains:
+
+| Field | Meaning |
+| --- | --- |
+| Kind | Entry stage or callable function kind. |
+| Name string id | Source/display name. |
+| Mangled name string id | Stable generated identity used for overloads and constructed generics. |
+| Return type id | Type table reference. |
+| First parameter | Parameter table index, or `uint.MaxValue` when absent. |
+| Parameter count | Number of parameter records. |
+| Body statement id | Root statement/block reference. |
+
+Each parameter record contains:
+
+| Field | Meaning |
+| --- | --- |
+| Direction | `0` `in`, `1` `out`, `2` `inout`. |
+| Name string id | Source parameter name, or lowered `this`. |
+| Type id | Type table reference. |
+
+Callable call expressions reference the mangled callable name and an argument range. For generic interface monomorphization, the call expression targets the constructed callable or concrete `[GpuStruct]` implementation; no interface-dispatch table is serialized.
 
 ## Compatibility Payloads
 

@@ -30,6 +30,8 @@ New completed DSL features should not prove behavior through `CpuReferenceFallba
 | Matrices | Supported | Explicit Feather matrix types. |
 | `[GpuStruct]` | Supported | Deterministic layout metadata required. |
 | Fixed GPU arrays | Supported | Use `GpuArrayN<T>` wrappers. |
+| `[GpuStruct]` instance callables | Supported | Receiver lowers as explicit `this`; mutating receivers use `inout` and require addressable l-values. |
+| Generic interface callables | Supported subset | Monomorphized per concrete `[GpuStruct]` value type argument; no runtime interface dispatch. |
 | `if/else` | Supported | Structured block records validated natively. |
 | `for` | Supported | Canonical typed lowering. |
 | `while` / `do` | Supported for compute | AD has narrower restrictions. |
@@ -95,6 +97,8 @@ python3 scripts/ad-industrial-gate.py
 | --- | --- |
 | Native unsupported call | Is the call a known `ShaderMath`, `Hlsl`, AD marker, texture sample, or `[Callable]`? |
 | Invalid l-value | Is the assignment target a supported buffer/texture/shared-memory l-value? |
+| Mutating receiver rejected | Is the receiver a local, parameter, or read-write resource element rather than a temporary or read-only resource? |
+| Generic callable rejected | Can every type parameter be resolved to a concrete supported GPU value type at the call site? |
 | Unsupported format | Is the texture format in the supported backend set? |
 | AD rejected control flow | Did the AD kernel use `while`, `do`, `break`, or `continue`? |
 | Fallback instead of `TypedEasyGpu` | Does the generated payload include section 7 typed IR? |

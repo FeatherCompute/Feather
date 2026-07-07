@@ -160,5 +160,6 @@ Use this when a kernel compiles but behaves differently than expected. For a hig
 
 - [Tutorial](tutorial.md): learn the compute model in detail.
 - [Examples](examples.md): pick the next sample to run.
+- `samples/GpuStructInterfaces`: inspect GPU struct instance callables and generic interface monomorphization.
 - [C# Shader Subset](csharp-subset.md): learn exactly what is supported in GPU code.
 - [API Reference](api.md): look up runtime and shader-facing types.

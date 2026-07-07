@@ -37,6 +37,7 @@ Generated descriptors include:
 - AutoDiff flag.
 - Bounds-check flag.
 - Serialized FEIR bytes.
+- Callable metadata in the serialized typed IR, including mangled names and parameter directions.
 
 ## FEIR Reader
 
@@ -51,6 +52,8 @@ Generated descriptors include:
 - `FeatherIrExpressionNode`
 
 Use this in tests, diagnostics, and tooling that needs structured access to generated FEIR.
+
+The public reader exposes the stable outer payload and legacy structured sections. Section 7 typed IR is the canonical native route and is documented in [FEIR Binary Format](../ir-format.md) for contributors, but it is not currently exposed as a complete public object model.
 
 ## Layout Metadata
 
@@ -96,6 +99,7 @@ See [FEIR Compiler Pipeline](../feir.md), [FEIR Binary Format](../ir-format.md),
 ## Samples And Tests
 
 - `samples/SpirvOptInspection`
+- `samples/GpuStructInterfaces`
 - `samples/ProfilerSuite`
 - `tests/Feather.Integration.Tests/GeneratedComputeDispatchTests.cs`
 - `tests/Feather.Integration.Tests/NativeResourceRoundTripTests.cs`

@@ -7,13 +7,14 @@ Feather ships samples that are meant to be read as a learning path. Each sample 
 | Step | Sample | Command | What it teaches |
 | --- | --- | --- | --- |
 | 1 | `HelloBuffer` | `dotnet run --project samples/HelloBuffer/HelloBuffer.csproj` | Minimal buffer upload, 1D dispatch, readback, `DispatchPath.TypedEasyGpu`. |
-| 2 | `Mandelbrot` | `dotnet run --project samples/Mandelbrot/Mandelbrot.csproj -- 1024 1024 256` | 2D dispatch, `Uniform<T>`, callables, math, image output. |
-| 3 | `JuliaSet` | `dotnet run --project samples/JuliaSet/JuliaSet.csproj` | Another 2D compute renderer with parameterized fractal math. |
-| 4 | `TextureCopy` | `dotnet run --project samples/TextureCopy/TextureCopy.csproj` | 2D texture load/store instead of buffer-backed pixels. |
-| 5 | `WindowCompute` | `dotnet run --project samples/WindowCompute/WindowCompute.csproj` | Native window loop and GPU texture presentation. |
-| 6 | `WindowGraphicsTriangle` | `dotnet run --project samples/WindowGraphicsTriangle/WindowGraphicsTriangle.csproj` | C# vertex/fragment shaders and offscreen render target presentation. |
-| 7 | `AdLinearRegression` | `dotnet run --project samples/AdLinearRegression/AdLinearRegression.csproj` | `[AutoDiff]`, `AD.Parameter`, `AD.Loss`, `TrainingStep`, optimizer handoff. |
-| 8 | `ProfilerSuite` | `dotnet run --project samples/ProfilerSuite/ProfilerSuite.csproj` | Profiling, dispatch path assertions, AD/NN/graphics timing. |
+| 2 | `GpuStructInterfaces` | `dotnet run --project samples/GpuStructInterfaces/GpuStructInterfaces.csproj` | `[GpuStruct]` data, instance `[Callable]` methods, mutating receivers, and generic interface monomorphization. |
+| 3 | `Mandelbrot` | `dotnet run --project samples/Mandelbrot/Mandelbrot.csproj -- 1024 1024 256` | 2D dispatch, `Uniform<T>`, callables, math, image output. |
+| 4 | `JuliaSet` | `dotnet run --project samples/JuliaSet/JuliaSet.csproj` | Another 2D compute renderer with parameterized fractal math. |
+| 5 | `TextureCopy` | `dotnet run --project samples/TextureCopy/TextureCopy.csproj` | 2D texture load/store instead of buffer-backed pixels. |
+| 6 | `WindowCompute` | `dotnet run --project samples/WindowCompute/WindowCompute.csproj` | Native window loop and GPU texture presentation. |
+| 7 | `WindowGraphicsTriangle` | `dotnet run --project samples/WindowGraphicsTriangle/WindowGraphicsTriangle.csproj` | C# vertex/fragment shaders and offscreen render target presentation. |
+| 8 | `AdLinearRegression` | `dotnet run --project samples/AdLinearRegression/AdLinearRegression.csproj` | `[AutoDiff]`, `AD.Parameter`, `AD.Loss`, `TrainingStep`, optimizer handoff. |
+| 9 | `ProfilerSuite` | `dotnet run --project samples/ProfilerSuite/ProfilerSuite.csproj` | Profiling, dispatch path assertions, AD/NN/graphics timing. |
 
 ## Visual Samples
 
@@ -65,6 +66,7 @@ The Cornell box image demonstrates path/ray-style rendering workloads. Use the r
 | Group | Samples | Start here when |
 | --- | --- | --- |
 | First compute | `HelloWorld`, `HelloBuffer` | You are checking that the build and native bridge work. |
+| Shader data modeling | `GpuStructInterfaces` | You want GPU structs, object-style callables, and monomorphized interface constraints. |
 | Buffer algorithms | `ParallelReduction`, `Histogram` | You need reductions, atomics, or memory-access examples. |
 | Image compute | `Mandelbrot`, `JuliaSet`, `RayTracing`, `SdfRenderer`, `VolumetricFog` | You want real visual output from compute kernels. |
 | Textures | `TextureCopy`, `ColorFilter` | You need 2D texture resources, formats, and image IO. |
@@ -78,6 +80,7 @@ The Cornell box image demonstrates path/ray-style rendering workloads. Use the r
 - Generated kernels are `readonly partial struct` types with `[Kernel]`.
 - Shader resource constructor parameters become FEIR resource bindings.
 - `SampleProof.AssertTypedEasyGpu(path)` verifies that a sample did not silently rely on a compatibility fallback.
+- `GpuStructInterfaces` checks generated GLSL for concrete generic monomorphizations and `inout` receivers.
 - Window samples render into Feather textures and then present those textures; swapchain rendering is not exposed as the public graphics target.
 - AD samples use `AD.Parameter` and `AD.Loss` inside a generated kernel, then drive `GpuADKernel<T>` or `TrainingStep<TKernel>` from host code.
 

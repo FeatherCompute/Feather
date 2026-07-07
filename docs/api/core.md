@@ -74,12 +74,14 @@ Console.WriteLine($"{caps.BackendType}: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGr
 | `[VertexShader]` | Struct | Marks a generated vertex shader. |
 | `[FragmentShader]` | Struct | Marks a generated fragment shader. |
 | `[Entry]` | Method | Selects an explicit entry method. |
-| `[Callable]` | Method | Emits a helper method into the shader module. |
+| `[Callable]` | Method | Emits a helper method into the shader module. Instance methods on `[GpuStruct]` values lower the receiver explicitly. |
 | `[ShaderLibrary]` | Class/struct | Enables source-available static `[Callable]` helpers to be imported by generated shaders. |
-| `[GpuStruct]` | Struct | Requests deterministic GPU layout metadata. |
+| `[GpuStruct]` | Struct | Requests deterministic GPU layout metadata and enables GPU-value instance callables. |
 | `[Position]` | Field/property | Marks graphics position output. |
 | `[Color(index)]` | Field/property | Marks a fragment color output. |
 | `[Binding(index)]` | Parameter/field | Overrides a resource binding where supported. |
+
+`[GpuStruct]` is a value-type GPU layout contract. It is also the supported surface for object-style shader code: instance `[Callable]` methods can read fields, and mutating methods lower their receiver as `inout` when the call site can write back.
 
 ## Enums
 
@@ -133,6 +135,7 @@ Core runtime APIs are host APIs. Attributes are source-generation metadata. Thre
 ## Samples And Tests
 
 - `samples/HelloBuffer`
+- `samples/GpuStructInterfaces`
 - `samples/ProfilerSuite`
 - `samples/SpirvOptInspection`
 - `tests/Feather.Tests/PublicApiTests.cs`

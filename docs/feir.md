@@ -34,7 +34,7 @@ For a generated compute kernel, Feather emits:
 - Thread-group size.
 - Entry-point information.
 - Serialized FEIR bytes.
-- Typed IR section data for statements, expressions, l-values, callables, struct layout, atomics, texture operations, and AD annotations.
+- Typed IR section data for statements, expressions, l-values, callables, callable parameter directions, struct layout, atomics, texture operations, and AD annotations.
 
 For graphics, the generator emits combined graphics metadata plus separate vertex and fragment stage FEIR payloads.
 
@@ -55,12 +55,21 @@ Modern Feather uses section 7 typed IR as the canonical representation. That let
 - Push constants.
 - Known math intrinsics.
 - Kernel-local callables, source-available shader-library callables, and overloads.
-- GPU structs and fixed arrays.
+- GPU structs, fixed arrays, and `[GpuStruct]` instance callables.
+- Generic shader callables that can be monomorphized from concrete GPU value types.
 - Atomics.
 - Texture loads, stores, samples, and sample-level operations.
 - AD parameter/loss metadata.
 
 This is why generated kernels can use `ShaderMath.Sqrt`, `Hlsl.Dot`, a kernel-local `[Callable]`, or a source-available `[ShaderLibrary]` helper without the native bridge guessing from source text.
+
+## Callables, Receivers, And Monomorphization
+
+FEIR represents shader helpers as typed callable functions. A `[GpuStruct]` instance `[Callable]` is lowered as a free callable with an explicit `this` parameter. If the method only reads the receiver, the parameter direction is `in`. If the method writes `this` or a nested receiver field, the direction is `inout`.
+
+The native bridge preserves that direction when it builds the EasyGPU module, so the generated GLSL receives `inout` for mutable receivers. Calls are accepted only when the receiver is an addressable shader value, such as a local or a `ReadWriteBuffer<T>` element. A mutating call on a read-only resource or temporary value is rejected before dispatch.
+
+Generic interface calls use compile-time monomorphization. For a callable such as `Eval<TShape>(TShape shape) where TShape : IShape`, each concrete call site emits a constructed callable such as `Eval<Sphere>` or `Eval<GroundPlane>`. Interface calls inside that callable resolve to the concrete `[GpuStruct]` implementation. FEIR does not encode a runtime vtable, boxed interface value, or tagged-union dispatch for this pattern.
 
 ## Inspecting FEIR And GLSL
 

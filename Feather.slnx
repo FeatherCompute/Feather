@@ -24,6 +24,7 @@
     <Project Path="samples/Histogram/Histogram.csproj" />
     <Project Path="samples/Mandelbrot/Mandelbrot.csproj" />
     <Project Path="samples/SdfRenderer/SdfRenderer.csproj" />
+    <Project Path="samples/GpuStructInterfaces/GpuStructInterfaces.csproj" />
     <Project Path="samples/VolumetricFog/VolumetricFog.csproj" />
     <Project Path="samples/AdLinearRegression/AdLinearRegression.csproj" />
     <Project Path="samples/AutoDiffLinearRegression/AutoDiffLinearRegression.csproj" />

@@ -139,9 +139,11 @@ Rules:
 - Local callables can be inside the shader struct.
 - Shared callables must be static methods on a type marked with `[ShaderLibrary]`.
 - `[GpuStruct]` instance methods marked with `[Callable]` are lowered as free shader functions with the receiver passed as an explicit `this` value, so methods can read struct fields and primary-constructor record storage.
+- Mutating `[GpuStruct]` instance callables lower the receiver as `inout` and require an addressable receiver.
 - Shared callables must have source available to the consuming compilation.
 - Recursive callables are not supported.
 - Callable parameters and return values must use supported shader types.
+- Generic callables are supported only when the generator can emit a concrete callable for each GPU value type argument.
 - Nested callable patterns are supported for ordinary compute where the generator can lower them, but AD callables are more restricted.
 
 ## GPU Structs
@@ -200,7 +202,9 @@ public static class ShapeOps
 }
 ```
 
-Each concrete call, such as `Eval<Sphere>` or `Eval<Box>`, gets its own shader callable and directly calls the concrete `[GpuStruct]` implementation. Interface-typed locals such as `IShape shape = ...; shape.Sdf(p);`, virtual dispatch, and class inheritance are not part of this lowering model.
+Each concrete call, such as `Eval<Sphere>` or `Eval<Box>`, gets its own shader callable and directly calls the concrete `[GpuStruct]` implementation. Mutating interface methods follow the same receiver rules as ordinary `[GpuStruct]` instance callables: the concrete implementation receives an `inout` receiver when it modifies `this`, while the generic callable parameter itself keeps normal C# value semantics unless it is explicitly written back by shader code.
+
+Interface-typed locals such as `IShape shape = ...; shape.Sdf(p);`, virtual dispatch, and class inheritance are not part of this lowering model. See `samples/GpuStructInterfaces` for a complete runnable example.
 
 ## Shared Memory, Barriers, Atomics
 
@@ -236,6 +240,7 @@ Move host-side setup outside the kernel and pass data through buffers, textures,
 | `List<T>` or managed arrays inside `Execute` | `GpuBuffer<T>` or `GpuArrayN<T>` in a `[GpuStruct]`. |
 | `MathF.SomeCall` that does not lower | `ShaderMath.SomeCall` or `Hlsl.SomeCall` if supported. |
 | A helper method without attributes | A static `[Callable]` method inside the shader struct. |
+| `IShape shape = ...` inside shader code | A generic callable such as `Eval<TShape>(TShape shape) where TShape : IShape`. |
 | Object construction for host data | Build host objects before dispatch and pass resources/uniforms. |
 | A complex C# abstraction | Make the shader data flow explicit with buffers, textures, uniforms, structs. |
 | A top-level local referenced by shader code | Move it to a static const/static readonly field on a named type. |
