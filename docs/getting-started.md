@@ -8,7 +8,7 @@ This guide takes you from a fresh checkout to a working generated GPU kernel.
 - CMake 3.20+.
 - A C++20 compiler.
 - A GPU and driver supported by the selected EasyGPU backend.
-- Vulkan SDK when building the Vulkan backend.
+- Vulkan SDK, glslang, and SPIRV-Tools when building the Vulkan backend.
 - Linux window samples need X11 development libraries.
 
 Build the native Feather runtime locally when working from source. Published
@@ -47,7 +47,13 @@ Useful variants:
 ```bash
 cmake -S native -B native/build-opengl -DEASYGPU_BACKEND=OpenGL
 cmake -S native -B native/build-headless -DFEATHER_BUILD_WINDOW=OFF
+cmake -S native -B native/build-aggressive -DFEATHER_SHADER_OPTIMIZATION_LEVEL=Aggressive
 ```
+
+Vulkan builds default to Feather's production-oriented `Ultra` SPIR-V preset.
+Set `FEATHER_SHADER_OPTIMIZATION_LEVEL` to `None`, `Size`, `Aggressive`,
+`Ultra`, or `Extreme` at CMake configure time. `Extreme` is experimental and
+can reduce floating-point precision; qualify it for each workload and device.
 
 If you want managed code to load a specific native library, set:
 

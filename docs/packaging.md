@@ -99,6 +99,10 @@ identifier:
 packs files from that staging directory into `FeatherCompute.NativeAssets`. Do
 not commit generated native binaries under `src/`.
 
+Release native assets are built with SPIRV-Tools optimization enabled and the
+`Ultra` preset. On platforms where shader-toolchain libraries are dynamically
+linked, the staging script includes those transitive native dependencies.
+
 Supported RID folders declared by the project:
 
 - `win-x64`

@@ -12,7 +12,7 @@ jobs:
     name: Managed build and tests
     runs-on: ubuntu-24.04
     env:
-      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=OFF -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
+      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=ON -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,7 +71,7 @@ jobs:
     name: Native smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
-      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=OFF -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
+      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=ON -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
       FEATHER_NATIVE_CONFIGURATION: Release
     strategy:
       fail-fast: false

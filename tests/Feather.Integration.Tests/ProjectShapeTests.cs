@@ -54,6 +54,27 @@ public class ProjectShapeTests
     }
 
     [Fact]
+    public void NativeReleaseBuildEnablesProductionSpirvOptimization()
+    {
+        var root = FindRepositoryRoot();
+        var cmake = File.ReadAllText(Path.Combine(root, "native", "CMakeLists.txt"));
+        var nativeBridge = File.ReadAllText(Path.Combine(root, "native", "feather_c_api.cpp"));
+        var ciWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "ci.yml"));
+        var releaseWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "release.yml"));
+
+        Assert.Contains("FEATHER_SHADER_OPTIMIZATION_LEVEL \"Ultra\"", cmake);
+        Assert.Contains("context->SetOptimizationLevel(kShaderOptimizationLevel)", nativeBridge);
+        Assert.Contains("forwardContext->SetOptimizationLevel(kShaderOptimizationLevel)", nativeBridge);
+        Assert.Contains("vertex_shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
+        Assert.Contains("fragment_shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
+        Assert.Contains("shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
+        Assert.Contains("EASYGPU_ENABLE_SPIRV_OPT=ON", ciWorkflow);
+        Assert.Contains("EASYGPU_ENABLE_SPIRV_OPT=ON", releaseWorkflow);
+        Assert.DoesNotContain("EASYGPU_ENABLE_SPIRV_OPT=OFF", ciWorkflow);
+        Assert.DoesNotContain("EASYGPU_ENABLE_SPIRV_OPT=OFF", releaseWorkflow);
+    }
+
+    [Fact]
     public void EasyGpuModuleBarriersLowerThroughStructuralNode()
     {
         var root = FindRepositoryRoot();

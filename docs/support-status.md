@@ -55,6 +55,13 @@ cmake -S native -B native/build -DEASYGPU_BACKEND=Vulkan
 cmake -S native -B native/build-gl -DEASYGPU_BACKEND=OpenGL
 ```
 
+Vulkan builds enable SPIRV-Tools by default and use
+`FEATHER_SHADER_OPTIMIZATION_LEVEL=Ultra`. `Ultra` uses SPIRV-Tools' maintained
+performance recipe plus conservative cleanup passes. The setting is applied to
+compute, automatic-differentiation, vertex, and fragment shaders. It can be
+overridden with `None`, `Size`, `Aggressive`, `Ultra`, or the experimental
+`Extreme` preset at CMake configure time.
+
 The active backend can be queried:
 
 ```csharp

@@ -25,7 +25,7 @@ jobs:
     name: Native assets (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
     env:
-      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=OFF -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
+      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=ON -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
       FEATHER_NATIVE_CONFIGURATION: Release
       FEATHER_RUNTIME_IDENTIFIER: ${{ matrix.rid }}
     strategy:

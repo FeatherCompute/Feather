@@ -50,6 +50,11 @@ namespace {
 
 void trace_graphics_step(const char* step);
 
+#ifndef FEATHER_SHADER_OPTIMIZATION_LEVEL
+#define FEATHER_SHADER_OPTIMIZATION_LEVEL GPU::Backend::ShaderOptimizationLevel::Ultra
+#endif
+
+constexpr GPU::Backend::ShaderOptimizationLevel kShaderOptimizationLevel = FEATHER_SHADER_OPTIMIZATION_LEVEL;
 constexpr FeContextHandle kDefaultContext = 1;
 constexpr uint8_t kIrOpcodeIf = 4;
 constexpr uint8_t kIrOpcodeBeginBlock = 13;
@@ -4702,7 +4707,11 @@ std::unique_ptr<GPU::Kernel::KernelBuildContext> try_build_easygpu_kernel_contex
         return nullptr;
     }
 
-    return GPU::IR::BuildKernelBuildContext(*module);
+    auto context = GPU::IR::BuildKernelBuildContext(*module);
+    if (context != nullptr) {
+        context->SetOptimizationLevel(kShaderOptimizationLevel);
+    }
+    return context;
 }
 
 GPU::Backend::BufferMode easygpu_buffer_storage_mode(uint32_t mode) {
@@ -5534,6 +5543,7 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         fail(FE_ERROR_UNSUPPORTED, "AD forward build context could not be lowered with an active GradientTape.");
         return false;
     }
+    forwardContext->SetOptimizationLevel(kShaderOptimizationLevel);
     if (gradientTape.Size() == 0) {
         fail(FE_ERROR_UNSUPPORTED, "AD forward lowering did not record any differentiable operations.");
         return false;
@@ -5939,6 +5949,7 @@ bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferStat
     shader_desc.type = GPU::Backend::ShaderType::Compute;
     shader_desc.sourceCode = glsl.str();
     shader_desc.entryPoint = "main";
+    shader_desc.optimizationLevel = kShaderOptimizationLevel;
 
     const auto shader = backend.CreateShader(shader_desc);
     if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
@@ -9736,7 +9747,7 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
     vertex_shader_desc.type = GPU::Backend::ShaderType::Vertex;
     vertex_shader_desc.sourceCode = vertex_shader_source;
     vertex_shader_desc.entryPoint = "main";
-    vertex_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::Aggressive;
+    vertex_shader_desc.optimizationLevel = kShaderOptimizationLevel;
     trace_graphics_step("create vertex shader");
     const auto vertex_shader = backend.CreateShader(vertex_shader_desc);
     if (vertex_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
@@ -9747,7 +9758,7 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
     fragment_shader_desc.type = GPU::Backend::ShaderType::Fragment;
     fragment_shader_desc.sourceCode = fragment_shader_source;
     fragment_shader_desc.entryPoint = "main";
-    fragment_shader_desc.optimizationLevel = GPU::Backend::ShaderOptimizationLevel::Aggressive;
+    fragment_shader_desc.optimizationLevel = kShaderOptimizationLevel;
     trace_graphics_step("create fragment shader");
     const auto fragment_shader = backend.CreateShader(fragment_shader_desc);
     if (fragment_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
