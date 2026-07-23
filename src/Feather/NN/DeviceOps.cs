@@ -31,7 +31,7 @@ public static class NnDispatchTrace
 
     public static string LastOperation { get; private set; } = string.Empty;
 
-    public static string[] Operations => operations.ToArray();
+    public static string[] Operations => [.. operations];
 
     public static void Reset()
     {

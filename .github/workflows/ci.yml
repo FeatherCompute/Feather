@@ -42,6 +42,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxrandr-dev \
+            mesa-vulkan-drivers \
             spirv-cross \
             spirv-tools \
             vulkan-tools
@@ -60,6 +61,16 @@ jobs:
 
       - name: Test managed contracts
         run: ./eng/test.sh
+
+      - name: Enforce managed AD coverage
+        run: python3 scripts/ad-coverage-gate.py
+        env:
+          FEATHER_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
+
+      - name: Enforce NN device paths
+        run: python3 scripts/nn-industrial-gate.py
+        env:
+          FEATHER_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
 
       - name: Check markdown links
         run: ./eng/check-markdown-links.py
