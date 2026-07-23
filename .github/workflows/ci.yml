@@ -50,6 +50,19 @@ jobs:
       - name: Build native runtime
         run: ./eng/build-native.sh
 
+      - name: Build optimization benchmark harness
+        run: |
+          cmake -S native -B artifacts/optimization-benchmark-ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFEATHER_BUILD_WINDOW=OFF \
+            -DFEATHER_BUILD_OPTIMIZATION_BENCHMARK=ON \
+            -DEASYGPU_BACKEND=Vulkan \
+            -DEASYGPU_ENABLE_SPIRV_OPT=ON \
+            -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=ON
+          cmake --build artifacts/optimization-benchmark-ci \
+            --target feather_optimization_benchmark \
+            --parallel 2
+
       - name: Stage native assets
         run: ./eng/stage-native-assets.sh
 

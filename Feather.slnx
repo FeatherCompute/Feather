@@ -15,6 +15,9 @@
     <Project Path="tests/Feather.NN.Tests/Feather.NN.Tests.csproj" />
     <Project Path="tests/Feather.Tests/Feather.Tests.csproj" />
   </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/ShaderOptimization/ShaderOptimization.csproj" />
+  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/HelloBuffer/HelloBuffer.csproj" />
     <Project Path="samples/TextureCopy/TextureCopy.csproj" />

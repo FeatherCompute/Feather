@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(EASYGPU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(EASYGPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 option(FEATHER_BUILD_WINDOW "Build Feather native window and texture presentation support" ON)
+option(FEATHER_BUILD_OPTIMIZATION_BENCHMARK "Build the Vulkan shader optimization benchmark" OFF)
 set(FEATHER_SHADER_OPTIMIZATION_LEVEL "Ultra" CACHE STRING
     "SPIR-V optimization preset: None, Size, Aggressive, Ultra, or Extreme")
 set_property(CACHE FEATHER_SHADER_OPTIMIZATION_LEVEL PROPERTY STRINGS
@@ -18,6 +19,9 @@ if(NOT FEATHER_SHADER_OPTIMIZATION_LEVEL IN_LIST _feather_shader_optimization_le
 endif()
 set(EASYGPU_BUILD_WINDOW ${FEATHER_BUILD_WINDOW} CACHE BOOL "" FORCE)
 set(EASYGPU_BUILD_WINDOW_EXAMPLES OFF CACHE BOOL "" FORCE)
+if(FEATHER_BUILD_OPTIMIZATION_BENCHMARK)
+    set(EASYGPU_ENABLE_SPIRV_CROSS_GLSL ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../EasyGPU" "${CMAKE_CURRENT_BINARY_DIR}/EasyGPU")
 
 add_library(feather SHARED
@@ -60,4 +64,12 @@ if(FEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE)
     )
     target_compile_features(feather_ad_native_coverage_probe PRIVATE cxx_std_20)
     target_link_libraries(feather_ad_native_coverage_probe PRIVATE EasyGPU::EasyGPU)
+endif()
+
+if(FEATHER_BUILD_OPTIMIZATION_BENCHMARK)
+    add_executable(feather_optimization_benchmark
+        optimization_benchmark.cpp
+    )
+    target_compile_features(feather_optimization_benchmark PRIVATE cxx_std_20)
+    target_link_libraries(feather_optimization_benchmark PRIVATE EasyGPU::EasyGPU)
 endif()

@@ -1,0 +1,38 @@
+#version 450 core
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputBuffer {
+    float input_values[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer OutputBuffer {
+    float output_values[];
+};
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    const float seed = input_values[index];
+    float position = fma(seed, 2.0, -1.0);
+    float velocity = (seed - 0.5) * 0.01;
+    float energy = 0.0;
+
+    for (int step = 0; step < 128; ++step) {
+        const float wind = float((step % 11) - 5) * 0.00002;
+        const float force = fma(-position, 0.0015, wind);
+        velocity = fma(force, 0.125, velocity);
+        position = fma(velocity, 0.125, position);
+
+        if (position > 1.0) {
+            position = 2.0 - position;
+            velocity = -velocity * 0.85;
+        } else if (position < -1.0) {
+            position = -2.0 - position;
+            velocity = -velocity * 0.85;
+        }
+
+        energy = fma(position, position, fma(velocity, velocity, energy));
+    }
+
+    output_values[index] = fma(energy, 0.0001, position);
+}

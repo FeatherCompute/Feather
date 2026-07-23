@@ -200,6 +200,20 @@ of the Feather source repository.
 
 The full gallery with learning order, commands, and screenshots is in [Examples](docs/examples.md).
 
+## Optimization Benchmark
+
+Run the Vulkan optimization suite to compare Feather-generated and handwritten
+compute shaders across `None`, `Size`, `Aggressive`, `Ultra`, and `Extreme`:
+
+```bash
+python3 scripts/optimization-benchmark.py
+```
+
+The suite measures FEIR-to-GLSL lowering, cold compilation, persistent-cache
+hits, optimized code size, and steady-state dispatch while validating every
+output. See the [benchmark methodology](benchmarks/ShaderOptimization/README.md)
+for workload and timing details.
+
 ## Project Shape
 
 When consuming Feather from NuGet, install the main package only:
