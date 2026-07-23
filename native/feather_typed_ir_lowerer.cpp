@@ -1564,6 +1564,30 @@ private:
             return GPU::IR::InvalidValueId;
         }
 
+        const auto result_type = ToModuleType(expression.type_id);
+        const auto fma_type =
+            result_type.kind == GPU::IR::Type::Kind::Float || result_type.kind == GPU::IR::Type::Kind::Float2 ||
+            result_type.kind == GPU::IR::Type::Kind::Float3 || result_type.kind == GPU::IR::Type::Kind::Float4;
+        if (inputs_.enable_fused_multiply_add && op == GPU::IR::BinaryOp::Add && fma_type &&
+            expression.a < typed_.expressions.size() && expression.b < typed_.expressions.size()) {
+            const auto& multiply = typed_.expressions[expression.a];
+            GPU::IR::BinaryOp multiply_op{};
+            const auto has_result_type = [&](uint32_t expression_id) {
+                return expression_id < typed_.expressions.size() &&
+                       ToModuleType(typed_.expressions[expression_id].type_id).kind == result_type.kind;
+            };
+            if (multiply.kind == kExpressionBinary && TryMapBinaryOp(multiply.op, &multiply_op) &&
+                multiply_op == GPU::IR::BinaryOp::Mul && has_result_type(expression.a) && has_result_type(multiply.a) &&
+                has_result_type(multiply.b) && has_result_type(expression.b)) {
+                const std::array arguments{BuildExpression(multiply.a), BuildExpression(multiply.b),
+                                           BuildExpression(expression.b)};
+                if (std::find(arguments.begin(), arguments.end(), GPU::IR::InvalidValueId) != arguments.end()) {
+                    return GPU::IR::InvalidValueId;
+                }
+                return builder_.Intrinsic("fma", result_type, arguments);
+            }
+        }
+
         const auto left = BuildExpression(expression.a);
         const auto right = BuildExpression(expression.b);
         if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId) {

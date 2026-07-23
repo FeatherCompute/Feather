@@ -29,6 +29,24 @@ public class AutoDiffNativeBridgeTests
     }
 
     [Fact]
+    public void ADBackwardKeepsFusedMultiplyAddPeepholeDisabled()
+    {
+        using var scale = GPU.CreateBuffer<float>([2f]);
+        using var bias = GPU.CreateBuffer<float>([1f]);
+        using var input = GPU.CreateBuffer<float>([3f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var ad = GPU.CreateADKernel(new ScalarMultiplyAddAdKernel(
+            scale.AsReadWrite(), bias.AsReadWrite(), input.AsReadOnly(), loss.AsReadWrite()));
+
+        ad.Backward(1);
+
+        Assert.DoesNotContain("fma(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
+        Assert.InRange(ad.Gradients.Get<float>("scale")[0], 41.999f, 42.001f);
+        Assert.InRange(ad.Gradients.Get<float>("bias")[0], 13.999f, 14.001f);
+        Assert.Equal([49f], loss.ToArray());
+    }
+
+    [Fact]
     public void ADBackwardMergedGlslGuardsPaddedWorkgroupLanes()
     {
         using var parameters = GPU.CreateBuffer<float>([3f]);
@@ -260,6 +278,26 @@ public readonly partial struct ScalarQuadraticAdKernel(
         float l = p * p;
         loss[i] = l;
         ADMarker.Parameter(parameters[i]);
+        ADMarker.Loss(l);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+[AutoDiff]
+public readonly partial struct ScalarMultiplyAddAdKernel(
+    ReadWriteBuffer<float> scale,
+    ReadWriteBuffer<float> bias,
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> loss) : IKernel1D
+{
+    public void Execute()
+    {
+        float y = (scale[0] * input[0]) + bias[0];
+        float l = y * y;
+        loss[0] = l;
+        ADMarker.Parameter(scale[0]);
+        ADMarker.Parameter(bias[0]);
         ADMarker.Loss(l);
     }
 }

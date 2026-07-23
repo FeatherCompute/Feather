@@ -192,6 +192,43 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void ShaderInspectionFusesFloatingPointMultiplyAddFromTypedIr()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var scalar = ShaderInspection.GetGLSL<NestedExpressionKernel>();
+            var vector = ShaderInspection.GetGLSL<VectorFusedMultiplyAddKernel>();
+
+            Assert.Contains("fma(", scalar, StringComparison.Ordinal);
+            Assert.Contains("fma(", vector, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void ShaderInspectionDoesNotFuseIntegerMultiplyAddFromTypedIr()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+
+            var glsl = ShaderInspection.GetGLSL<IntegerMultiplyAddKernel>();
+
+            Assert.DoesNotContain("fma(", glsl, StringComparison.Ordinal);
+            Assert.Contains(")*(", glsl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsUnsignedIntegerArithmeticFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -1942,6 +1979,30 @@ public class GeneratedComputeDispatchTests
         GPU.Dispatch(kernel, 4);
 
         Assert.Equal([12, 24, 36, 48], output.ToArray());
+    }
+
+    [Fact]
+    public void DispatchExecutesFusedMultiplyAddFromTypedIr()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var left = GPU.CreateBuffer<float3>([new float3(1, 2, 3), new float3(-2, 4, 0.5f)]);
+            using var right = GPU.CreateBuffer<float3>([new float3(4, 5, 6), new float3(3, -1, 8)]);
+            using var bias = GPU.CreateBuffer<float3>([new float3(0.5f, 1, 1.5f), new float3(1, 2, -3)]);
+            using var output = GPU.CreateBuffer<float3>(2);
+
+            GPU.Dispatch(
+                new VectorFusedMultiplyAddKernel(
+                    left.AsReadOnly(), right.AsReadOnly(), bias.AsReadOnly(), output.AsReadWrite()),
+                2);
+
+            Assert.Equal([new float3(4.5f, 11, 19.5f), new float3(-5, -2, 1)], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
     }
 
     [Fact]
@@ -4039,6 +4100,36 @@ public readonly partial struct NestedExpressionKernel(ReadOnlyBuffer<float> inpu
     {
         int i = ThreadIds.X;
         output[i] = (input[i] * 2.0f) + bias[i];
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct VectorFusedMultiplyAddKernel(
+    ReadOnlyBuffer<float3> left,
+    ReadOnlyBuffer<float3> right,
+    ReadOnlyBuffer<float3> bias,
+    ReadWriteBuffer<float3> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = (left[i] * right[i]) + bias[i];
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct IntegerMultiplyAddKernel(
+    ReadOnlyBuffer<int> left,
+    ReadOnlyBuffer<int> right,
+    ReadOnlyBuffer<int> bias,
+    ReadWriteBuffer<int> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = (left[i] * right[i]) + bias[i];
     }
 }
 

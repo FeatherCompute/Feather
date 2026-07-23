@@ -59,6 +59,7 @@ public class ProjectShapeTests
         var root = FindRepositoryRoot();
         var cmake = File.ReadAllText(Path.Combine(root, "native", "CMakeLists.txt"));
         var nativeBridge = File.ReadAllText(Path.Combine(root, "native", "feather_c_api.cpp"));
+        var typedLowerer = File.ReadAllText(Path.Combine(root, "native", "feather_typed_ir_lowerer.cpp"));
         var ciWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "ci.yml"));
         var releaseWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "release.yml"));
 
@@ -68,6 +69,9 @@ public class ProjectShapeTests
         Assert.Contains("vertex_shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
         Assert.Contains("fragment_shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
         Assert.Contains("shader_desc.optimizationLevel = kShaderOptimizationLevel", nativeBridge);
+        Assert.Contains("kEnableFusedMultiplyAdd", nativeBridge);
+        Assert.Contains("!kernel.auto_diff", nativeBridge);
+        Assert.Contains("builder_.Intrinsic(\"fma\"", typedLowerer);
         Assert.Contains("EASYGPU_ENABLE_SPIRV_OPT=ON", ciWorkflow);
         Assert.Contains("EASYGPU_ENABLE_SPIRV_OPT=ON", releaseWorkflow);
         Assert.DoesNotContain("EASYGPU_ENABLE_SPIRV_OPT=OFF", ciWorkflow);

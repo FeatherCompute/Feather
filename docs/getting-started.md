@@ -54,6 +54,9 @@ Vulkan builds default to Feather's production-oriented `Ultra` SPIR-V preset.
 Set `FEATHER_SHADER_OPTIMIZATION_LEVEL` to `None`, `Size`, `Aggressive`,
 `Ultra`, or `Extreme` at CMake configure time. `Extreme` is experimental and
 can reduce floating-point precision; qualify it for each workload and device.
+`Ultra` and `Extreme` contract direct floating-point `(a * b) + c` expressions
+to `fma(a, b, c)` for non-AutoDiff typed compute shaders, so workloads that
+require strict two-rounding behavior should select `Aggressive` or lower.
 
 If you want managed code to load a specific native library, set:
 

@@ -41,6 +41,7 @@ struct LoweringInputs {
     int32_t logical_x = 0;
     int32_t logical_y = 0;
     int32_t logical_z = 0;
+    bool enable_fused_multiply_add = false;
     int32_t* logical_x_data = nullptr;
     int32_t* logical_y_data = nullptr;
     int32_t* logical_z_data = nullptr;

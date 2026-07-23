@@ -55,6 +55,8 @@ void trace_graphics_step(const char* step);
 #endif
 
 constexpr GPU::Backend::ShaderOptimizationLevel kShaderOptimizationLevel = FEATHER_SHADER_OPTIMIZATION_LEVEL;
+constexpr bool kEnableFusedMultiplyAdd = kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Ultra ||
+                                         kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Extreme;
 constexpr FeContextHandle kDefaultContext = 1;
 constexpr uint8_t kIrOpcodeIf = 4;
 constexpr uint8_t kIrOpcodeBeginBlock = 13;
@@ -4275,7 +4277,9 @@ bool has_typed_section7_semantics(const KernelState& kernel) {
     return parse_feather_ir(kernel.ir, &ir) && ir.has_section7;
 }
 
-std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelState& kernel, std::string* error = nullptr) {
+std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelState& kernel,
+                                                                bool enable_fused_multiply_add,
+                                                                std::string* error = nullptr) {
     if (error != nullptr) {
         error->clear();
     }
@@ -4297,6 +4301,7 @@ std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelStat
 
         return nullptr;
     }
+    inputs.enable_fused_multiply_add = enable_fused_multiply_add;
 
     auto module = Feather::TypedIR::TryLowerToEasyGpuModule(ir.typed_module, inputs, error);
     if (module == nullptr && error != nullptr && error->empty()) {
@@ -4458,9 +4463,11 @@ bool build_easygpu_module_structured_assignment(const ParsedIr& ir, GPU::IR::Mod
     return true;
 }
 
-std::unique_ptr<GPU::IR::Module> try_build_easygpu_module(const KernelState& kernel, GPU::AD::GradientTape* gradientTape = nullptr) {
+std::unique_ptr<GPU::IR::Module> try_build_easygpu_module(const KernelState& kernel,
+                                                          GPU::AD::GradientTape* gradientTape = nullptr) {
     std::string typed_error;
-    if (auto typed_module = try_build_typed_easygpu_module(kernel, &typed_error)) {
+    const bool enable_fused_multiply_add = kEnableFusedMultiplyAdd && !kernel.auto_diff && gradientTape == nullptr;
+    if (auto typed_module = try_build_typed_easygpu_module(kernel, enable_fused_multiply_add, &typed_error)) {
         return typed_module;
     }
 

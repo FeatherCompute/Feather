@@ -62,6 +62,12 @@ compute, automatic-differentiation, vertex, and fragment shaders. It can be
 overridden with `None`, `Size`, `Aggressive`, `Ultra`, or the experimental
 `Extreme` preset at CMake configure time.
 
+For ordinary typed compute shaders, `Ultra` and `Extreme` also contract a direct
+`float`, `float2`, `float3`, or `float4` expression of the form `(a * b) + c` to
+GLSL `fma(a, b, c)`. This changes the intermediate rounding from two operations
+to one. AutoDiff kernels keep the uncontracted expression because the current
+EasyGPU adjoint intrinsic set does not include this peephole.
+
 Vulkan also uses EasyGPU's versioned SPIR-V cache and device-specific pipeline
 cache across processes. Feather batches pipeline-cache writes and flushes pending
 driver data at the managed runtime's process-exit lifecycle boundary.
