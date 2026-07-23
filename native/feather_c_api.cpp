@@ -10651,6 +10651,17 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     return context == kDefaultContext || context == 0 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
 }
 
+FE_API FeResult fe_runtime_flush_caches(void) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend != nullptr) {
+            backend->FlushPipelineCache();
+        }
+        return ok();
+    });
+}
+
 FE_API FeResult fe_runtime_shutdown(void) {
     return protect([&] {
         const bool was_shutting_down = g_runtime_shutting_down.exchange(true, std::memory_order_acq_rel);

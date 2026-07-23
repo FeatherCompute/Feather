@@ -62,6 +62,10 @@ compute, automatic-differentiation, vertex, and fragment shaders. It can be
 overridden with `None`, `Size`, `Aggressive`, `Ultra`, or the experimental
 `Extreme` preset at CMake configure time.
 
+Vulkan also uses EasyGPU's versioned SPIR-V cache and device-specific pipeline
+cache across processes. Feather batches pipeline-cache writes and flushes pending
+driver data at the managed runtime's process-exit lifecycle boundary.
+
 The active backend can be queried:
 
 ```csharp

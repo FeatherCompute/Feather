@@ -40,6 +40,7 @@ var libraryPath = Path.GetFullPath(args[0]);
 var handle = NativeLibrary.Load(libraryPath);
 try
 {
+    _ = NativeLibrary.GetExport(handle, "fe_runtime_flush_caches");
     _ = NativeLibrary.GetExport(handle, "fe_runtime_shutdown");
 
     var export = NativeLibrary.GetExport(handle, "fe_ir_bridge_contract_version");

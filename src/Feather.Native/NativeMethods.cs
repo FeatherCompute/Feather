@@ -54,6 +54,17 @@ public static class NativeMethods
     {
         Volatile.Write(ref processExiting, 1);
         _ = Interlocked.Exchange(ref runtimeShutdown, 1);
+
+        try
+        {
+            _ = fe_runtime_flush_caches();
+        }
+        catch (DllNotFoundException)
+        {
+        }
+        catch (EntryPointNotFoundException)
+        {
+        }
     }
 
     public static void ThrowIfFailed(FeResult result)
@@ -213,6 +224,9 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_get_last_error(IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_runtime_flush_caches();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_runtime_shutdown();

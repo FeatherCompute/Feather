@@ -256,6 +256,7 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_runtime_flush_caches(void);
 FE_API FeResult fe_runtime_shutdown(void);
 FE_API FeResult fe_runtime_process_exit(void);
 

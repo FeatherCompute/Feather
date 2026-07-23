@@ -12,6 +12,12 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeRuntimeCanFlushPersistentCaches()
+    {
+        Assert.True(NativeMethods.fe_runtime_flush_caches().Succeeded());
+    }
+
+    [Fact]
     public void ResultValuesMatchNativeAbiSpecification()
     {
         Assert.Equal(0u, (uint)FeResult.Ok);
