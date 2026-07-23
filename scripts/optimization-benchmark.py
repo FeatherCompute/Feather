@@ -121,7 +121,7 @@ def render_report(report: dict[str, Any]) -> str:
         "",
         "The same production Feather GLSL is used for every backend level so this table isolates SPIR-V optimization.",
         "",
-        "| Scenario | Level | Optimized bytes | Cold inspection ms | Optimizer ms | Warm cache ms | GPU/dispatch ms | P95 ms | Speedup vs None |",
+        "| Scenario | Level | Optimized bytes | Cold inspection ms | Optimizer ms | Warm cache ms | Dispatch ms | P95 ms | Speedup vs None |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for scenario in scenarios:
@@ -158,7 +158,7 @@ def render_report(report: dict[str, Any]) -> str:
         "- Cold inspection includes glslang, SPIRV-Tools, cache write, and SPIRV-Cross. Optimized levels intentionally spend more cold-start CPU time.",
         "- Warm inspection reads and validates cached SPIR-V, then runs SPIRV-Cross. It demonstrates persistent shader-cache startup behavior, not GPU execution.",
         "- FEIR-to-GLSL source lowering is measured separately. It does not include Roslyn/C# build time.",
-        "- Similar GPU medians across levels mean the active Vulkan driver normalized the variants. Code size and cache gains remain real, but this run does not support claiming a steady-state GPU speedup.",
+        "- Similar dispatch medians across levels mean the active Vulkan driver normalized the variants. Code size and cache gains remain real, but this run does not support claiming a steady-state GPU speedup.",
         "- Compare results only within the same report. Power state, driver, GPU, and timestamp-query support materially affect sub-millisecond kernels.",
         "",
         "## Workloads",
