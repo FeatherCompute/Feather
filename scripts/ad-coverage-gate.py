@@ -17,6 +17,7 @@ import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 LINE_THRESHOLD = 90.0
@@ -405,21 +406,64 @@ def validate_scope_configuration(root: Path) -> None:
             if line > len(source_lines) or not source_lines[line - 1].strip():
                 failures.append(f"{path}:{line}: {kind} exclusion does not identify a source line")
 
+    for entry in MANAGED_SCOPE:
+        windows_path = entry.path.replace("/", "\\")
+        source_path_variants = (
+            entry.path,
+            *(entry.aliases),
+            (root / entry.path).as_posix(),
+            (root / entry.path).as_posix().lstrip("/"),
+            f"C:\\a\\Feather\\{windows_path}",
+            f"https://raw.githubusercontent.com/FeatherCompute/Feather/revision/{entry.path}",
+        )
+        for filename in source_path_variants:
+            normalized = normalize_source_path(filename, root)
+            matched = scope_for(normalized)
+            if matched != entry:
+                failures.append(
+                    f"{entry.path}: coverage path {filename!r} normalized to "
+                    f"{normalized!r} without matching its managed scope"
+                )
+
     if failures:
         details = "\n".join(f"  - {failure}" for failure in failures)
         raise SystemExit(f"AD coverage gate configuration is stale:\n{details}")
 
 
 def normalize_source_path(filename: str, root: Path) -> str:
-    path = Path(filename)
+    normalized = filename.strip().replace("\\", "/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme.lower() in {"file", "http", "https"}:
+        normalized = unquote(parsed.path).replace("\\", "/")
+
+    resolved_root = root.resolve()
+    root_path = resolved_root.as_posix().rstrip("/")
+    for prefix in (root_path, root_path.lstrip("/")):
+        if prefix and normalized.startswith(f"{prefix}/"):
+            return normalized[len(prefix) + 1:]
+
+    path = Path(normalized)
     try:
-        return path.resolve().relative_to(root).as_posix()
+        candidate = path if path.is_absolute() else resolved_root / path
+        return candidate.resolve().relative_to(resolved_root).as_posix()
     except (OSError, ValueError):
-        return filename.replace("\\", "/")
+        return normalized
 
 
 def scope_for(path: str) -> ScopeEntry | None:
-    return SCOPE_BY_PATH.get(path)
+    normalized = path.replace("\\", "/").rstrip("/")
+    exact = SCOPE_BY_PATH.get(normalized)
+    if exact is not None:
+        return exact
+
+    matches = {
+        entry
+        for candidate, entry in SCOPE_BY_PATH.items()
+        if normalized.endswith(f"/{candidate}")
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
 
 
 def run_tests(root: Path) -> None:
