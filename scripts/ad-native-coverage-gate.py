@@ -41,11 +41,12 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "native/feather_c_api.cpp",
         "AD bridge validation, dispatch, gradient readback, and gradient reduction",
         (
-            (390, 419),
-            (2066, 2113),
-            (4806, 5262),
-            (5320, 5455),
-            (10508, 10653),
+            (435, 464),
+            (684, 708),
+            (2598, 2642),
+            (5357, 5820),
+            (5878, 6014),
+            (11889, 12042),
         ),
         (
             "try_dispatch_easygpu_ad_kernel",
@@ -62,14 +63,16 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "native/feather_typed_ir_lowerer.cpp",
         "typed IR to EasyGPU callable/control-flow lowering used by AD",
         (
-            (203, 220),
-            (323, 413),
-            (659, 690),
-            (895, 1024),
-            (1050, 1110),
-            (1194, 1269),
-            (1655, 1677),
-            (2639, 2643),
+            (217, 234),
+            (337, 427),
+            (678, 709),
+            (914, 1043),
+            (1065, 1129),
+            (1213, 1288),
+            (1698, 1720),
+            (1826, 1848),
+            (2682, 2686),
+            (2863, 2870),
         ),
         (
             "TryLowerToEasyGpuModule",
@@ -84,13 +87,12 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "EasyGPU/source/AD/GradientTape.cpp",
         "forward tape recording including callable sub-tapes",
         (
-            (88, 120),
-            (141, 156),
-            (172, 218),
-            (229, 307),
-            (647, 704),
-            (718, 822),
-            (828, 855),
+            (186, 218),
+            (239, 254),
+            (268, 410),
+            (1114, 1217),
+            (1231, 1389),
+            (1395, 1520),
         ),
         (
             "GradientTape::RegisterBufferParameter",
@@ -104,12 +106,12 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "EasyGPU/source/AD/AdjointGenerator.cpp",
         "reverse-mode adjoint generation",
         (
-            (429, 590),
-            (592, 603),
-            (606, 647),
-            (649, 756),
-            (857, 930),
-            (1076, 1295),
+            (515, 709),
+            (711, 722),
+            (725, 766),
+            (768, 879),
+            (991, 1064),
+            (1210, 1490),
         ),
         (
             "AdjointGenerator::Generate",
@@ -125,8 +127,8 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "callable body capture and AD sub-tape naming",
         (
             (70, 212),
-            (364, 425),
-            (431, 448),
+            (364, 436),
+            (442, 459),
         ),
         (
             "KernelBuildContext::PushCallableBody",
@@ -139,12 +141,13 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "EasyGPU/source/IR/Module.cpp",
         "EasyGPU module/callable/control-flow lowering used by AD",
         (
-            (199, 245),
-            (301, 330),
-            (421, 460),
-            (1803, 1825),
-            (1872, 1888),
-            (1964, 1978),
+            (199, 249),
+            (305, 346),
+            (446, 486),
+            (1877, 1898),
+            (1933, 1968),
+            (2016, 2033),
+            (2107, 2122),
         ),
         (
             "ModuleBuilder::AddCallable",
@@ -158,6 +161,33 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def validate_scope_configuration(root: Path) -> None:
+    failures: list[str] = []
+    for entry in NATIVE_SCOPE:
+        source_lines = (root / entry.path).read_text().splitlines()
+        for start, end in entry.ranges:
+            if start <= 0 or end < start or end > len(source_lines):
+                failures.append(
+                    f"{entry.path}: invalid range {start}-{end} for {len(source_lines)} source lines"
+                )
+
+        for function in entry.important_functions:
+            needle = f"{function}("
+            matches = [
+                line
+                for line, text in enumerate(source_lines, start=1)
+                if needle in text and entry.includes(line)
+            ]
+            if not matches:
+                failures.append(
+                    f"{entry.path}: important function {function!r} is outside its configured AD ranges"
+                )
+
+    if failures:
+        details = "\n".join(f"  - {failure}" for failure in failures)
+        raise SystemExit(f"Native AD coverage gate configuration is stale:\n{details}")
 
 
 def run(command: list[str], root: Path, *, env: dict[str, str] | None = None) -> None:
@@ -483,6 +513,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     root = repo_root()
+    validate_scope_configuration(root)
     os.chdir(root)
 
     results = root / RESULTS_DIR

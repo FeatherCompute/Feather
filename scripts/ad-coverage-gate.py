@@ -31,6 +31,7 @@ class ScopeEntry:
     reason: str
     ranges: tuple[tuple[int, int], ...] = ()
     aliases: tuple[str, ...] = ()
+    range_anchors: tuple[tuple[str, ...], ...] = ()
 
     def includes(self, line: int) -> bool:
         if not self.ranges:
@@ -52,17 +53,45 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
     ScopeEntry(
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
         "AD marker validation, AD callable policy, and traceable parameter analysis",
-        ((272, 411), (714, 734), (1484, 1528), (1539, 1629)),
+        ((272, 411), (713, 734), (1978, 2022), (2033, 2123)),
         ("Feather.Generators/Model/ShaderModelFactory.cs",),
+        (
+            ("var lossCount = 0;", "private static bool IsAutoDiffMarkerMethod("),
+            (
+                "if (method.Body is null && method.ExpressionBody is null)",
+                "if (ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(symbol) &&",
+            ),
+            ("private static bool IsSupportedAutoDiffValueType(", "internal static bool TryTraceAdParameterSource("),
+            ("private static bool TryCreateTraceableSource(", "private static bool TryTraceLocalAdAlias("),
+        ),
     ),
     ScopeEntry("src/Feather.Generators/Model/ShaderSemanticLowerer.cs", "AD annotation lowering into IR metadata", ((344, 392),), ("Feather.Generators/Model/ShaderSemanticLowerer.cs",)),
-    ScopeEntry("src/Feather.Generators/Model/ShaderModels.cs", "AD model records and enums", ((252, 265),), ("Feather.Generators/Model/ShaderModels.cs",)),
+    ScopeEntry(
+        "src/Feather.Generators/Model/ShaderModels.cs",
+        "AD model records and enums",
+        ((254, 272),),
+        ("Feather.Generators/Model/ShaderModels.cs",),
+        ((
+            "internal enum LoweredAdAnnotationRole",
+            "internal sealed record LoweredAdAnnotationModel",
+            "internal enum LoweredAdSourceKind",
+        ),),
+    ),
     ScopeEntry("src/Feather.Generators/IR/FeatherIrWriter.cs", "AD annotation section writer", ((12, 16), (621, 663), (1188, 1198)), ("Feather.Generators/IR/FeatherIrWriter.cs",)),
     ScopeEntry(
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
         "typed IR callable and AD marker lowering paths",
-        ((62, 80), (124, 135), (623, 639)),
+        ((62, 80), (124, 135), (658, 674)),
         ("Feather.Generators/Lowering/ShaderIrLowerer.cs",),
+        (
+            (
+                "var entryFunc = new ShaderFunctionModel(",
+                "foreach (var callable in model.Callables.Items)",
+                "var callableSemanticModel = callable.Syntax.SyntaxTree == semanticModel.SyntaxTree",
+            ),
+            ("IBlockOperation? block = op switch", "body could not be read from Roslyn operations"),
+            ("private static bool IsAdMarkerInvocation(", "if (ContainsAdMarkerInvocation(child))"),
+        ),
     ),
     ScopeEntry(
         "src/Feather.Generators/Lowering/ShaderIrModuleWriter.cs",
@@ -80,43 +109,36 @@ SCOPE_BY_PATH = {
 }
 
 LINE_EXCLUSIONS: dict[tuple[str, int], str] = {
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        281,
-    ): "Execute-body absence guard is unreachable for analyzer-accepted block-bodied AD kernels",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        283,
-    ): "Execute-body absence guard is unreachable for analyzer-accepted block-bodied AD kernels",
+    **{
+        ("src/Feather.Generators/Model/ShaderModelFactory.cs", line):
+            "entry-point absence guard is unreachable for analyzer-accepted AD kernels"
+        for line in (277, 278, 284, 285)
+    },
     **{
         ("src/Feather.Generators/Model/ShaderModelFactory.cs", line):
             "wrong-arity AD marker body is unreachable through C# overload resolution"
-        for line in range(315, 323)
+        for line in range(317, 324)
     },
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1487,
-    ): "type-null guard for AD marker value-type helper is defensive after Roslyn binding",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1488,
-    ): "type-null guard for AD marker value-type helper is defensive after Roslyn binding",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        75,
-    ): "callable missing-body guard is unreachable for valid compiled callable methods",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        76,
-    ): "callable missing-body guard is unreachable for valid compiled callable methods",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        637,
-    ): "recursive child-operation marker detection guard; direct AD marker skipping is covered",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        638,
-    ): "recursive child-operation marker detection guard; direct AD marker skipping is covered",
+    **{
+        ("src/Feather.Generators/Model/ShaderModelFactory.cs", line):
+            "type-null guard for AD marker value-type helper is defensive after Roslyn binding"
+        for line in (1981, 1982)
+    },
+    **{
+        ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
+            "callable missing-body guard is unreachable for valid compiled callable methods"
+        for line in (75, 76)
+    },
+    **{
+        ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
+            "Roslyn exposes compiled method bodies through IMethodBodyOperation; fallback arms require a malformed semantic model"
+        for line in (128, 129, 133, 134)
+    },
+    **{
+        ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
+            "recursive child-operation marker guard is unreachable for valid standalone void AD marker calls"
+        for line in (672, 673)
+    },
     (
         "src/Feather/AD/AD.cs",
         225,
@@ -194,107 +216,91 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "native metadata scalar-layout corruption guard; valid scalar/vector layouts and managed bad-shape conversion guards are covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        50,
-    ): "Roslyn operation-null guard for typed IR lowering; valid and lowering-exception generator paths are covered",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        62,
-    ): "exception-location null fallback for typed IR diagnostics; location-bearing lowering failures are covered",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        280,
+        276,
     ): "Execute-body absence guard is unreachable for analyzer-accepted compute kernels",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        289,
-    ): "AD invocation symbol-filter null subbranches; marker and non-marker paths are covered by generator diagnostics",
+        283,
+    ): "entry-point body absence guard is unreachable for analyzer-accepted block-bodied AD kernels",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        314,
+        316,
     ): "wrong-arity AD marker guard is unreachable through C# overload resolution",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        339,
+        340,
     ): "loss type null subbranch is unreachable for bound AD.Loss overloads; scalar and non-scalar losses are tested",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        353,
+        354,
     ): "parameter type null subbranch is unreachable for bound AD.Parameter overloads; supported and unsupported types are tested",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        371,
+        372,
     ): "non-buffer source guard is retained defensively; texture/sampler and buffer paths are covered at diagnostics",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        411,
-    ): "AD marker type null branch is defensive after Roslyn symbol/candidate filtering",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        723,
-    ): "nested-callable AD guard includes Roslyn symbol-null subbranches; supported callable and nested rejection paths are covered",
-    (
-        "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1486,
+        1980,
     ): "type-null guard for AD marker value-type helper; concrete supported/unsupported marker types are tested",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1547,
+        2041,
     ): "traceable-source resource-kind and argument-count guard includes defensive non-resource element access branches",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1553,
+        2047,
     ): "resource-name syntax switch fallback bookkeeping; identifier buffer sources are covered by AD metadata tests",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1561,
+        2055,
     ): "empty resource/index defensive guard is unreachable for parsed buffer element syntax",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1566,
+        2060,
     ): "value-type null fallback for parsed buffer element syntax; scalar/vector parameter metadata is covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1582,
+        2076,
     ): "local-alias declaration-shape guard; direct, casted, mutated, and untraceable aliases are covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1591,
+        2084,
     ): "alias Execute-body absence guard is unreachable for validated kernels",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1599,
+        2092,
     ): "alias assignment scan line mixes covered reassignment rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1616,
+        2109,
     ): "alias increment scan line mixes covered increment/decrement rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1621,
+        2114,
     ): "increment/decrement operation pattern includes defensive non-local target subbranches",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
-        351,
+        349,
     ): "wrong-arity AD marker lowering guard is unreachable through C# overload resolution",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
-        354,
+        352,
     ): "operation unwrap null guard is defensive; local and buffer AD annotations are covered",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
-        379,
+        377,
     ): "local-name fallback switch includes non-AD field/parameter variants; supported local and buffer annotations are covered",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
-        386,
+        384,
     ): "null local-name branch is defensive after AD marker validation",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
-        392,
+        390,
     ): "type-name null fallback is defensive for bound AD marker operands",
     (
         "src/Feather.Generators/IR/FeatherIrWriter.cs",
-        633,
+        631,
     ): "AD annotation binding fallback requires malformed resource metadata; generated buffer/local annotations are covered",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
@@ -302,44 +308,20 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "callable missing-body guard is unreachable for valid compiled callable methods",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        69,
-    ): "callable return-type fallback is defensive; callable return lowering is covered",
+        124,
+    ): "Roslyn method-body operation switch includes defensive direct-block and unavailable-body arms",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        71,
-    ): "callable parameter type fallback is defensive; callable parameter lowering is covered",
+        132,
+    ): "missing Roslyn method-body operation guard requires a malformed semantic model",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        121,
-    ): "generic Roslyn statement pattern-switch dispatch; AD marker, callable, and control-flow cases are covered by targeted tests",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        133,
-    ): "return-without-value branch belongs to void callable support outside current AD callable scope",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        530,
-    ): "primitive-type helper false branch is generic swizzle/index infrastructure outside AD marker lowering",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        533,
-    ): "AD marker invocation helper includes non-AD invocation subbranches; marker skip behavior is covered",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        624,
+        659,
     ): "AD marker invocation helper includes defensive symbol subbranches; marker skip behavior is covered",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        636,
-    ): "recursive child-operation marker detection guard; direct AD marker skipping is covered",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        949,
-    ): "callable attribute helper includes non-callable subbranches; callable lowering and nested AD rejection are covered",
-    (
-        "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        954,
-    ): "swizzle-shape helper is generic vector lowering outside AD marker/callable scope",
+        671,
+    ): "recursive child-operation marker guard is unreachable for valid standalone void AD marker calls",
     (
         "src/Feather.Generators/Lowering/ShaderIrModuleWriter.cs",
         266,
@@ -384,6 +366,48 @@ TEST_SLICES = (
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def validate_scope_configuration(root: Path) -> None:
+    failures: list[str] = []
+    for entry in MANAGED_SCOPE:
+        if not entry.range_anchors:
+            continue
+        if len(entry.range_anchors) != len(entry.ranges):
+            failures.append(
+                f"{entry.path}: {len(entry.range_anchors)} anchor groups for {len(entry.ranges)} ranges"
+            )
+            continue
+
+        lines = (root / entry.path).read_text().splitlines()
+        for (start, end), anchors in zip(entry.ranges, entry.range_anchors, strict=True):
+            for anchor in anchors:
+                matches = [line for line, text in enumerate(lines, start=1) if anchor in text]
+                if len(matches) != 1:
+                    failures.append(
+                        f"{entry.path}: anchor {anchor!r} matched {len(matches)} source lines"
+                    )
+                elif not start <= matches[0] <= end:
+                    failures.append(
+                        f"{entry.path}:{matches[0]} anchor {anchor!r} is outside configured range {start}-{end}"
+                    )
+
+    for kind, exclusions in (("line", LINE_EXCLUSIONS), ("branch", BRANCH_EXCLUSIONS)):
+        for path, line in exclusions:
+            scope = SCOPE_BY_PATH.get(path)
+            if scope is None:
+                failures.append(f"{path}:{line}: {kind} exclusion is outside the managed AD source set")
+                continue
+            if not scope.includes(line):
+                failures.append(f"{path}:{line}: {kind} exclusion is outside its managed AD ranges")
+                continue
+            source_lines = (root / path).read_text().splitlines()
+            if line > len(source_lines) or not source_lines[line - 1].strip():
+                failures.append(f"{path}:{line}: {kind} exclusion does not identify a source line")
+
+    if failures:
+        details = "\n".join(f"  - {failure}" for failure in failures)
+        raise SystemExit(f"AD coverage gate configuration is stale:\n{details}")
 
 
 def normalize_source_path(filename: str, root: Path) -> str:
@@ -555,6 +579,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     root = repo_root()
+    validate_scope_configuration(root)
     os.chdir(root)
 
     if not args.no_test:

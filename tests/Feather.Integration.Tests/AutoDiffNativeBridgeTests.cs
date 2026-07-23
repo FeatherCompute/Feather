@@ -29,6 +29,21 @@ public class AutoDiffNativeBridgeTests
     }
 
     [Fact]
+    public void ADKernelSupportsOneShotGeneratedDispatch()
+    {
+        using var parameters = GPU.CreateBuffer<float>([3f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+
+        GpuKernel.Dispatch(
+            GPU.Context,
+            new ScalarQuadraticAdKernel(parameters.AsReadWrite(), loss.AsReadWrite()),
+            new GpuDispatchSize(1, 1, 1),
+            wait: true);
+
+        Assert.Equal([9f], loss.ToArray());
+    }
+
+    [Fact]
     public void ADBackwardKeepsFusedMultiplyAddPeepholeDisabled()
     {
         using var scale = GPU.CreateBuffer<float>([2f]);
