@@ -1,12 +1,14 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Feather.Generators/Feather.Generators.csproj" />
+    <Project Path="src/Feather.Blender.RenderHost/Feather.Blender.RenderHost.csproj" />
     <Project Path="src/Feather.ManifestExporter/Feather.ManifestExporter.csproj" />
     <Project Path="src/Feather.Native/Feather.Native.csproj" />
     <Project Path="src/Feather.NativeAssets/Feather.NativeAssets.csproj" />
     <Project Path="src/Feather/Feather.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Feather.Blender.RenderHost.Tests/Feather.Blender.RenderHost.Tests.csproj" />
     <Project Path="tests/Feather.AD.Tests/Feather.AD.Tests.csproj" />
     <Project Path="tests/Feather.Generator.Tests/Feather.Generator.Tests.csproj" />
     <Project Path="tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj" />

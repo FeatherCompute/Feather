@@ -11,6 +11,7 @@ Feather lets .NET applications write GPU work in C# and execute it through the n
 | Image compute | [Examples](examples.md) | How Mandelbrot, Julia, SDF, ray tracing, and volume samples are organized. |
 | Window output | [Windowing](window.md) | Native windows, events, CPU pixels, GPU texture presentation. |
 | Graphics | [Graphics Pipeline](graphics-pipeline.md) | C# vertex/fragment shaders, render targets, depth, sampling, draw state. |
+| Blender host | [Blender RenderHost](blender-render-host.md) | Evaluated scene, graph/request protocols, public-API MinimalRaster, CPU frame publication. |
 | AD and NN | [Automatic Differentiation](autodiff.md), [Neural Networks](nn.md) | Reverse-mode AD, gradient readback/handoff, tensors, modules, optimizers. |
 | Debugging | [Diagnostics](diagnostics.md), [FEIR](feir.md) | Generator errors, IR inspection, GLSL dumps, dispatch path checks. |
 | API lookup | [API Reference](api.md) | Public types and methods grouped by subsystem. |
@@ -31,6 +32,7 @@ Feather lets .NET applications write GPU work in C# and execute it through the n
 - [C# Shader Subset](csharp-subset.md): what is legal inside generated GPU code.
 - [Windowing](window.md): window creation, event loops, pixels, and texture presentation.
 - [Graphics Pipeline](graphics-pipeline.md): preview raster pipelines with C# vertex and fragment shaders.
+- [Blender RenderHost](blender-render-host.md): external Blender renderer protocols and MinimalRaster execution.
 - [Automatic Differentiation](autodiff.md): preview reverse-mode AD for generated 1D kernels.
 - [Neural Networks](nn.md): tensors, parameters, modules, optimizers, trainers, and checkpoints.
 - [Diagnostics](diagnostics.md): how to fix generator and runtime errors.
