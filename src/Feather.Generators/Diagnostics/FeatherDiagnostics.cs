@@ -147,6 +147,21 @@ internal static class FeatherDiagnostics
         "Top-level local is not supported in shader code",
         "Top-level local '{0}' cannot be referenced from Feather shader code; move it to a static const or static readonly field on a named type");
 
+    public static readonly DiagnosticDescriptor RenderGraphGuidInvalid = Create(
+        "FE0029",
+        "Render-graph identity must be a GUID",
+        "Render-graph identity '{0}' on '{1}' must be a canonical GUID");
+
+    public static readonly DiagnosticDescriptor RenderGraphGuidDuplicate = Create(
+        "FE0030",
+        "Render-graph identity must be unique",
+        "Render-graph identity '{0}' is used more than once in '{1}'");
+
+    public static readonly DiagnosticDescriptor RenderPassContractInvalid = Create(
+        "FE0031",
+        "Render pass must implement IRenderPass",
+        "Render pass '{0}' must implement Feather.RenderGraph.IRenderPass");
+
     public static readonly DiagnosticDescriptor[] All =
     [
         ShaderTypeShape,
@@ -176,7 +191,10 @@ internal static class FeatherDiagnostics
         ThreadGroupSizeInvalid,
         UnsupportedElementwiseIntrinsic,
         TypedIrLoweringFailed,
-        TopLevelLocalUnsupported
+        TopLevelLocalUnsupported,
+        RenderGraphGuidInvalid,
+        RenderGraphGuidDuplicate,
+        RenderPassContractInvalid
     ];
 
     private static DiagnosticDescriptor Create(string id, string title, string message)

@@ -30,3 +30,6 @@ FE0025 | Feather | Error | ThreadGroupSize is invalid for kernel dimension.
 FE0026 | Feather | Error | Elementwise expression intrinsic is not supported.
 FE0027 | Feather | Error | Typed shader IR lowering failed.
 FE0028 | Feather | Error | Top-level local is not supported in shader code.
+FE0029 | Feather | Error | Render-graph identity must be a GUID.
+FE0030 | Feather | Error | Render-graph identity must be unique.
+FE0031 | Feather | Error | Render pass must implement IRenderPass.

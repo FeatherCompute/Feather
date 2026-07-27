@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup>
+    <FeatherEmitPassManifest Condition="'$(FeatherEmitPassManifest)' == ''">true</FeatherEmitPassManifest>
+    <FeatherPassManifestPath Condition="'$(FeatherPassManifestPath)' == ''">$(MSBuildProjectDirectory)/Generated/pass-manifest.json</FeatherPassManifestPath>
+    <FeatherFeirDirectory Condition="'$(FeatherFeirDirectory)' == ''">Generated/feather-ir</FeatherFeirDirectory>
+    <FeatherManifestExporterPath Condition="'$(FeatherManifestExporterPath)' == '' and Exists('$(MSBuildThisFileDirectory)../../Feather.ManifestExporter/Feather.ManifestExporter.csproj')">$(MSBuildThisFileDirectory)../../Feather.ManifestExporter/bin/$(Configuration)/net10.0/Feather.ManifestExporter.dll</FeatherManifestExporterPath>
+    <FeatherManifestExporterPath Condition="'$(FeatherManifestExporterPath)' == ''">$(MSBuildThisFileDirectory)../tools/net10.0/Feather.ManifestExporter.dll</FeatherManifestExporterPath>
+    <FeatherDotNetHostPath Condition="'$(FeatherDotNetHostPath)' == '' and '$(DotNetHostPath)' != ''">$(DotNetHostPath)</FeatherDotNetHostPath>
+    <FeatherDotNetHostPath Condition="'$(FeatherDotNetHostPath)' == ''">dotnet</FeatherDotNetHostPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CompilerVisibleItemMetadata Include="Compile" MetadataName="FeatherProjectRelativePath" />
+    <Compile Update="@(Compile)" FeatherProjectRelativePath="%(Identity)" />
+  </ItemGroup>
+
+  <Target Name="FeatherWritePassManifest"
+          AfterTargets="Build"
+          Condition="'$(FeatherEmitPassManifest)' == 'true' and Exists('$(TargetPath)')">
+    <Error Condition="!Exists('$(FeatherManifestExporterPath)')"
+           Text="Feather manifest exporter was not found at '$(FeatherManifestExporterPath)'." />
+    <Exec Command="&quot;$(FeatherDotNetHostPath)&quot; exec &quot;$(FeatherManifestExporterPath)&quot; --assembly &quot;$(TargetPath)&quot; --output &quot;$(FeatherPassManifestPath)&quot; --project-root &quot;$(MSBuildProjectDirectory)&quot; --feir-directory &quot;$(FeatherFeirDirectory)&quot;" />
+  </Target>
+</Project>

@@ -2,6 +2,7 @@ using Feather.Diagnostics;
 using Feather.Graphics;
 using Feather.Interop;
 using Feather.Math;
+using Feather.RenderGraph;
 using Feather.Resources;
 
 namespace Feather.Tests;
@@ -21,10 +22,48 @@ public class PublicApiTests
     {
         var ids = DiagnosticDescriptors.All.Select(diagnostic => diagnostic.Id).ToHashSet();
 
-        foreach (var id in Enumerable.Range(1, 25).Select(value => $"FE{value:0000}"))
+        foreach (var id in Enumerable.Range(1, 31).Select(value => $"FE{value:0000}"))
         {
             Assert.Contains(id, ids);
         }
+    }
+
+    [Fact]
+    public void RenderGraphContractsExposeStableMetadataAndHandles()
+    {
+        const string passGuid = "7c229449-7ed8-5efe-ae32-8b164f36cb29";
+        const string memberGuid = "c297c664-c8ef-5a2d-97c8-c211ebd9d7af";
+        var pass = new FeatherPassAttribute(passGuid)
+        {
+            Name = "Preview",
+            Category = "Raster",
+            Version = 2
+        };
+        var output = new OutputAttribute(memberGuid)
+        {
+            Name = "Color",
+            Format = TextureFormat.Rgba16Float
+        };
+        var parameter = new ParameterAttribute(memberGuid)
+        {
+            DefaultValue = 1.0f,
+            Min = 0.0,
+            Max = 8.0
+        };
+
+        Assert.Equal(passGuid, pass.Guid);
+        Assert.Equal("Preview", pass.Name);
+        Assert.Equal("Raster", pass.Category);
+        Assert.Equal(2, pass.Version);
+        Assert.Equal(memberGuid, output.Guid);
+        Assert.Equal(TextureFormat.Rgba16Float, output.Format);
+        Assert.Equal(1.0f, parameter.DefaultValue);
+        Assert.Equal(0.0, parameter.Min);
+        Assert.Equal(8.0, parameter.Max);
+        Assert.True(typeof(IRenderPass).IsAssignableFrom(typeof(IRasterPass)));
+        Assert.True(typeof(IRenderPass).IsAssignableFrom(typeof(IComputePass)));
+        Assert.Equal(42UL, new TextureHandle(42).Value);
+        Assert.Equal(43UL, new SceneGeometryHandle(43).Value);
     }
 
     [Fact]

@@ -30,7 +30,13 @@ public static class DiagnosticDescriptors
         new("FE0022", "AD loss must be scalar float."),
         new("FE0023", "Graphics shader varying type must be unmanaged and [GpuStruct]."),
         new("FE0024", "Fragment shader output type is not supported."),
-        new("FE0025", "ThreadGroupSize is invalid for kernel dimension.")
+        new("FE0025", "ThreadGroupSize is invalid for kernel dimension."),
+        new("FE0026", "Elementwise expression intrinsic is not supported."),
+        new("FE0027", "Typed shader IR lowering failed."),
+        new("FE0028", "Top-level local is not supported in shader code."),
+        new("FE0029", "Render-graph identity must be a GUID."),
+        new("FE0030", "Render-graph identity must be unique."),
+        new("FE0031", "Render pass must implement IRenderPass.")
     ];
 }
 

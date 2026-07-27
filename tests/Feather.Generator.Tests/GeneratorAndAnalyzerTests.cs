@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using Feather.Generators;
 using Feather.Generators.Model;
 using Feather.Interop;
@@ -6503,6 +6504,218 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal(4, itemElementType.Kind);
     }
 
+    [Fact]
+    public void GeneratorEmitsBlenderCompatiblePassManifestMetadata()
+    {
+        const string passGuid = "7c229449-7ed8-5efe-ae32-8b164f36cb29";
+        const string inputGuid = "c297c664-c8ef-5a2d-97c8-c211ebd9d7af";
+        const string outputGuid = "e7dc141b-3e28-56c3-a338-b25f79fbefd2";
+        const string parameterGuid = "8e502e27-d93d-589c-a96f-b3e13f18ab84";
+        const string stringParameterGuid = "d6490afe-0982-5f84-bd05-ae57ea108217";
+        const string implicitDefaultParameterGuid = "3232f39f-848a-54ed-9d71-b6871c10b40c";
+        var compilation = CreateCompilation(
+            $$"""
+            using Feather.RenderGraph;
+
+            namespace Scratch.Passes;
+
+            [FeatherPass("{{passGuid}}", Name = "Test Pass", Category = "Tests", Version = 3)]
+            public sealed class TestPass : IRasterPass
+            {
+                [Input("{{inputGuid}}", Name = "Scene")]
+                public SceneGeometryHandle Geometry { get; init; }
+
+                [Output("{{outputGuid}}", Name = "HDR Color", Format = TextureFormat.Rgba16Float)]
+                public TextureHandle Color { get; init; }
+
+                [Parameter("{{parameterGuid}}", Name = "Radius", Min = 0.01, Max = 5.0)]
+                public float Radius { get; set; } = 0.5f;
+
+                [Parameter("{{stringParameterGuid}}", DefaultValue = "line\u0001\n")]
+                public string Label { get; set; } = string.Empty;
+
+                [Parameter("{{implicitDefaultParameterGuid}}")]
+                public int Samples { get; set; }
+
+                public void Execute(RenderContext context)
+                {
+                }
+            }
+            """,
+            sourcePath: "Passes/TestPass.cs");
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var generated = GetGeneratedTree(outputCompilation, diagnostics, "Feather.PassManifest.g.cs");
+        var jsonVariable = generated.GetRoot()
+            .DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(variable => variable.Identifier.ValueText == "Json");
+        var jsonField = Assert.IsAssignableFrom<IFieldSymbol>(
+            outputCompilation.GetSemanticModel(generated).GetDeclaredSymbol(jsonVariable));
+        var manifestText = Assert.IsType<string>(jsonField.ConstantValue);
+
+        using var manifest = JsonDocument.Parse(manifestText);
+        var root = manifest.RootElement;
+        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("buildId").GetString());
+        Assert.Equal("__FEATHER_ASSEMBLY_PATH__", root.GetProperty("assemblyPath").GetString());
+        Assert.Equal("__FEATHER_FEIR_DIRECTORY__", root.GetProperty("feirDirectory").GetString());
+
+        var pass = Assert.Single(root.GetProperty("passes").EnumerateArray());
+        Assert.Equal(passGuid, pass.GetProperty("passGuid").GetString());
+        Assert.Equal("Scratch.Passes.TestPass", pass.GetProperty("typeName").GetString());
+        Assert.Equal("Test Pass", pass.GetProperty("displayName").GetString());
+        Assert.Equal("Tests", pass.GetProperty("category").GetString());
+        Assert.Equal(3, pass.GetProperty("version").GetInt32());
+        Assert.Equal("__FEATHER_ASSEMBLY_PATH__", pass.GetProperty("assemblyPath").GetString());
+        Assert.Equal($"__FEATHER_FEIR_DIRECTORY__/{passGuid}.feir", pass.GetProperty("feirPath").GetString());
+
+        var source = pass.GetProperty("source");
+        Assert.Equal("Passes/TestPass.cs", source.GetProperty("path").GetString());
+        Assert.Equal(5, source.GetProperty("line0").GetInt32());
+        Assert.Equal(20, source.GetProperty("column0").GetInt32());
+
+        var input = Assert.Single(pass.GetProperty("inputs").EnumerateArray());
+        Assert.Equal(inputGuid, input.GetProperty("socketGuid").GetString());
+        Assert.Equal("Scene", input.GetProperty("name").GetString());
+        Assert.Equal("SceneGeometry", input.GetProperty("resourceKind").GetString());
+        Assert.Equal("Unknown", input.GetProperty("format").GetString());
+        Assert.Equal("Read", input.GetProperty("access").GetString());
+
+        var output = Assert.Single(pass.GetProperty("outputs").EnumerateArray());
+        Assert.Equal(outputGuid, output.GetProperty("socketGuid").GetString());
+        Assert.Equal("HDR Color", output.GetProperty("name").GetString());
+        Assert.Equal("Texture2D", output.GetProperty("resourceKind").GetString());
+        Assert.Equal("RGBA16Float", output.GetProperty("format").GetString());
+        Assert.Equal("Write", output.GetProperty("access").GetString());
+
+        var parameters = pass.GetProperty("parameters").EnumerateArray().ToArray();
+        Assert.Equal(3, parameters.Length);
+        var parameter = parameters[0];
+        Assert.Equal(parameterGuid, parameter.GetProperty("parameterGuid").GetString());
+        Assert.Equal("Radius", parameter.GetProperty("name").GetString());
+        Assert.Equal("float", parameter.GetProperty("type").GetString());
+        Assert.Equal(0.5, parameter.GetProperty("defaultValue").GetDouble());
+        Assert.Equal(0.01, parameter.GetProperty("min").GetDouble());
+        Assert.Equal(5.0, parameter.GetProperty("max").GetDouble());
+        var stringParameter = parameters[1];
+        Assert.Equal(stringParameterGuid, stringParameter.GetProperty("parameterGuid").GetString());
+        Assert.Equal("string", stringParameter.GetProperty("type").GetString());
+        Assert.Equal("line\u0001\n", stringParameter.GetProperty("defaultValue").GetString());
+        var implicitDefaultParameter = parameters[2];
+        Assert.Equal(
+            implicitDefaultParameterGuid,
+            implicitDefaultParameter.GetProperty("parameterGuid").GetString());
+        Assert.Equal("Samples", implicitDefaultParameter.GetProperty("name").GetString());
+        Assert.Equal("int", implicitDefaultParameter.GetProperty("type").GetString());
+        Assert.Equal(0, implicitDefaultParameter.GetProperty("defaultValue").GetInt32());
+    }
+
+    [Fact]
+    public void GeneratorReportsInvalidRenderGraphGuid()
+    {
+        var compilation = CreateCompilation("""
+            using Feather.RenderGraph;
+
+            [FeatherPass("not-a-guid")]
+            public sealed class InvalidPass : IRenderPass
+            {
+                public void Execute(RenderContext context)
+                {
+                }
+            }
+            """);
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, item => item.Id == "FE0029");
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+    }
+
+    [Fact]
+    public void GeneratorReportsDuplicateRenderGraphMemberGuid()
+    {
+        const string duplicateGuid = "0281e045-bcd1-5451-8653-2c1049a2ae45";
+        var compilation = CreateCompilation(
+            $$"""
+            using Feather.RenderGraph;
+
+            [FeatherPass("dc9d86bb-ea2e-5079-a5b7-a7141aa7516f")]
+            public sealed class DuplicatePass : IRenderPass
+            {
+                [Input("{{duplicateGuid}}")]
+                public TextureHandle Input { get; init; }
+
+                [Output("{{duplicateGuid}}")]
+                public TextureHandle Output { get; init; }
+
+                public void Execute(RenderContext context)
+                {
+                }
+            }
+            """);
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, item => item.Id == "FE0030");
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains(duplicateGuid, diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratorReportsDuplicateRenderGraphPassGuid()
+    {
+        const string duplicateGuid = "dc9d86bb-ea2e-5079-a5b7-a7141aa7516f";
+        var compilation = CreateCompilation(
+            $$"""
+            using Feather.RenderGraph;
+
+            [FeatherPass("{{duplicateGuid}}")]
+            public sealed class FirstPass : IRenderPass
+            {
+                public void Execute(RenderContext context) { }
+            }
+
+            [FeatherPass("{{duplicateGuid}}")]
+            public sealed class SecondPass : IRenderPass
+            {
+                public void Execute(RenderContext context) { }
+            }
+            """);
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, item => item.Id == "FE0030");
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains(duplicateGuid, diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratorReportsRenderPassWithoutContract()
+    {
+        var compilation = CreateCompilation("""
+            using Feather.RenderGraph;
+
+            [FeatherPass("dc9d86bb-ea2e-5079-a5b7-a7141aa7516f")]
+            public sealed class MissingContractPass
+            {
+            }
+            """);
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+
+        var diagnostic = Assert.Single(diagnostics, item => item.Id == "FE0031");
+        Assert.Equal(DiagnosticSeverity.Error, diagnostic.Severity);
+        Assert.Contains("MissingContractPass", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
     private static FeatherIrModule ReadGeneratedIr(string source)
     {
         return FeatherIr.Read(ExtractGeneratedIrBytes(source));
@@ -6891,7 +7104,8 @@ public class GeneratorAndAnalyzerTests
     private static CSharpCompilation CreateCompilation(
         string source,
         IEnumerable<MetadataReference>? additionalReferences = null,
-        string assemblyName = "Scratch")
+        string assemblyName = "Scratch",
+        string sourcePath = "")
     {
         var references = AppDomain.CurrentDomain.GetAssemblies()
             .Where(assembly => !assembly.IsDynamic && !string.IsNullOrWhiteSpace(assembly.Location))
@@ -6902,7 +7116,7 @@ public class GeneratorAndAnalyzerTests
 
         return CSharpCompilation.Create(
             assemblyName,
-            [CSharpSyntaxTree.ParseText(source)],
+            [CSharpSyntaxTree.ParseText(source, path: sourcePath)],
             references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
     }

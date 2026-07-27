@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Feather.Generators/Feather.Generators.csproj" />
+    <Project Path="src/Feather.ManifestExporter/Feather.ManifestExporter.csproj" />
     <Project Path="src/Feather.Native/Feather.Native.csproj" />
     <Project Path="src/Feather.NativeAssets/Feather.NativeAssets.csproj" />
     <Project Path="src/Feather/Feather.csproj" />
@@ -19,6 +20,7 @@
     <Project Path="benchmarks/ShaderOptimization/ShaderOptimization.csproj" />
   </Folder>
   <Folder Name="/samples/">
+    <Project Path="samples/BlenderRenderGraph/BlenderRenderGraph.csproj" />
     <Project Path="samples/HelloBuffer/HelloBuffer.csproj" />
     <Project Path="samples/TextureCopy/TextureCopy.csproj" />
     <Project Path="samples/ParallelReduction/ParallelReduction.csproj" />

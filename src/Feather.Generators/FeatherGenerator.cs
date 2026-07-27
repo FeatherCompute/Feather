@@ -40,6 +40,16 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             .Where(static model => model is not null)
             .Select(static (model, _) => model!);
 
+        var passModels = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.RenderGraph.FeatherPassAttribute",
+                static (node, _) => node is ClassDeclarationSyntax,
+                static (ctx, ct) => PassModelFactory.Create(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                PassModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
         context.RegisterSourceOutput(gpuStructModels, static (productionContext, model) =>
         {
             var hasErrors = false;
@@ -101,6 +111,13 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                     SourceText.From(GenerateGraphicsPipeline(pipeline), Encoding.UTF8));
             }
         });
+
+        var passManifestOptions = context.AnalyzerConfigOptionsProvider
+            .Select(static (options, _) => PassManifestOptions.Create(options.GlobalOptions));
+        context.RegisterSourceOutput(
+            passModels.Collect().Combine(passManifestOptions),
+            static (productionContext, pair) =>
+                PassManifestWriter.Emit(productionContext, pair.Left, pair.Right));
     }
 
     private static string GenerateKernel(ShaderModel model)
