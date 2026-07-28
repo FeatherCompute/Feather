@@ -15,6 +15,7 @@ internal sealed class RenderRequest
     public string ViewId { get; init; } = "";
     public string ScenePath { get; init; } = "";
     public string GraphPath { get; init; } = "";
+    public string? ManifestPath { get; init; }
     public string OutputPath { get; init; } = "";
     public int Width { get; init; }
     public int Height { get; init; }
@@ -47,6 +48,9 @@ internal sealed class RenderRequest
             request.ViewId,
             ResolvePath(baseDirectory, request.ScenePath),
             ResolvePath(baseDirectory, request.GraphPath),
+            string.IsNullOrWhiteSpace(request.ManifestPath)
+                ? null
+                : ResolvePath(baseDirectory, request.ManifestPath),
             ResolvePath(baseDirectory, request.OutputPath),
             request.Width,
             request.Height,
@@ -116,6 +120,7 @@ internal sealed record ResolvedRenderRequest(
     string ViewId,
     string ScenePath,
     string GraphPath,
+    string? ManifestPath,
     string OutputPath,
     int Width,
     int Height,

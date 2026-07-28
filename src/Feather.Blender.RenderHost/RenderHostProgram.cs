@@ -64,15 +64,15 @@ internal static class RenderHostProgram
         RenderHostOptions options,
         CancellationToken cancellationToken)
     {
-        FileSignature? previous = null;
-        FileSignature? failed = null;
+        RenderInputSignature? previous = null;
+        RenderInputSignature? failed = null;
         var failureCount = 0;
         var retryAfter = DateTimeOffset.MinValue;
         WriteEvent("ready", new { requestPath = Path.GetFullPath(options.RequestPath!) });
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var current = FileSignature.TryRead(options.RequestPath!);
+            var current = RenderInputSignature.TryRead(options.RequestPath!);
             var retryIsDue = current != failed || DateTimeOffset.UtcNow >= retryAfter;
             if (current is not null && current != previous && retryIsDue)
             {
@@ -130,6 +130,39 @@ internal static class RenderHostProgram
             catch (IOException)
             {
                 return null;
+            }
+        }
+    }
+
+    private sealed record RenderInputSignature(
+        FileSignature Request,
+        string? ManifestPath,
+        FileSignature? Manifest)
+    {
+        public static RenderInputSignature? TryRead(string requestPath)
+        {
+            var request = FileSignature.TryRead(requestPath);
+            if (request is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var resolved = RenderRequest.Load(requestPath);
+                return new RenderInputSignature(
+                    request,
+                    resolved.ManifestPath,
+                    resolved.ManifestPath is null ? null : FileSignature.TryRead(resolved.ManifestPath));
+            }
+            catch (Exception exception) when (exception is
+                IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                ArgumentException or
+                OverflowException)
+            {
+                return new RenderInputSignature(request, null, null);
             }
         }
     }

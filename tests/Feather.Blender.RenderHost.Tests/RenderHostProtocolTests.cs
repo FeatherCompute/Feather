@@ -1,6 +1,10 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Feather.Math;
+using Feather.RenderGraph;
 
 namespace Feather.Blender.RenderHost.Tests;
 
@@ -174,13 +178,60 @@ public sealed class RenderHostProtocolTests
     }
 
     [Fact]
+    public void ProjectPassAssemblyLoadsReloadsAndUnloadsWithoutGpuWork()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteGraph(typeName: typeof(RedCpuPass).FullName!);
+        WritePassManifest(manifestPath, typeof(RedCpuPass));
+        var firstManifest = File.ReadAllText(manifestPath);
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var first = host.RenderOnce(fixture.RequestPath);
+        var firstFrame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.True(first.PassReloaded);
+        Assert.Equal(typeof(RedCpuPass).FullName, first.PassType);
+        Assert.StartsWith("sha256:", first.BuildId, StringComparison.Ordinal);
+        Assert.Equal(new byte[] { 240, 20, 30, 255 }, firstFrame[40..44]);
+
+        var brokenManifest = JsonNode.Parse(firstManifest)!.AsObject();
+        brokenManifest["assemblyPath"] = "missing-pass-assembly.dll";
+        brokenManifest["passes"]![0]!["assemblyPath"] = "missing-pass-assembly.dll";
+        File.WriteAllText(manifestPath, brokenManifest.ToJsonString());
+        Assert.Throws<FileNotFoundException>(() => host.RenderOnce(fixture.RequestPath));
+        File.WriteAllText(manifestPath, firstManifest);
+        var recovered = host.RenderOnce(fixture.RequestPath);
+        Assert.False(recovered.PassReloaded);
+        Assert.Equal(first.BuildId, recovered.BuildId);
+
+        fixture.WriteGraph(typeName: typeof(BlueCpuPass).FullName!);
+        WritePassManifest(manifestPath, typeof(BlueCpuPass));
+        var second = host.RenderOnce(fixture.RequestPath);
+        var secondFrame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.True(second.PassReloaded);
+        Assert.NotEqual(first.BuildId, second.BuildId);
+        Assert.Equal(typeof(BlueCpuPass).FullName, second.PassType);
+        Assert.Equal(new byte[] { 20, 30, 240, 255 }, secondFrame[40..44]);
+        Assert.NotNull(host.LastUnloadedPassContextForTesting);
+        AssertEventuallyUnloaded(host.LastUnloadedPassContextForTesting!);
+
+        var third = host.RenderOnce(fixture.RequestPath);
+        Assert.False(third.PassReloaded);
+        Assert.Equal(second.BuildId, third.BuildId);
+    }
+
+    [Fact]
     public void FrameWriterMatchesBlenderFrameV1AndLeavesNoTemporaryFile()
     {
         using var fixture = new ProtocolFixture();
         var pixels = new[]
         {
-            new Rgba32(1, 2, 3, 4),
-            new Rgba32(5, 6, 7, 8)
+            new Rgba8(1, 2, 3, 4),
+            new Rgba8(5, 6, 7, 8)
         };
 
         FrameFileWriter.WriteAtomic(
@@ -199,5 +250,95 @@ public sealed class RenderHostProtocolTests
         Assert.Equal(99ul, BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(32, 8)));
         Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, bytes[40..]);
         Assert.Empty(Directory.GetFiles(fixture.Root, "*.tmp"));
+    }
+
+    private static void WritePassManifest(string path, Type passType)
+    {
+        var assemblyPath = passType.Assembly.Location;
+        var document = new JsonObject
+        {
+            ["schemaVersion"] = 1,
+            ["buildId"] = string.Empty,
+            ["assemblyPath"] = assemblyPath,
+            ["feirDirectory"] = "",
+            ["projectRoot"] = ".",
+            ["passes"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["passGuid"] = RenderGraphDocument.MinimalRasterPassGuid,
+                    ["typeName"] = passType.FullName,
+                    ["assemblyPath"] = assemblyPath,
+                    ["inputs"] = new JsonArray
+                    {
+                        new JsonObject { ["socketGuid"] = RenderGraphDocument.GeometryInputSocketGuid },
+                        new JsonObject { ["socketGuid"] = RenderGraphDocument.MaterialsInputSocketGuid },
+                        new JsonObject { ["socketGuid"] = RenderGraphDocument.CameraInputSocketGuid }
+                    },
+                    ["outputs"] = new JsonArray
+                    {
+                        new JsonObject { ["socketGuid"] = RenderGraphDocument.ColorOutputSocketGuid }
+                    }
+                }
+            }
+        };
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        var hashInput = document.ToJsonString(options);
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hasher.AppendData(Encoding.UTF8.GetBytes(hashInput));
+        hasher.AppendData([0]);
+        hasher.AppendData(File.ReadAllBytes(assemblyPath));
+        document["buildId"] = "sha256:" + Convert.ToHexString(
+            hasher.GetHashAndReset()).ToLowerInvariant();
+        File.WriteAllText(path, document.ToJsonString(options) + Environment.NewLine);
+    }
+
+    private static void AssertEventuallyUnloaded(WeakReference reference)
+    {
+        for (var attempt = 0; attempt < 10 && reference.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        Assert.False(reference.IsAlive, "The previous project pass AssemblyLoadContext remained alive.");
+    }
+
+    [FeatherPass(RenderGraphDocument.MinimalRasterPassGuid)]
+    public sealed class RedCpuPass : CpuPassBase
+    {
+        protected override Rgba8 Color => new(240, 20, 30, 255);
+    }
+
+    [FeatherPass(RenderGraphDocument.MinimalRasterPassGuid)]
+    public sealed class BlueCpuPass : CpuPassBase
+    {
+        protected override Rgba8 Color => new(20, 30, 240, 255);
+    }
+
+    public abstract class CpuPassBase : IRasterPass
+    {
+        [Input(RenderGraphDocument.GeometryInputSocketGuid)]
+        public SceneGeometryHandle Geometry { get; init; }
+
+        [Input(RenderGraphDocument.MaterialsInputSocketGuid)]
+        public MaterialTableHandle Materials { get; init; }
+
+        [Input(RenderGraphDocument.CameraInputSocketGuid)]
+        public CameraHandle Camera { get; init; }
+
+        [Output(RenderGraphDocument.ColorOutputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Output { get; init; }
+
+        protected abstract Rgba8 Color { get; }
+
+        public void Execute(RenderContext context)
+        {
+            _ = context.GetSceneGeometry(Geometry);
+            _ = context.GetCamera(Camera);
+            var pixels = new Rgba8[checked(context.Width * context.Height)];
+            Array.Fill(pixels, Color);
+            context.SetColorOutput(Output, pixels);
+        }
     }
 }

@@ -14,7 +14,10 @@ try
     var projectRoot = Required(arguments, "project-root");
     var feirDirectory = arguments.GetValueOrDefault("feir-directory") ?? "Generated/feather-ir";
 
-    var assembly = Assembly.LoadFrom(Path.GetFullPath(assemblyPath));
+    assemblyPath = Path.GetFullPath(assemblyPath);
+    outputPath = Path.GetFullPath(outputPath);
+    projectRoot = Path.GetFullPath(projectRoot);
+    var assembly = Assembly.LoadFrom(assemblyPath);
     var encodedManifest = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
         .SingleOrDefault(attribute => attribute.Key == MetadataKey)
         ?.Value;
@@ -28,16 +31,23 @@ try
     var manifest = JsonNode.Parse(manifestText)?.AsObject()
         ?? throw new InvalidDataException("Embedded Feather pass manifest is not a JSON object.");
     var relativeAssemblyPath = NormalizePath(Path.GetRelativePath(projectRoot, assemblyPath));
+    var outputDirectory = Path.GetDirectoryName(outputPath)
+        ?? throw new InvalidOperationException($"Manifest path has no parent directory: {outputPath}");
+    var relativeProjectRoot = NormalizePath(Path.GetRelativePath(outputDirectory, projectRoot));
     feirDirectory = NormalizePath(feirDirectory).TrimEnd('/');
 
     manifest["assemblyPath"] = relativeAssemblyPath;
     manifest["feirDirectory"] = feirDirectory;
+    manifest["projectRoot"] = string.IsNullOrEmpty(relativeProjectRoot) ? "." : relativeProjectRoot;
     foreach (var pass in manifest["passes"]?.AsArray().OfType<JsonObject>() ?? [])
     {
         var passGuid = pass["passGuid"]?.GetValue<string>()
             ?? throw new InvalidDataException("A Feather pass is missing passGuid.");
         pass["assemblyPath"] = relativeAssemblyPath;
-        pass["feirPath"] = $"{feirDirectory}/{passGuid}.feir";
+        var feirPath = $"{feirDirectory}/{passGuid}.feir";
+        var resolvedFeirPath = Path.GetFullPath(
+            Path.IsPathRooted(feirPath) ? feirPath : Path.Combine(projectRoot, feirPath));
+        pass["feirPath"] = File.Exists(resolvedFeirPath) ? feirPath : string.Empty;
     }
 
     var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
@@ -58,7 +68,7 @@ try
     manifest["buildId"] = "sha256:" + Convert.ToHexString(
         buildHasher.GetHashAndReset()).ToLowerInvariant();
     var output = manifest.ToJsonString(jsonOptions) + Environment.NewLine;
-    WriteIfChanged(Path.GetFullPath(outputPath), output);
+    WriteIfChanged(outputPath, output);
     return 0;
 }
 catch (Exception exception)

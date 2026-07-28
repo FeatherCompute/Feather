@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using Feather.Math;
+using Feather.RenderGraph;
 
 namespace Feather.Blender.RenderHost;
 
@@ -203,7 +204,7 @@ internal sealed class SceneInstance
     public bool IsInstance { get; init; }
 }
 
-internal sealed record RenderGeometry(MinimalRasterVertex[] Vertices, uint[] Indices);
+internal sealed record RenderGeometry(SceneVertex[] Vertices, uint[] Indices);
 
 internal static class SceneGeometryBuilder
 {
@@ -218,7 +219,7 @@ internal static class SceneGeometryBuilder
             }
         }
 
-        var vertices = new List<MinimalRasterVertex>();
+        var vertices = new List<SceneVertex>();
         var indices = new List<uint>();
         foreach (var instance in snapshot.Metadata.Instances)
         {
@@ -275,7 +276,7 @@ internal static class SceneGeometryBuilder
                     mesh.CornerNormals[normalOffset + 2],
                     0.0f);
                 var normal = Normalize(new float3(normal4.X, normal4.Y, normal4.Z));
-                vertices.Add(new MinimalRasterVertex
+                vertices.Add(new SceneVertex
                 {
                     Position = new float3(position.X, position.Y, position.Z),
                     Normal = normal

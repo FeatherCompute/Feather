@@ -39,6 +39,9 @@ public class RenderGraphBuildTests
             Assert.Matches("^sha256:[0-9a-f]{64}$", firstBuildId);
             Assert.Equal(expectedAssemblyPath, root.GetProperty("assemblyPath").GetString());
             Assert.Equal("Generated/feather-ir", root.GetProperty("feirDirectory").GetString());
+            Assert.Equal(
+                Path.GetRelativePath(outputDirectory, sampleDirectory).Replace('\\', '/'),
+                root.GetProperty("projectRoot").GetString());
             Assert.True(File.Exists(Path.Combine(sampleDirectory, expectedAssemblyPath.Replace('/', Path.DirectorySeparatorChar))));
 
             var pass = Assert.Single(root.GetProperty("passes").EnumerateArray());
@@ -46,9 +49,9 @@ public class RenderGraphBuildTests
             Assert.Equal("01c671a1-9b4e-5cab-b7e1-c101348af596", passGuid);
             Assert.Equal("BlenderRenderGraph.Passes.MinimalRasterPass", pass.GetProperty("typeName").GetString());
             Assert.Equal(expectedAssemblyPath, pass.GetProperty("assemblyPath").GetString());
-            Assert.Equal($"Generated/feather-ir/{passGuid}.feir", pass.GetProperty("feirPath").GetString());
+            Assert.Equal(string.Empty, pass.GetProperty("feirPath").GetString());
             Assert.Equal("Passes/MinimalRasterPass.cs", pass.GetProperty("source").GetProperty("path").GetString());
-            Assert.Equal("RGBA16Float", Assert.Single(pass.GetProperty("outputs").EnumerateArray()).GetProperty("format").GetString());
+            Assert.Equal("RGBA8", Assert.Single(pass.GetProperty("outputs").EnumerateArray()).GetProperty("format").GetString());
 
             var parameter = Assert.Single(pass.GetProperty("parameters").EnumerateArray());
             Assert.Equal("Exposure", parameter.GetProperty("name").GetString());

@@ -176,8 +176,10 @@ internal sealed class RenderGraphDocument
 
         return new RenderGraphExecution(
             GenerationId,
+            GraphId,
             ViewId,
             (Feather.SampleCount)SampleCount,
+            pass,
             MinimalRasterSettings.FromParameters(pass.Parameters));
 
         bool HasLink(string fromNode, string fromSocket, string toNode, string toSocket)
@@ -213,8 +215,10 @@ internal sealed class RenderGraphDocument
 
 internal sealed record RenderGraphExecution(
     string GenerationId,
+    string GraphId,
     string ViewId,
     Feather.SampleCount SampleCount,
+    GraphNode Pass,
     MinimalRasterSettings Settings);
 
 internal sealed class GraphNode

@@ -67,6 +67,30 @@ public class PublicApiTests
     }
 
     [Fact]
+    public void RenderContextExposesHostIndependentSceneAndCameraResources()
+    {
+        var vertex = new SceneVertex
+        {
+            Position = new float3(1, 2, 3),
+            Normal = new float3(0, 0, 1)
+        };
+        var geometry = new SceneGeometry(new[] { vertex }, Array.Empty<uint>());
+        var camera = new RenderCamera(float4x4.Identity);
+        var backend = new FakeRenderContextBackend(geometry, camera);
+        var context = new RenderContext(backend);
+
+        Assert.Equal(320, context.Width);
+        Assert.Equal(180, context.Height);
+        Assert.Equal(SampleCount.X4, context.SampleCount);
+        Assert.Same(geometry, context.GetSceneGeometry(new SceneGeometryHandle(1)));
+        Assert.Equal(camera, context.GetCamera(new CameraHandle(2)));
+        Assert.Throws<InvalidOperationException>(() => _ = new RenderContext().Width);
+        Assert.Throws<ArgumentException>(() => new SceneGeometry(
+            Array.Empty<SceneVertex>(),
+            new uint[] { 0, 1 }));
+    }
+
+    [Fact]
     public void ShaderMathSupportsCpuEquivalentSmokeOperations()
     {
         var a = new float3(1, 2, 3);
@@ -232,4 +256,26 @@ public class PublicApiTests
         => (attribute.X, attribute.Y, attribute.Z);
 
     private readonly record struct Rgba32(byte R, byte G, byte B, byte A);
+
+    private sealed class FakeRenderContextBackend(
+        SceneGeometry geometry,
+        RenderCamera camera) : IRenderContextBackend
+    {
+        public int Width => 320;
+        public int Height => 180;
+        public SampleCount SampleCount => SampleCount.X4;
+
+        public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
+            => handle.Value == 1 ? geometry : throw new KeyNotFoundException();
+
+        public RenderCamera GetCamera(CameraHandle handle)
+            => handle.Value == 2 ? camera : throw new KeyNotFoundException();
+
+        public void SetColorOutput(
+            TextureHandle handle,
+            Rgba8[] pixels,
+            DispatchPath dispatchPath)
+        {
+        }
+    }
 }

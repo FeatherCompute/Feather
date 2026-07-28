@@ -1,0 +1,127 @@
+using Feather;
+using Feather.Graphics;
+using Feather.Math;
+using Feather.RenderGraph;
+using Feather.Resources;
+
+namespace HotReloadProject.Passes;
+
+[FeatherPass(
+    "01c671a1-9b4e-5cab-b7e1-c101348af596",
+    Name = "Hot Reload Raster",
+    Category = "Tests")]
+public sealed class MinimalRasterPass : IRasterPass
+{
+    [Input("6d6eb2d5-bb7a-55a4-a85a-c58e36715c53")]
+    public SceneGeometryHandle Geometry { get; init; }
+
+    [Input("a6eed590-b632-5f91-a69d-09b6eb4bb5ac")]
+    public MaterialTableHandle Materials { get; init; }
+
+    [Input("cc78191c-ac9a-57b6-bcac-91cce5e298f5")]
+    public CameraHandle Camera { get; init; }
+
+    [Output(
+        "bd711ea6-36f9-56cd-863a-cfec58727a46",
+        Format = TextureFormat.Rgba8)]
+    public TextureHandle Color { get; init; }
+
+    public void Execute(RenderContext context)
+    {
+        var geometry = context.GetSceneGeometry(Geometry);
+        var camera = context.GetCamera(Camera);
+        var shaderVertices = new RasterVertex[geometry.Vertices.Length];
+        for (var index = 0; index < shaderVertices.Length; index++)
+        {
+            var vertex = geometry.Vertices.Span[index];
+            shaderVertices[index] = new RasterVertex
+            {
+                Position = vertex.Position,
+                Normal = vertex.Normal
+            };
+        }
+
+        using var color = GPU.CreateRenderTexture2D<Rgba8, Rgba8>(
+            context.Width,
+            context.Height,
+            PixelFormat.Rgba8);
+        var background = new Rgba8[checked(context.Width * context.Height)];
+        Array.Fill(background, new Rgba8(3, 5, 8, 255));
+        color.Upload(background);
+        using var vertices = GPU.CreateBuffer<RasterVertex>(shaderVertices, BufferAccess.ReadOnly);
+        using var indices = GPU.CreateIndexBuffer(geometry.Indices.Span);
+        using var depth = GPU.CreateDepthTexture2D(context.Width, context.Height);
+        using var pipeline = GPU.CreateGraphicsPipeline<RasterVertexShader, RasterFragmentShader, RasterVaryings>(
+            new GraphicsPipelineDesc
+            {
+                SampleCount = context.SampleCount,
+                DepthStencil = DepthStencilState.Default with
+                {
+                    DepthTest = true,
+                    DepthWrite = true,
+                    DepthCompare = CompareOp.Less
+                },
+                Raster = RasterState.Default with { CullMode = CullMode.None },
+                DebugName = "Hot Reload Project Raster"
+            });
+        IGpuTexture2D[] targets = [color];
+        pipeline.DrawIndexed(
+            new RasterVertexShader(
+                vertices.AsReadOnly(),
+                new Uniform<float4x4>(camera.ViewProjection)),
+            new RasterFragmentShader(new Uniform<float3>(new float3(__TINT__))),
+            targets,
+            depth,
+            indices,
+            new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.01f, 0.02f, 0.03f, 1.0f),
+                DepthLoadOp = GraphicsDepthLoadOp.Clear,
+                ClearDepth = 1.0f
+            });
+        context.SetColorOutput(Color, color, pipeline.LastDispatchPath);
+    }
+}
+
+[GpuStruct]
+public partial struct RasterVertex
+{
+    public float3 Position;
+    public float3 Normal;
+}
+
+[GpuStruct]
+public partial struct RasterVaryings
+{
+    [Position]
+    public float4 Position;
+    public float3 Normal;
+}
+
+[VertexShader]
+public readonly partial struct RasterVertexShader(
+    ReadOnlyBuffer<RasterVertex> vertices,
+    Uniform<float4x4> viewProjection) : IVertexShader<RasterVaryings>
+{
+    public RasterVaryings Execute()
+    {
+        var vertex = vertices[VertexIds.Index];
+        return new RasterVaryings
+        {
+            Position = ShaderMath.Mul(viewProjection.Value, new float4(vertex.Position, 1.0f)),
+            Normal = vertex.Normal
+        };
+    }
+}
+
+[FragmentShader]
+public readonly partial struct RasterFragmentShader(
+    Uniform<float3> tint) : IFragmentShader<RasterVaryings>
+{
+    public float4 Execute(RasterVaryings input)
+    {
+        var shade = ShaderMath.Max(ShaderMath.Normalize(input.Normal).Z, 0.1f);
+        return new float4(tint.Value * shade, 1.0f);
+    }
+}

@@ -76,12 +76,6 @@ public interface IRasterPass : IRenderPass;
 /// </summary>
 public interface IComputePass : IRenderPass;
 
-/// <summary>
-/// Execution context supplied by the render host. Resource accessors will be added as the
-/// Blender bridge becomes executable; the type is public now so user pass contracts stay stable.
-/// </summary>
-public sealed class RenderContext;
-
 public enum TextureFormat
 {
     Unknown = 0,

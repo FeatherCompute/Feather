@@ -57,8 +57,18 @@ that conversion and is useful for tests and non-Blender producers.
 a frame unless all three values match, so independently replaced files from two
 viewport updates cannot be combined into one render.
 
-`manifestPath` is reserved for dynamic pass assembly loading. The MinimalRaster
-MVP validates the graph's stable pass GUID and does not load user assemblies yet.
+`manifestPath` selects the exported project pass manifest. The host validates the
+manifest `buildId` against the assembly bytes, loads the assembly into a collectible
+`AssemblyLoadContext`, and resolves the graph pass by stable GUID and C# type. A
+new `buildId` is loaded before the previous context is unloaded, so a failed build
+or load does not invalidate the last loaded generation. In watch mode, replacing
+the manifest triggers a render even when the viewport request itself is unchanged.
+
+Exported manifests include `projectRoot`, relative to the manifest directory, so
+project-relative `assemblyPath` values remain valid when the whole project moves.
+The authoritative execution artifact is currently the assembly. `feirPath` is
+empty unless an independent FEIR artifact actually exists; generated shader IR is
+embedded in the assembly.
 
 ## Graph V1
 
@@ -126,8 +136,36 @@ The MVP accepts exactly one unmuted pass with the MinimalRaster GUID and
 requires its Geometry, Materials, Camera, and Color links to use the published
 stable socket GUIDs. Pass
 parameters may be an object containing instance values or the current manifest
-parameter-definition array. Supported MinimalRaster values are `clearColor`,
-`lightDirection`, and `ambient`.
+parameter-definition array. The legacy built-in fallback recognizes `clearColor`,
+`lightDirection`, and `ambient`; project assembly parameters come from the pass's
+own `[Parameter]` members.
+
+When `manifestPath` is present, the graph type must match the manifest type. The
+host creates the project pass, binds its handle properties by stable socket GUID,
+converts JSON parameter values to `[Parameter]` members, calls
+`IRenderPass.Execute`, and disposes an `IDisposable` pass after execution. Requests
+without `manifestPath` retain the previous built-in MinimalRaster implementation
+as a protocol compatibility fallback.
+
+## Public Raster Pass Contract
+
+Project code receives only public Feather APIs. `RenderContext` exposes the
+requested dimensions/sample count, immutable CPU `SceneGeometry`, and the current
+`RenderCamera`. A pass defines its own GPU vertex layout and then creates buffers,
+RGBA8/depth textures, generated Vertex/Fragment shaders, and a graphics pipeline
+through `GPU`. It publishes the completed texture with:
+
+```csharp
+var scene = context.GetSceneGeometry(Geometry);
+var camera = context.GetCamera(Camera);
+// Convert SceneVertex values to this pass's own [GpuStruct] vertex layout.
+// Create and execute the public Feather graphics pipeline.
+context.SetColorOutput(Color, colorTexture, pipeline.LastDispatchPath);
+```
+
+`SetColorOutput` performs the synchronous RGBA8 readback used by the current
+viewport bridge. A CPU-span overload is also available for software renderers.
+The host rejects a pass that does not submit its selected Color output.
 
 ## Scene And Frame
 
@@ -146,8 +184,12 @@ Blender normalizes the origin before uploading the frame to its GPU texture.
 
 ## MVP Boundaries
 
-- Rendering is the built-in public-API MinimalRaster pass; dynamic project pass
-  assembly loading and `RenderContext` resource binding remain to be added.
+- One project raster pass is loaded and executed from the manifest assembly. The
+  built-in raster path exists only for legacy requests without `manifestPath`.
+- The executable public context currently exposes scene positions/normals,
+  triangle indices, the camera view-projection matrix, dimensions, sample count,
+  and one RGBA8 color output. General graph resources and compute dispatch are
+  later extensions of the same contract.
 - Materials, textures, lights, UVs, and Material Nodes are present in or planned
   for the scene protocol but are not consumed by MinimalRaster.
 - Meshes and instances are rebuilt per request. There is no incremental GPU

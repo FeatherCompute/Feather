@@ -184,7 +184,7 @@ internal sealed class ProtocolFixture : IDisposable
         File.WriteAllText(GraphPath, JsonSerializer.Serialize(graph));
     }
 
-    public void WriteRequest(string clipSpace = "vulkan")
+    public void WriteRequest(string clipSpace = "vulkan", string? manifestPath = null)
     {
         var request = new
         {
@@ -194,6 +194,7 @@ internal sealed class ProtocolFixture : IDisposable
             viewId = "view-1",
             scenePath = Path.GetFileName(ScenePath),
             graphPath = Path.GetFileName(GraphPath),
+            manifestPath,
             outputPath = Path.GetFileName(OutputPath),
             width = 64,
             height = 64,

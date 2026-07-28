@@ -3,6 +3,10 @@ namespace Feather.Blender.RenderHost;
 internal sealed class RenderHostRunner : IDisposable
 {
     private readonly MinimalRasterRenderer renderer = new();
+    private readonly ProjectPassAssemblyManager projectPasses = new();
+
+    internal WeakReference? LastUnloadedPassContextForTesting
+        => projectPasses.LastUnloadedContextForTesting;
 
     public RenderHostResult RenderOnce(string requestPath)
     {
@@ -27,13 +31,36 @@ internal sealed class RenderHostRunner : IDisposable
                 $"Render request generation '{request.GenerationId}' does not match scene generation '{snapshot.Metadata.GenerationId}'.");
         }
         var geometry = SceneGeometryBuilder.Build(snapshot);
-        var frame = renderer.Render(
-            geometry,
-            request.Width,
-            request.Height,
-            request.ViewProjection,
-            graph.SampleCount,
-            graph.Settings);
+        RenderedFrame frame;
+        string buildId;
+        string passType;
+        var passReloaded = false;
+        if (request.ManifestPath is not null)
+        {
+            var execution = projectPasses.Execute(
+                request.ManifestPath,
+                graph,
+                geometry,
+                request.Width,
+                request.Height,
+                request.ViewProjection);
+            frame = execution.Frame;
+            buildId = execution.BuildId;
+            passType = execution.PassType;
+            passReloaded = execution.Reloaded;
+        }
+        else
+        {
+            frame = renderer.Render(
+                geometry,
+                request.Width,
+                request.Height,
+                request.ViewProjection,
+                graph.SampleCount,
+                graph.Settings);
+            buildId = "builtin";
+            passType = RenderGraphDocument.MinimalRasterPassType;
+        }
         FrameFileWriter.WriteAtomic(request.OutputPath, request.RequestId, frame);
         started.Stop();
 
@@ -45,10 +72,17 @@ internal sealed class RenderHostRunner : IDisposable
             geometry.Vertices.Length,
             geometry.Indices.Length / 3,
             frame.DispatchPath.ToString(),
+            buildId,
+            passType,
+            passReloaded,
             started.Elapsed.TotalMilliseconds);
     }
 
-    public void Dispose() => renderer.Dispose();
+    public void Dispose()
+    {
+        projectPasses.Dispose();
+        renderer.Dispose();
+    }
 }
 
 internal sealed record RenderHostResult(
@@ -59,4 +93,7 @@ internal sealed record RenderHostResult(
     int VertexCount,
     int TriangleCount,
     string DispatchPath,
+    string BuildId,
+    string PassType,
+    bool PassReloaded,
     double TotalMilliseconds);

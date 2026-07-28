@@ -1,5 +1,6 @@
 using Feather.Graphics;
 using Feather.Math;
+using Feather.RenderGraph;
 using Feather.Resources;
 
 namespace Feather.Blender.RenderHost;
@@ -18,7 +19,7 @@ internal sealed class MinimalRasterRenderer : IDisposable
         MinimalRasterSettings settings)
     {
         var pixels = CreateBackground(width, height, settings.ClearColor);
-        using var color = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(width, height, PixelFormat.Rgba8);
+        using var color = GPU.CreateRenderTexture2D<Rgba8, Rgba8>(width, height, PixelFormat.Rgba8);
         color.Upload(pixels);
 
         var dispatchPath = DispatchPath.None;
@@ -30,7 +31,12 @@ internal sealed class MinimalRasterRenderer : IDisposable
             }
 
             using var depth = GPU.CreateDepthTexture2D(width, height);
-            using var vertexBuffer = GPU.CreateBuffer<MinimalRasterVertex>(geometry.Vertices, BufferAccess.ReadOnly);
+            var shaderVertices = geometry.Vertices.Select(static vertex => new MinimalRasterVertex
+            {
+                Position = vertex.Position,
+                Normal = vertex.Normal
+            }).ToArray();
+            using var vertexBuffer = GPU.CreateBuffer<MinimalRasterVertex>(shaderVertices, BufferAccess.ReadOnly);
             using var indexBuffer = GPU.CreateIndexBuffer<uint>(geometry.Indices);
             if (pipeline is null || pipelineSampleCount != sampleCount)
             {
@@ -84,9 +90,9 @@ internal sealed class MinimalRasterRenderer : IDisposable
         pipeline = null;
     }
 
-    private static Rgba32[] CreateBackground(int width, int height, float4 color)
+    private static Rgba8[] CreateBackground(int width, int height, float4 color)
     {
-        var pixel = new Rgba32(
+        var pixel = new Rgba8(
             ToUnorm(color.X),
             ToUnorm(color.Y),
             ToUnorm(color.Z),
@@ -101,10 +107,8 @@ internal sealed class MinimalRasterRenderer : IDisposable
 internal sealed record RenderedFrame(
     int Width,
     int Height,
-    Rgba32[] Pixels,
+    Rgba8[] Pixels,
     DispatchPath DispatchPath);
-
-internal readonly record struct Rgba32(byte R, byte G, byte B, byte A);
 
 [GpuStruct]
 public partial struct MinimalRasterVertex
