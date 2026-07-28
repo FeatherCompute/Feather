@@ -9,6 +9,11 @@ internal sealed class RenderHostRunner : IDisposable
         var started = System.Diagnostics.Stopwatch.StartNew();
         var request = RenderRequest.Load(requestPath);
         var graph = RenderGraphDocument.LoadMinimalRaster(request.GraphPath);
+        if (!string.Equals(request.GenerationId, graph.GenerationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Render request generation '{request.GenerationId}' does not match graph generation '{graph.GenerationId}'.");
+        }
         if (!string.Equals(request.ViewId, graph.ViewId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
@@ -16,6 +21,11 @@ internal sealed class RenderHostRunner : IDisposable
         }
 
         var snapshot = SceneSnapshot.Load(request.ScenePath);
+        if (!string.Equals(request.GenerationId, snapshot.Metadata.GenerationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Render request generation '{request.GenerationId}' does not match scene generation '{snapshot.Metadata.GenerationId}'.");
+        }
         var geometry = SceneGeometryBuilder.Build(snapshot);
         var frame = renderer.Render(
             geometry,

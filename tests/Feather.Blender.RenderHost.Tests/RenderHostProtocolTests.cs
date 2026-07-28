@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text.Json.Nodes;
 using Feather.Math;
 
 namespace Feather.Blender.RenderHost.Tests;
@@ -36,6 +37,31 @@ public sealed class RenderHostProtocolTests
         var exception = Assert.Throws<InvalidDataException>(() => SceneGeometryBuilder.Build(snapshot));
 
         Assert.Contains("outside the snapshot payload", exception.Message);
+    }
+
+    [Fact]
+    public void NonUniformInstanceScaleUsesInverseTransposeNormalMatrix()
+    {
+        using var fixture = new ProtocolFixture();
+        fixture.WriteScene(
+        [
+            2, 0, 0, 0,
+            0, 4, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+        ],
+        cornerNormals:
+        [
+            1, 1, 0,
+            1, 1, 0,
+            1, 1, 0
+        ]);
+
+        var geometry = SceneGeometryBuilder.Build(SceneSnapshot.Load(fixture.ScenePath));
+
+        Assert.Equal(0.8944272f, geometry.Vertices[0].Normal.X, 5);
+        Assert.Equal(0.4472136f, geometry.Vertices[0].Normal.Y, 5);
+        Assert.Equal(0.0f, geometry.Vertices[0].Normal.Z, 5);
     }
 
     [Fact]
@@ -96,6 +122,55 @@ public sealed class RenderHostProtocolTests
             () => RenderGraphDocument.LoadMinimalRaster(fixture.GraphPath));
 
         Assert.Contains("violates a resource link", exception.Message);
+    }
+
+    [Fact]
+    public void MinimalRasterRequiresExactSceneAndColorSocketLinks()
+    {
+        using var fixture = new ProtocolFixture();
+        fixture.WriteGraph();
+        var graph = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        graph["links"]!.AsArray().RemoveAt(0);
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => RenderGraphDocument.LoadMinimalRaster(fixture.GraphPath));
+
+        Assert.Contains("Geometry input", exception.Message);
+    }
+
+    [Fact]
+    public void GraphRejectsMultipleLinksToOneInput()
+    {
+        using var fixture = new ProtocolFixture();
+        fixture.WriteGraph();
+        var graph = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        var links = graph["links"]!.AsArray();
+        links.Add(links[0]!.DeepClone());
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => RenderGraphDocument.LoadMinimalRaster(fixture.GraphPath));
+
+        Assert.Contains("multiple links", exception.Message);
+    }
+
+    [Fact]
+    public void RunnerRejectsMixedRequestGenerationBeforeGpuWork()
+    {
+        using var fixture = new ProtocolFixture();
+        fixture.WriteScene();
+        fixture.WriteGraph();
+        fixture.WriteRequest();
+        var request = JsonNode.Parse(File.ReadAllText(fixture.RequestPath))!.AsObject();
+        request["generationId"] = "e53e3108-9276-4440-b503-94c45e094e3f";
+        File.WriteAllText(fixture.RequestPath, request.ToJsonString());
+        using var host = new RenderHostRunner();
+
+        var exception = Assert.Throws<InvalidDataException>(() => host.RenderOnce(fixture.RequestPath));
+
+        Assert.Contains("does not match graph generation", exception.Message);
+        Assert.False(File.Exists(fixture.OutputPath));
     }
 
     [Fact]

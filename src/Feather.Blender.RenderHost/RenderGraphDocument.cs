@@ -7,8 +7,17 @@ internal sealed class RenderGraphDocument
     public const int CurrentSchemaVersion = 1;
     public const string MinimalRasterPassGuid = "01c671a1-9b4e-5cab-b7e1-c101348af596";
     public const string MinimalRasterPassType = "Feather.Generated.MinimalRasterPass";
+    public const string SceneGeometrySocketGuid = "b5db545a-ec06-557c-8b3e-2bc38c8193ef";
+    public const string SceneMaterialsSocketGuid = "f4fe7a75-0c26-56d1-af67-01ac7638fe16";
+    public const string SceneCameraSocketGuid = "6078325d-ed5e-5aa7-a103-1b3292605c40";
+    public const string GeometryInputSocketGuid = "6d6eb2d5-bb7a-55a4-a85a-c58e36715c53";
+    public const string MaterialsInputSocketGuid = "a6eed590-b632-5f91-a69d-09b6eb4bb5ac";
+    public const string CameraInputSocketGuid = "cc78191c-ac9a-57b6-bcac-91cce5e298f5";
+    public const string ColorOutputSocketGuid = "bd711ea6-36f9-56cd-863a-cfec58727a46";
+    public const string OutputColorSocketGuid = "082faef8-760d-5062-9766-2d627d8c42f8";
 
     public int SchemaVersion { get; init; }
+    public string GenerationId { get; init; } = "";
     public string GraphId { get; init; } = "";
     public string ViewId { get; init; } = "";
     public string ExecutionMode { get; init; } = "";
@@ -43,6 +52,10 @@ internal sealed class RenderGraphDocument
             throw new InvalidDataException($"Unsupported render graph schema version: {SchemaVersion}.");
         }
 
+        if (!Guid.TryParse(GenerationId, out _))
+        {
+            throw new InvalidDataException("Render graph generationId must be a GUID.");
+        }
         RequireNonEmpty(GraphId, "graphId");
         RequireNonEmpty(ViewId, "viewId");
         if (ExecutionMode is not ("REALTIME" or "ON_DEMAND" or "PROGRESSIVE" or "OFFLINE"))
@@ -57,11 +70,19 @@ internal sealed class RenderGraphDocument
         {
             throw new InvalidDataException("Render graph sampleCount must be 1, 2, 4, 8, or 16.");
         }
+        if (Output is null)
+        {
+            throw new InvalidDataException("Render graph output is required.");
+        }
         RequireNonEmpty(Output.NodeId, "output.nodeId");
         RequireNonEmpty(Output.SocketGuid, "output.socketGuid");
-        if (Nodes.Length == 0)
+        if (Nodes is null || Nodes.Length == 0)
         {
             throw new InvalidDataException("Render graph contains no nodes.");
+        }
+        if (Links is null || TopologicalOrder is null)
+        {
+            throw new InvalidDataException("Render graph links and topologicalOrder are required.");
         }
 
         var nodeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -80,6 +101,7 @@ internal sealed class RenderGraphDocument
             throw new InvalidDataException("Render graph output.nodeId does not reference a node.");
         }
 
+        var linkedInputs = new HashSet<(string NodeId, string SocketGuid)>();
         foreach (var link in Links)
         {
             if (!nodeIds.Contains(link.FromNode) || !nodeIds.Contains(link.ToNode))
@@ -88,6 +110,11 @@ internal sealed class RenderGraphDocument
             }
             RequireNonEmpty(link.FromSocket, "links.fromSocket");
             RequireNonEmpty(link.ToSocket, "links.toSocket");
+            if (!linkedInputs.Add((link.ToNode, link.ToSocket)))
+            {
+                throw new InvalidDataException(
+                    $"Render graph input '{link.ToNode}.{link.ToSocket}' has multiple links.");
+            }
         }
 
         if (TopologicalOrder.Length != Nodes.Length ||
@@ -119,23 +146,60 @@ internal sealed class RenderGraphDocument
         }
         RequireNonEmpty(pass.TypeName, "nodes.typeName");
 
+        var scenes = Nodes.Where(node => string.Equals(node.Kind, "scene", StringComparison.Ordinal)).ToArray();
+        if (scenes.Length != 1)
+        {
+            throw new InvalidDataException("MinimalRaster execution requires exactly one scene node.");
+        }
+        var scene = scenes[0];
+        RequireLink(scene.NodeId, SceneGeometrySocketGuid, pass.NodeId, GeometryInputSocketGuid, "Geometry");
+        RequireLink(scene.NodeId, SceneMaterialsSocketGuid, pass.NodeId, MaterialsInputSocketGuid, "Materials");
+        RequireLink(scene.NodeId, SceneCameraSocketGuid, pass.NodeId, CameraInputSocketGuid, "Camera");
+
         var output = Nodes.Single(node => node.NodeId == Output.NodeId);
         if (!string.Equals(output.Kind, "output", StringComparison.Ordinal))
         {
             throw new InvalidDataException("Render graph output.nodeId must reference an output node.");
         }
-        if (!Links.Any(link =>
-            link.FromNode == pass.NodeId &&
-            link.ToNode == output.NodeId &&
-            link.ToSocket == Output.SocketGuid))
+        if (!string.Equals(Output.SocketGuid, OutputColorSocketGuid, StringComparison.Ordinal))
         {
-            throw new InvalidDataException("MinimalRaster pass is not linked to the selected output node.");
+            throw new InvalidDataException("MinimalRaster output must select the Feather Color socket.");
+        }
+        if (!HasLink(
+                pass.NodeId,
+                ColorOutputSocketGuid,
+                output.NodeId,
+                OutputColorSocketGuid))
+        {
+            throw new InvalidDataException("MinimalRaster Color is not linked to the selected output node.");
         }
 
         return new RenderGraphExecution(
+            GenerationId,
             ViewId,
             (Feather.SampleCount)SampleCount,
             MinimalRasterSettings.FromParameters(pass.Parameters));
+
+        bool HasLink(string fromNode, string fromSocket, string toNode, string toSocket)
+            => Links.Any(link =>
+                string.Equals(link.FromNode, fromNode, StringComparison.Ordinal) &&
+                string.Equals(link.FromSocket, fromSocket, StringComparison.Ordinal) &&
+                string.Equals(link.ToNode, toNode, StringComparison.Ordinal) &&
+                string.Equals(link.ToSocket, toSocket, StringComparison.Ordinal));
+
+        void RequireLink(
+            string fromNode,
+            string fromSocket,
+            string toNode,
+            string toSocket,
+            string resourceName)
+        {
+            if (!HasLink(fromNode, fromSocket, toNode, toSocket))
+            {
+                throw new InvalidDataException(
+                    $"MinimalRaster {resourceName} input is not linked to the scene node.");
+            }
+        }
     }
 
     private static void RequireNonEmpty(string value, string name)
@@ -148,6 +212,7 @@ internal sealed class RenderGraphDocument
 }
 
 internal sealed record RenderGraphExecution(
+    string GenerationId,
     string ViewId,
     Feather.SampleCount SampleCount,
     MinimalRasterSettings Settings);

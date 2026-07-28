@@ -35,6 +35,7 @@ request to a temporary file and atomically replaces the published path.
 {
   "schemaVersion": 1,
   "requestId": 42,
+  "generationId": "5ebc93da-b905-4f44-8eda-68968bb6ba2f",
   "viewId": "d7bb05b2-3bf8-4d75-8c74-f51d06feb91e",
   "width": 960,
   "height": 540,
@@ -52,6 +53,10 @@ request to a temporary file and atomically replaces the published path.
 converts its OpenGL Y/depth convention to Vulkan. `clipSpace: "vulkan"` skips
 that conversion and is useful for tests and non-Blender producers.
 
+`generationId` is also stored in the graph and scene metadata. The host rejects
+a frame unless all three values match, so independently replaced files from two
+viewport updates cannot be combined into one render.
+
 `manifestPath` is reserved for dynamic pass assembly loading. The MinimalRaster
 MVP validates the graph's stable pass GUID and does not load user assemblies yet.
 
@@ -64,6 +69,7 @@ links, and cycles.
 ```json
 {
   "schemaVersion": 1,
+  "generationId": "5ebc93da-b905-4f44-8eda-68968bb6ba2f",
   "graphId": "9fd54230-a114-4b20-a8c6-250217e6cfaa",
   "viewId": "d7bb05b2-3bf8-4d75-8c74-f51d06feb91e",
   "executionMode": "REALTIME",
@@ -84,6 +90,24 @@ links, and cycles.
   ],
   "links": [
     {
+      "fromNode": "scene",
+      "fromSocket": "b5db545a-ec06-557c-8b3e-2bc38c8193ef",
+      "toNode": "raster",
+      "toSocket": "6d6eb2d5-bb7a-55a4-a85a-c58e36715c53"
+    },
+    {
+      "fromNode": "scene",
+      "fromSocket": "f4fe7a75-0c26-56d1-af67-01ac7638fe16",
+      "toNode": "raster",
+      "toSocket": "a6eed590-b632-5f91-a69d-09b6eb4bb5ac"
+    },
+    {
+      "fromNode": "scene",
+      "fromSocket": "6078325d-ed5e-5aa7-a103-1b3292605c40",
+      "toNode": "raster",
+      "toSocket": "cc78191c-ac9a-57b6-bcac-91cce5e298f5"
+    },
+    {
       "fromNode": "raster",
       "fromSocket": "bd711ea6-36f9-56cd-863a-cfec58727a46",
       "toNode": "output",
@@ -98,7 +122,9 @@ links, and cycles.
 }
 ```
 
-The MVP accepts exactly one unmuted pass with the MinimalRaster GUID. Pass
+The MVP accepts exactly one unmuted pass with the MinimalRaster GUID and
+requires its Geometry, Materials, Camera, and Color links to use the published
+stable socket GUIDs. Pass
 parameters may be an object containing instance values or the current manifest
 parameter-definition array. Supported MinimalRaster values are `clearColor`,
 `lightDirection`, and `ambient`.
@@ -111,6 +137,8 @@ arrays described by byte offsets and shapes. The host consumes evaluated mesh
 positions, loop-to-vertex indices, corner normals, triangle loop indices, and
 instance `matrixWorld` values. Corner vertices are transformed on the CPU and
 drawn through a public Feather indexed graphics pipeline with a depth target.
+The JSON metadata includes the same required `generationId` as the request and
+graph.
 
 The output uses Blender's `FTHRFRM1` 40-byte header. The host publishes tightly
 packed RGBA8 rows with top-left origin, followed by `width * height * 4` bytes.

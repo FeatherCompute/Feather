@@ -5,6 +5,7 @@ namespace Feather.Blender.RenderHost.Tests;
 public sealed class RenderHostGpuTests
 {
     [Theory]
+    [Trait("Category", "Gpu")]
     [InlineData(1)]
     [InlineData(4)]
     public void RenderOnceRasterizesSceneMeshThroughPublicFeatherApi(int sampleCount)

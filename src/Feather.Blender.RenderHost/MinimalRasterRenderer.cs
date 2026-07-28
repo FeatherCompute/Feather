@@ -34,8 +34,7 @@ internal sealed class MinimalRasterRenderer : IDisposable
             using var indexBuffer = GPU.CreateIndexBuffer<uint>(geometry.Indices);
             if (pipeline is null || pipelineSampleCount != sampleCount)
             {
-                pipeline?.Dispose();
-                pipeline = GPU.CreateGraphicsPipeline<MinimalRasterVertexShader, MinimalRasterFragmentShader, MinimalRasterVaryings>(
+                var replacement = GPU.CreateGraphicsPipeline<MinimalRasterVertexShader, MinimalRasterFragmentShader, MinimalRasterVaryings>(
                 new GraphicsPipelineDesc
                 {
                     SampleCount = sampleCount,
@@ -48,7 +47,10 @@ internal sealed class MinimalRasterRenderer : IDisposable
                     Raster = RasterState.Default with { CullMode = CullMode.None },
                     DebugName = "Feather Blender MinimalRaster"
                 });
+                var previous = pipeline;
+                pipeline = replacement;
                 pipelineSampleCount = sampleCount;
+                previous?.Dispose();
             }
 
             IGpuTexture2D[] targets = [color];

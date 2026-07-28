@@ -65,22 +65,41 @@ internal static class RenderHostProgram
         CancellationToken cancellationToken)
     {
         FileSignature? previous = null;
+        FileSignature? failed = null;
+        var failureCount = 0;
+        var retryAfter = DateTimeOffset.MinValue;
         WriteEvent("ready", new { requestPath = Path.GetFullPath(options.RequestPath!) });
 
         while (!cancellationToken.IsCancellationRequested)
         {
             var current = FileSignature.TryRead(options.RequestPath!);
-            if (current is not null && current != previous)
+            var retryIsDue = current != failed || DateTimeOffset.UtcNow >= retryAfter;
+            if (current is not null && current != previous && retryIsDue)
             {
                 try
                 {
                     var result = host.RenderOnce(options.RequestPath!);
                     previous = current;
+                    failed = null;
+                    failureCount = 0;
                     WriteEvent("frame", result);
+                }
+                catch (InvalidDataException exception)
+                {
+                    // Protocol errors are deterministic for this immutable request. A newly
+                    // published request gets a new file signature and will be attempted normally.
+                    previous = current;
+                    failed = null;
+                    failureCount = 0;
+                    WriteError(exception);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    previous = current;
+                    failureCount = current == failed ? failureCount + 1 : 1;
+                    failed = current;
+                    var exponent = System.Math.Min(failureCount - 1, 5);
+                    var retryMilliseconds = System.Math.Min(2000, 100 * (1 << exponent));
+                    retryAfter = DateTimeOffset.UtcNow.AddMilliseconds(retryMilliseconds);
                     WriteError(exception);
                 }
             }

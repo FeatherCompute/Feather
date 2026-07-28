@@ -5,6 +5,8 @@ namespace Feather.Blender.RenderHost.Tests;
 
 internal sealed class ProtocolFixture : IDisposable
 {
+    public const string GenerationId = "5ebc93da-b905-4f44-8eda-68968bb6ba2f";
+
     private readonly string root = Path.Combine(
         Path.GetTempPath(),
         $"feather-render-host-tests-{Guid.NewGuid():N}");
@@ -20,15 +22,19 @@ internal sealed class ProtocolFixture : IDisposable
     public string RequestPath => Path.Combine(root, "render-request.json");
     public string OutputPath => Path.Combine(root, "viewport.frame");
 
-    public void WriteScene(float[]? matrixWorld = null, bool invalidPositionsOffset = false)
+    public void WriteScene(
+        float[]? matrixWorld = null,
+        bool invalidPositionsOffset = false,
+        float[]? cornerNormals = null)
     {
         using var payload = new MemoryStream();
         var positions = WriteFloatArray(payload,
             [-0.75f, -0.65f, 0.5f, 0.75f, -0.65f, 0.5f, 0.0f, 0.75f, 0.5f],
             [3, 3]);
         var loopVertices = WriteUIntArray(payload, [0, 1, 2], [3]);
-        var cornerNormals = WriteFloatArray(payload,
-            [0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f],
+        cornerNormals ??= [0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f];
+        var normalDescriptor = WriteFloatArray(payload,
+            cornerNormals,
             [3, 3]);
         var triangleLoops = WriteUIntArray(payload, [0, 1, 2], [1, 3]);
         var triangleMaterials = WriteUIntArray(payload, [0], [1]);
@@ -47,6 +53,7 @@ internal sealed class ProtocolFixture : IDisposable
         var metadata = new
         {
             schemaVersion = 1,
+            generationId = GenerationId,
             matrixLayout = "row-major",
             frame = 1,
             subframe = 0.0f,
@@ -63,7 +70,7 @@ internal sealed class ProtocolFixture : IDisposable
                     {
                         positions,
                         loopVertexIndices = loopVertices,
-                        cornerNormals,
+                        cornerNormals = normalDescriptor,
                         triangleLoopIndices = triangleLoops,
                         triangleMaterialIndices = triangleMaterials
                     },
@@ -116,6 +123,7 @@ internal sealed class ProtocolFixture : IDisposable
         var graph = new
         {
             schemaVersion = 1,
+            generationId = GenerationId,
             graphId = "graph-1",
             viewId = "view-1",
             executionMode = "REALTIME",
@@ -139,17 +147,38 @@ internal sealed class ProtocolFixture : IDisposable
             {
                 new
                 {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneGeometrySocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.GeometryInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneMaterialsSocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.MaterialsInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneCameraSocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.CameraInputSocketGuid
+                },
+                new
+                {
                     fromNode = "pass-1",
-                    fromSocket = "bd711ea6-36f9-56cd-863a-cfec58727a46",
+                    fromSocket = RenderGraphDocument.ColorOutputSocketGuid,
                     toNode = "output-1",
-                    toSocket = "082faef8-760d-5062-9766-2d627d8c42f8"
+                    toSocket = RenderGraphDocument.OutputColorSocketGuid
                 }
             },
             topologicalOrder = new[] { "scene-1", "pass-1", "output-1" },
             output = new
             {
                 nodeId = "output-1",
-                socketGuid = "082faef8-760d-5062-9766-2d627d8c42f8"
+                socketGuid = RenderGraphDocument.OutputColorSocketGuid
             }
         };
         File.WriteAllText(GraphPath, JsonSerializer.Serialize(graph));
@@ -161,6 +190,7 @@ internal sealed class ProtocolFixture : IDisposable
         {
             schemaVersion = 1,
             requestId = 42,
+            generationId = GenerationId,
             viewId = "view-1",
             scenePath = Path.GetFileName(ScenePath),
             graphPath = Path.GetFileName(GraphPath),

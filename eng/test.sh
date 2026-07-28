@@ -62,7 +62,9 @@ if [[ "${FEATHER_RUN_GPU_TESTS:-0}" == "1" ]]; then
     test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj"
     test_project "$ROOT/tests/Feather.AD.Tests/Feather.AD.Tests.csproj"
     test_project "$ROOT/tests/Feather.NN.Tests/Feather.NN.Tests.csproj"
+    test_project "$ROOT/tests/Feather.Blender.RenderHost.Tests/Feather.Blender.RenderHost.Tests.csproj"
 else
     test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj" --filter "Category!=Gpu"
+    test_project "$ROOT/tests/Feather.Blender.RenderHost.Tests/Feather.Blender.RenderHost.Tests.csproj" --filter "Category!=Gpu"
     echo "Skipping GPU/native integration tests. Set FEATHER_RUN_GPU_TESTS=1 to include them."
 fi

@@ -11,6 +11,7 @@ internal sealed class RenderRequest
 
     public int SchemaVersion { get; init; }
     public ulong RequestId { get; init; }
+    public string GenerationId { get; init; } = "";
     public string ViewId { get; init; } = "";
     public string ScenePath { get; init; } = "";
     public string GraphPath { get; init; } = "";
@@ -42,6 +43,7 @@ internal sealed class RenderRequest
             ?? throw new InvalidDataException("Render request has no parent directory.");
         return new ResolvedRenderRequest(
             request.RequestId,
+            request.GenerationId,
             request.ViewId,
             ResolvePath(baseDirectory, request.ScenePath),
             ResolvePath(baseDirectory, request.GraphPath),
@@ -58,6 +60,10 @@ internal sealed class RenderRequest
             throw new InvalidDataException($"Unsupported render request schema version: {SchemaVersion}.");
         }
 
+        if (!Guid.TryParse(GenerationId, out _))
+        {
+            throw new InvalidDataException("Render request generationId must be a GUID.");
+        }
         RequirePath(ScenePath, nameof(ScenePath));
         RequirePath(GraphPath, nameof(GraphPath));
         RequirePath(OutputPath, nameof(OutputPath));
@@ -106,6 +112,7 @@ internal sealed class RenderRequest
 
 internal sealed record ResolvedRenderRequest(
     ulong RequestId,
+    string GenerationId,
     string ViewId,
     string ScenePath,
     string GraphPath,

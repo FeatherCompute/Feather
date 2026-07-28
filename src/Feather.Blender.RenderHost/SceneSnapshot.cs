@@ -71,6 +71,10 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
             throw new InvalidDataException(
                 $"Scene metadata schema version {metadata.SchemaVersion} does not match the file header.");
         }
+        if (!Guid.TryParse(metadata.GenerationId, out _))
+        {
+            throw new InvalidDataException("Scene metadata generationId must be a GUID.");
+        }
         if (!string.Equals(metadata.MatrixLayout, "row-major", StringComparison.Ordinal))
         {
             throw new InvalidDataException($"Unsupported scene matrix layout: '{metadata.MatrixLayout}'.");
@@ -156,6 +160,7 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
 internal sealed class SceneMetadata
 {
     public int SchemaVersion { get; init; }
+    public string GenerationId { get; init; } = "";
     public string MatrixLayout { get; init; } = "";
     public int Frame { get; init; }
     public float Subframe { get; init; }
