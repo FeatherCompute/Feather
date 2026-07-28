@@ -12,7 +12,7 @@ internal sealed class RenderHostRunner : IDisposable
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
         var request = RenderRequest.Load(requestPath);
-        var graph = RenderGraphDocument.LoadMinimalRaster(request.GraphPath);
+        var graph = RenderGraphDocument.Load(request.GraphPath);
         if (!string.Equals(request.GenerationId, graph.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
@@ -34,6 +34,7 @@ internal sealed class RenderHostRunner : IDisposable
         RenderedFrame frame;
         string buildId;
         string passType;
+        var passCount = 1;
         var passReloaded = false;
         if (request.ManifestPath is not null)
         {
@@ -47,10 +48,12 @@ internal sealed class RenderHostRunner : IDisposable
             frame = execution.Frame;
             buildId = execution.BuildId;
             passType = execution.PassType;
+            passCount = execution.PassCount;
             passReloaded = execution.Reloaded;
         }
         else
         {
+            graph.RequireLegacyMinimalRaster();
             frame = renderer.Render(
                 geometry,
                 request.Width,
@@ -74,6 +77,7 @@ internal sealed class RenderHostRunner : IDisposable
             frame.DispatchPath.ToString(),
             buildId,
             passType,
+            passCount,
             passReloaded,
             started.Elapsed.TotalMilliseconds);
     }
@@ -95,5 +99,6 @@ internal sealed record RenderHostResult(
     string DispatchPath,
     string BuildId,
     string PassType,
+    int PassCount,
     bool PassReloaded,
     double TotalMilliseconds);

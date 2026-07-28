@@ -42,7 +42,8 @@ public readonly record struct RenderCamera(float4x4 ViewProjection);
 /// <summary>
 /// Host-side storage for the RGBA8 viewport output contract.
 /// </summary>
-public readonly record struct Rgba8(byte R, byte G, byte B, byte A);
+[GpuStruct]
+public readonly partial record struct Rgba8(byte R, byte G, byte B, byte A);
 
 /// <summary>
 /// Host-independent services used by <see cref="RenderContext"/>. Render-host authors implement
@@ -59,6 +60,8 @@ public interface IRenderContextBackend
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
 
     RenderCamera GetCamera(CameraHandle handle);
+
+    ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle);
 
     void SetColorOutput(
         TextureHandle handle,
@@ -114,6 +117,13 @@ public sealed class RenderContext
 
     public RenderCamera GetCamera(CameraHandle handle)
         => Backend.GetCamera(handle);
+
+    /// <summary>
+    /// Resolves an RGBA8 texture produced by an upstream graph pass.
+    /// The returned memory remains owned by the render host and is valid only for this execution.
+    /// </summary>
+    public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
+        => Backend.GetColorInput(handle);
 
     /// <summary>
     /// Synchronously reads an RGBA8 Feather texture and publishes it as a graph output.

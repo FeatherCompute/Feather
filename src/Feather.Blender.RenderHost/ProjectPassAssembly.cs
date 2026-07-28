@@ -64,6 +64,7 @@ internal sealed record ProjectPassExecutionResult(
     RenderedFrame Frame,
     string BuildId,
     string PassType,
+    int PassCount,
     bool Reloaded);
 
 internal sealed class PassAssemblyGeneration : IDisposable
@@ -165,42 +166,48 @@ internal sealed class PassAssemblyGeneration : IDisposable
         bool reloaded)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        var definition = manifest.Passes.SingleOrDefault(pass =>
-            string.Equals(pass.PassGuid, graph.Pass.PassGuid, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException(
-                $"Manifest build '{manifest.BuildId}' does not define pass GUID {graph.Pass.PassGuid}.");
-        definition.ValidateMinimalRasterSockets();
-        if (!string.Equals(definition.TypeName, graph.Pass.TypeName, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Graph pass type '{graph.Pass.TypeName}' does not match manifest type '{definition.TypeName}'. " +
-                "Refresh the Feather pass nodes after building.");
-        }
-
-        var type = passTypes[definition.PassGuid];
-        var instance = (IRenderPass)(Activator.CreateInstance(type)
-            ?? throw new InvalidDataException($"Unable to create pass type '{definition.TypeName}'."));
+        var resources = new GraphResourceResolver(graph, manifest);
         var backend = new ProjectRenderContextBackend(
             geometry,
             width,
             height,
             graph.SampleCount,
-            viewProjection);
-        try
+            viewProjection,
+            resources);
+        var executedTypes = new List<string>(graph.Passes.Length);
+        foreach (var passNode in graph.Passes)
         {
-            PassMemberBinder.BindResources(instance);
-            PassMemberBinder.BindParameters(instance, graph.Pass.Parameters);
-            instance.Execute(new RenderContext(backend));
-            return new ProjectPassExecutionResult(
-                backend.TakeFrame(),
-                manifest.BuildId,
-                definition.TypeName,
-                reloaded);
+            if (passNode.Muted)
+            {
+                continue;
+            }
+
+            var definition = manifest.DefinitionFor(passNode);
+            var type = passTypes[definition.PassGuid];
+            var instance = (IRenderPass)(Activator.CreateInstance(type)
+                ?? throw new InvalidDataException($"Unable to create pass type '{definition.TypeName}'."));
+            try
+            {
+                PassMemberBinder.BindResources(instance, passNode, definition, resources);
+                PassMemberBinder.BindParameters(instance, passNode.Parameters);
+                instance.Execute(new RenderContext(backend));
+                executedTypes.Add(definition.TypeName);
+            }
+            finally
+            {
+                (instance as IDisposable)?.Dispose();
+            }
         }
-        finally
-        {
-            (instance as IDisposable)?.Dispose();
-        }
+
+        var finalHandle = resources.ResolveTextureSource(
+            graph.OutputLink.FromNode,
+            graph.OutputLink.FromSocket);
+        return new ProjectPassExecutionResult(
+            backend.TakeFrame(finalHandle),
+            manifest.BuildId,
+            executedTypes.LastOrDefault() ?? "bypass",
+            executedTypes.Count,
+            reloaded);
     }
 
     public void Dispose()
@@ -371,8 +378,8 @@ internal sealed class ProjectPassManifest
             passes.Add(new ProjectPassDefinition(
                 normalizedGuid,
                 RequiredString(pass, "typeName"),
-                ReadSocketGuids(pass, "inputs"),
-                ReadSocketGuids(pass, "outputs")));
+                ReadSocketDefinitions(pass, "inputs"),
+                ReadSocketDefinitions(pass, "outputs")));
         }
 
         return new ProjectPassManifest(path, buildId, assemblyPath, passes.ToArray(), root);
@@ -397,17 +404,26 @@ internal sealed class ProjectPassManifest
 
     public void ValidateGraph(RenderGraphExecution graph)
     {
+        foreach (var passNode in graph.Passes)
+        {
+            _ = DefinitionFor(passNode);
+        }
+        _ = new GraphResourceResolver(graph, this);
+    }
+
+    public ProjectPassDefinition DefinitionFor(GraphNode passNode)
+    {
         var definition = Passes.SingleOrDefault(pass =>
-            string.Equals(pass.PassGuid, graph.Pass.PassGuid, StringComparison.OrdinalIgnoreCase))
+            string.Equals(pass.PassGuid, passNode.PassGuid, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidDataException(
-                $"Manifest build '{BuildId}' does not define pass GUID {graph.Pass.PassGuid}.");
-        definition.ValidateMinimalRasterSockets();
-        if (!string.Equals(definition.TypeName, graph.Pass.TypeName, StringComparison.Ordinal))
+                $"Manifest build '{BuildId}' does not define pass GUID {passNode.PassGuid}.");
+        if (!string.Equals(definition.TypeName, passNode.TypeName, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Graph pass type '{graph.Pass.TypeName}' does not match manifest type '{definition.TypeName}'. " +
+                $"Graph pass type '{passNode.TypeName}' does not match manifest type '{definition.TypeName}'. " +
                 "Refresh the Feather pass nodes after building.");
         }
+        return definition;
     }
 
     private static string FindLegacyProjectRoot(string manifestDirectory)
@@ -447,14 +463,14 @@ internal sealed class ProjectPassManifest
             ? result
             : throw new InvalidDataException($"Pass manifest {name} must be an integer.");
 
-    private static string[] ReadSocketGuids(JsonObject pass, string name)
+    private static ProjectPassSocketDefinition[] ReadSocketDefinitions(JsonObject pass, string name)
     {
         if (pass[name] is not JsonArray sockets)
         {
             throw new InvalidDataException($"Pass manifest {name} must be an array.");
         }
 
-        var result = new List<string>(sockets.Count);
+        var result = new List<ProjectPassSocketDefinition>(sockets.Count);
         var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var node in sockets)
         {
@@ -470,49 +486,261 @@ internal sealed class ProjectPassManifest
             {
                 throw new InvalidDataException($"Pass manifest contains duplicate socket GUID {normalized}.");
             }
-            result.Add(normalized);
+            result.Add(new ProjectPassSocketDefinition(
+                normalized,
+                OptionalString(socket, "resourceKind") ?? InferResourceKind(normalized),
+                OptionalString(socket, "format") ?? "Unknown"));
         }
         return result.ToArray();
     }
+
+    private static string InferResourceKind(string socketGuid)
+        => socketGuid switch
+        {
+            RenderGraphDocument.GeometryInputSocketGuid => "SceneGeometry",
+            RenderGraphDocument.MaterialsInputSocketGuid => "MaterialTable",
+            RenderGraphDocument.CameraInputSocketGuid => "Camera",
+            RenderGraphDocument.ColorOutputSocketGuid => "Texture2D",
+            _ => throw new InvalidDataException(
+                $"Pass manifest socket {socketGuid} has no resourceKind.")
+        };
 }
 
 internal sealed record ProjectPassDefinition(
     string PassGuid,
     string TypeName,
-    string[] Inputs,
-    string[] Outputs)
+    ProjectPassSocketDefinition[] Inputs,
+    ProjectPassSocketDefinition[] Outputs)
 {
-    public void ValidateMinimalRasterSockets()
+    public ProjectPassSocketDefinition Input(string socketGuid)
+        => Inputs.SingleOrDefault(socket =>
+            string.Equals(socket.SocketGuid, socketGuid, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException(
+                $"Pass {TypeName} does not define input socket {socketGuid}.");
+
+    public ProjectPassSocketDefinition Output(string socketGuid)
+        => Outputs.SingleOrDefault(socket =>
+            string.Equals(socket.SocketGuid, socketGuid, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException(
+                $"Pass {TypeName} does not define output socket {socketGuid}.");
+}
+
+internal sealed record ProjectPassSocketDefinition(
+    string SocketGuid,
+    string ResourceKind,
+    string Format);
+
+internal sealed class GraphResourceResolver
+{
+    private const ulong FirstTextureHandle = 1024;
+
+    private readonly RenderGraphExecution graph;
+    private readonly ProjectPassManifest manifest;
+    private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
+    private ulong nextTextureHandle = FirstTextureHandle;
+
+    public GraphResourceResolver(RenderGraphExecution graph, ProjectPassManifest manifest)
     {
-        foreach (var guid in new[]
-                 {
-                     RenderGraphDocument.GeometryInputSocketGuid,
-                     RenderGraphDocument.MaterialsInputSocketGuid,
-                     RenderGraphDocument.CameraInputSocketGuid
-                 })
+        this.graph = graph;
+        this.manifest = manifest;
+
+        foreach (var passNode in graph.Passes)
         {
-            if (!Inputs.Contains(guid, StringComparer.OrdinalIgnoreCase))
+            var definition = manifest.DefinitionFor(passNode);
+            foreach (var input in definition.Inputs)
             {
-                throw new InvalidDataException($"Project MinimalRaster pass is missing input socket {guid}.");
+                _ = ResolveInput(passNode, input);
+            }
+            foreach (var link in graph.Links.Where(link =>
+                         string.Equals(link.FromNode, passNode.NodeId, StringComparison.Ordinal)))
+            {
+                _ = definition.Output(link.FromSocket);
             }
         }
-        if (!Outputs.Contains(RenderGraphDocument.ColorOutputSocketGuid, StringComparer.OrdinalIgnoreCase))
+
+        foreach (var link in graph.Links)
+        {
+            var target = graph.Nodes.Single(node =>
+                string.Equals(node.NodeId, link.ToNode, StringComparison.Ordinal));
+            var source = ResolveSource(link.FromNode, link.FromSocket);
+            if (target.Kind == "pass")
+            {
+                var targetSocket = manifest.DefinitionFor(target).Input(link.ToSocket);
+                RequireCompatible(source, targetSocket, link);
+            }
+            else if (target.Kind == "output" && !IsTexture(source.ResourceKind))
+            {
+                throw new InvalidDataException(
+                    $"Graph output '{target.NodeId}.{link.ToSocket}' requires a Texture2D resource.");
+            }
+        }
+
+        _ = ResolveTextureSource(graph.OutputLink.FromNode, graph.OutputLink.FromSocket);
+    }
+
+    public object ResolveInputHandle(GraphNode passNode, ProjectPassSocketDefinition input)
+        => ResolveInput(passNode, input).Handle;
+
+    public object ResolveOutputHandle(GraphNode passNode, ProjectPassSocketDefinition output)
+    {
+        if (!IsTexture(output.ResourceKind))
         {
             throw new InvalidDataException(
-                $"Project MinimalRaster pass is missing color output socket {RenderGraphDocument.ColorOutputSocketGuid}.");
+                $"Pass output resource kind '{output.ResourceKind}' is not supported yet.");
+        }
+        if (passNode.Muted)
+        {
+            return ResolveSource(passNode.NodeId, output.SocketGuid).Handle;
+        }
+        return TextureHandleFor(passNode.NodeId, output.SocketGuid);
+    }
+
+    public TextureHandle ResolveTextureSource(string nodeId, string socketGuid)
+    {
+        var resource = ResolveSource(nodeId, socketGuid);
+        if (!IsTexture(resource.ResourceKind) || resource.Handle is not TextureHandle texture)
+        {
+            throw new InvalidDataException(
+                $"Graph resource '{nodeId}.{socketGuid}' is not a Texture2D.");
+        }
+        return texture;
+    }
+
+    public bool IsWritable(TextureHandle handle)
+        => textureHandles.Values.Contains(handle);
+
+    private ResolvedGraphResource ResolveInput(
+        GraphNode passNode,
+        ProjectPassSocketDefinition input)
+    {
+        var link = graph.IncomingLink(passNode.NodeId, input.SocketGuid)
+            ?? throw new InvalidDataException(
+                $"Pass '{passNode.TypeName}' input {input.SocketGuid} is not connected.");
+        var source = ResolveSource(link.FromNode, link.FromSocket);
+        RequireCompatible(source, input, link);
+        return source;
+    }
+
+    private ResolvedGraphResource ResolveSource(string nodeId, string socketGuid)
+    {
+        var node = graph.Nodes.Single(item =>
+            string.Equals(item.NodeId, nodeId, StringComparison.Ordinal));
+        if (node.Kind == "scene")
+        {
+            return SceneResource(socketGuid);
+        }
+        if (node.Kind != "pass")
+        {
+            throw new InvalidDataException(
+                $"Graph node '{nodeId}' cannot produce resource socket {socketGuid}.");
+        }
+
+        var definition = manifest.DefinitionFor(node);
+        var output = definition.Output(socketGuid);
+        if (!node.Muted)
+        {
+            if (!IsTexture(output.ResourceKind))
+            {
+                throw new InvalidDataException(
+                    $"Pass output resource kind '{output.ResourceKind}' is not supported yet.");
+            }
+            return new ResolvedGraphResource(
+                output.ResourceKind,
+                output.Format,
+                TextureHandleFor(node.NodeId, output.SocketGuid));
+        }
+
+        var bypassInputs = definition.Inputs
+            .Where(input => IsTexture(input.ResourceKind) &&
+                            graph.IncomingLink(node.NodeId, input.SocketGuid) is not null)
+            .ToArray();
+        if (!IsTexture(output.ResourceKind) || bypassInputs.Length != 1)
+        {
+            throw new InvalidDataException(
+                $"Muted pass '{node.TypeName}' can be bypassed only with one connected Texture2D input.");
+        }
+        var inputLink = graph.IncomingLink(node.NodeId, bypassInputs[0].SocketGuid)!;
+        var source = ResolveSource(inputLink.FromNode, inputLink.FromSocket);
+        RequireCompatible(source, output, inputLink);
+        return source;
+    }
+
+    private TextureHandle TextureHandleFor(string nodeId, string socketGuid)
+    {
+        var key = (nodeId, socketGuid.ToLowerInvariant());
+        if (!textureHandles.TryGetValue(key, out var handle))
+        {
+            handle = new TextureHandle(nextTextureHandle++);
+            textureHandles.Add(key, handle);
+        }
+        return handle;
+    }
+
+    private static ResolvedGraphResource SceneResource(string socketGuid)
+        => socketGuid.ToLowerInvariant() switch
+        {
+            RenderGraphDocument.SceneGeometrySocketGuid => new(
+                "SceneGeometry", "Unknown", new SceneGeometryHandle(PassMemberBinder.GeometryHandleValue)),
+            RenderGraphDocument.SceneMaterialsSocketGuid => new(
+                "MaterialTable", "Unknown", new MaterialTableHandle(PassMemberBinder.MaterialsHandleValue)),
+            RenderGraphDocument.SceneTexturesSocketGuid => new(
+                "TextureTable", "Unknown", new TextureTableHandle(PassMemberBinder.TexturesHandleValue)),
+            RenderGraphDocument.SceneCameraSocketGuid => new(
+                "Camera", "Unknown", new CameraHandle(PassMemberBinder.CameraHandleValue)),
+            RenderGraphDocument.SceneLightsSocketGuid => new(
+                "LightTable", "Unknown", new LightTableHandle(PassMemberBinder.LightsHandleValue)),
+            RenderGraphDocument.SceneTimeSocketGuid => new(
+                "Time", "Unknown", new TimeHandle(PassMemberBinder.TimeHandleValue)),
+            _ => throw new InvalidDataException($"Unknown scene resource socket {socketGuid}.")
+        };
+
+    private static void RequireCompatible(
+        ResolvedGraphResource source,
+        ProjectPassSocketDefinition target,
+        GraphLink link)
+    {
+        if (!string.Equals(source.ResourceKind, target.ResourceKind, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Graph link {link.FromNode}.{link.FromSocket} -> {link.ToNode}.{link.ToSocket} " +
+                $"has resource kind {source.ResourceKind}, expected {target.ResourceKind}.");
+        }
+        if (!string.Equals(source.Format, "Unknown", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(target.Format, "Unknown", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(source.Format, target.Format, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Graph link {link.FromNode}.{link.FromSocket} -> {link.ToNode}.{link.ToSocket} " +
+                $"has format {source.Format}, expected {target.Format}.");
         }
     }
+
+    private static bool IsTexture(string resourceKind)
+        => string.Equals(resourceKind, "Texture2D", StringComparison.OrdinalIgnoreCase);
 }
+
+internal sealed record ResolvedGraphResource(
+    string ResourceKind,
+    string Format,
+    object Handle);
 
 internal static class PassMemberBinder
 {
-    private const ulong GeometryHandleValue = 1;
-    private const ulong MaterialsHandleValue = 2;
-    private const ulong CameraHandleValue = 3;
-    internal const ulong ColorHandleValue = 4;
+    internal const ulong GeometryHandleValue = 1;
+    internal const ulong MaterialsHandleValue = 2;
+    internal const ulong CameraHandleValue = 3;
+    internal const ulong TexturesHandleValue = 4;
+    internal const ulong LightsHandleValue = 5;
+    internal const ulong TimeHandleValue = 6;
 
-    public static void BindResources(IRenderPass pass)
+    public static void BindResources(
+        IRenderPass pass,
+        GraphNode passNode,
+        ProjectPassDefinition definition,
+        GraphResourceResolver resources)
     {
+        var boundInputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var boundOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var member in InstanceMembers(pass.GetType()))
         {
             var input = member.GetCustomAttribute<InputAttribute>(inherit: false);
@@ -526,17 +754,34 @@ internal static class PassMemberBinder
                 throw new InvalidDataException($"Pass member '{member.Name}' cannot be both an input and output.");
             }
 
-            var guid = (input?.Guid ?? output!.Guid).ToLowerInvariant();
-            object value = guid switch
+            var guidValue = input?.Guid ?? output!.Guid;
+            if (!Guid.TryParseExact(guidValue, "D", out var guid))
             {
-                RenderGraphDocument.GeometryInputSocketGuid => new SceneGeometryHandle(GeometryHandleValue),
-                RenderGraphDocument.MaterialsInputSocketGuid => new MaterialTableHandle(MaterialsHandleValue),
-                RenderGraphDocument.CameraInputSocketGuid => new CameraHandle(CameraHandleValue),
-                RenderGraphDocument.ColorOutputSocketGuid => new TextureHandle(ColorHandleValue),
-                _ => throw new InvalidDataException(
-                    $"The MinimalRaster host cannot bind pass resource member '{member.Name}' ({guid}).")
-            };
+                throw new InvalidDataException(
+                    $"Pass member '{member.Name}' has invalid socket GUID '{guidValue}'.");
+            }
+            var socketGuid = guid.ToString("D");
+            object value;
+            if (input is not null)
+            {
+                var socket = definition.Input(socketGuid);
+                value = resources.ResolveInputHandle(passNode, socket);
+                boundInputs.Add(socketGuid);
+            }
+            else
+            {
+                var socket = definition.Output(socketGuid);
+                value = resources.ResolveOutputHandle(passNode, socket);
+                boundOutputs.Add(socketGuid);
+            }
             SetValue(pass, member, value);
+        }
+
+        if (boundInputs.Count != definition.Inputs.Length ||
+            boundOutputs.Count != definition.Outputs.Length)
+        {
+            throw new InvalidDataException(
+                $"Pass type '{definition.TypeName}' resource members do not match its manifest sockets.");
         }
     }
 
@@ -656,17 +901,20 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
 {
     private readonly SceneGeometry geometry;
     private readonly RenderCamera camera;
-    private RenderedFrame? frame;
+    private readonly GraphResourceResolver resources;
+    private readonly Dictionary<ulong, RenderedFrame> frames = new();
 
     public ProjectRenderContextBackend(
         RenderGeometry geometry,
         int width,
         int height,
         SampleCount sampleCount,
-        float4x4 viewProjection)
+        float4x4 viewProjection,
+        GraphResourceResolver resources)
     {
         this.geometry = new SceneGeometry(geometry.Vertices, geometry.Indices);
         camera = new RenderCamera(viewProjection);
+        this.resources = resources;
         Width = width;
         Height = height;
         SampleCount = sampleCount;
@@ -677,36 +925,45 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public SampleCount SampleCount { get; }
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
-        => handle.Value == 1
+        => handle.Value == PassMemberBinder.GeometryHandleValue
             ? geometry
             : throw new KeyNotFoundException($"Unknown scene geometry handle {handle.Value}.");
 
     public RenderCamera GetCamera(CameraHandle handle)
-        => handle.Value == 3
+        => handle.Value == PassMemberBinder.CameraHandleValue
             ? camera
             : throw new KeyNotFoundException($"Unknown camera handle {handle.Value}.");
+
+    public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
+        => frames.TryGetValue(handle.Value, out var frame)
+            ? frame.Pixels
+            : throw new KeyNotFoundException(
+                $"Texture handle {handle.Value} has not been produced by an upstream pass.");
 
     public void SetColorOutput(
         TextureHandle handle,
         Rgba8[] pixels,
         DispatchPath dispatchPath)
     {
-        if (handle.Value != PassMemberBinder.ColorHandleValue)
+        if (!resources.IsWritable(handle))
         {
             throw new KeyNotFoundException($"Unknown color output handle {handle.Value}.");
         }
-        if (frame is not null)
+        if (frames.ContainsKey(handle.Value))
         {
-            throw new InvalidOperationException("The pass submitted its color output more than once.");
+            throw new InvalidOperationException(
+                $"Texture handle {handle.Value} was submitted more than once.");
         }
         if (pixels.Length != checked(Width * Height))
         {
             throw new InvalidDataException("The pass color output has the wrong pixel count.");
         }
-        frame = new RenderedFrame(Width, Height, pixels, dispatchPath);
+        frames.Add(handle.Value, new RenderedFrame(Width, Height, pixels, dispatchPath));
     }
 
-    public RenderedFrame TakeFrame()
-        => frame ?? throw new InvalidDataException(
-            "The project pass completed without calling RenderContext.SetColorOutput.");
+    public RenderedFrame TakeFrame(TextureHandle handle)
+        => frames.TryGetValue(handle.Value, out var frame)
+            ? frame
+            : throw new InvalidDataException(
+                $"The selected graph texture {handle.Value} was not produced.");
 }

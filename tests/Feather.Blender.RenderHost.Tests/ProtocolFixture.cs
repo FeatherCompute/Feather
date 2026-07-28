@@ -6,6 +6,9 @@ namespace Feather.Blender.RenderHost.Tests;
 internal sealed class ProtocolFixture : IDisposable
 {
     public const string GenerationId = "5ebc93da-b905-4f44-8eda-68968bb6ba2f";
+    public const string PostProcessPassGuid = "20fc3bf1-eecb-41b1-bd03-d5c8a344ce6d";
+    public const string PostProcessInputSocketGuid = "071e6d38-8fbc-4fe0-a736-f5d5142ac2aa";
+    public const string PostProcessOutputSocketGuid = "14c671df-f382-4aa6-8cf6-3a7ced0456f8";
 
     private readonly string root = Path.Combine(
         Path.GetTempPath(),
@@ -175,6 +178,91 @@ internal sealed class ProtocolFixture : IDisposable
                 }
             },
             topologicalOrder = new[] { "scene-1", "pass-1", "output-1" },
+            output = new
+            {
+                nodeId = "output-1",
+                socketGuid = RenderGraphDocument.OutputColorSocketGuid
+            }
+        };
+        File.WriteAllText(GraphPath, JsonSerializer.Serialize(graph));
+    }
+
+    public void WriteTwoPassGraph(
+        string firstPassType,
+        string secondPassType,
+        bool secondPassMuted = false)
+    {
+        var graph = new
+        {
+            schemaVersion = 1,
+            generationId = GenerationId,
+            graphId = "graph-1",
+            viewId = "view-1",
+            executionMode = "REALTIME",
+            resolutionScale = 1.0f,
+            sampleCount = 1,
+            nodes = new object[]
+            {
+                new { nodeId = "scene-1", kind = "scene" },
+                new
+                {
+                    nodeId = "pass-1",
+                    kind = "pass",
+                    passGuid = RenderGraphDocument.MinimalRasterPassGuid,
+                    typeName = firstPassType,
+                    muted = false,
+                    parameters = Array.Empty<object>()
+                },
+                new
+                {
+                    nodeId = "pass-2",
+                    kind = "pass",
+                    passGuid = PostProcessPassGuid,
+                    typeName = secondPassType,
+                    muted = secondPassMuted,
+                    parameters = Array.Empty<object>()
+                },
+                new { nodeId = "output-1", kind = "output" }
+            },
+            links = new[]
+            {
+                new
+                {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneGeometrySocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.GeometryInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneMaterialsSocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.MaterialsInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "scene-1",
+                    fromSocket = RenderGraphDocument.SceneCameraSocketGuid,
+                    toNode = "pass-1",
+                    toSocket = RenderGraphDocument.CameraInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "pass-1",
+                    fromSocket = RenderGraphDocument.ColorOutputSocketGuid,
+                    toNode = "pass-2",
+                    toSocket = PostProcessInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "pass-2",
+                    fromSocket = PostProcessOutputSocketGuid,
+                    toNode = "output-1",
+                    toSocket = RenderGraphDocument.OutputColorSocketGuid
+                }
+            },
+            topologicalOrder = new[] { "scene-1", "pass-1", "pass-2", "output-1" },
             output = new
             {
                 nodeId = "output-1",

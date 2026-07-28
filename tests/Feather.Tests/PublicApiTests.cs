@@ -84,6 +84,9 @@ public class PublicApiTests
         Assert.Equal(SampleCount.X4, context.SampleCount);
         Assert.Same(geometry, context.GetSceneGeometry(new SceneGeometryHandle(1)));
         Assert.Equal(camera, context.GetCamera(new CameraHandle(2)));
+        Assert.Equal(
+            new Rgba8(10, 20, 30, 255),
+            context.GetColorInput(new TextureHandle(3)).Span[0]);
         Assert.Throws<InvalidOperationException>(() => _ = new RenderContext().Width);
         Assert.Throws<ArgumentException>(() => new SceneGeometry(
             Array.Empty<SceneVertex>(),
@@ -270,6 +273,11 @@ public class PublicApiTests
 
         public RenderCamera GetCamera(CameraHandle handle)
             => handle.Value == 2 ? camera : throw new KeyNotFoundException();
+
+        public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
+            => handle.Value == 3
+                ? new[] { new Rgba8(10, 20, 30, 255) }
+                : throw new KeyNotFoundException();
 
         public void SetColorOutput(
             TextureHandle handle,

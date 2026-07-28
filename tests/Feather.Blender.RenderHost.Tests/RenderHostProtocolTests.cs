@@ -91,7 +91,7 @@ public sealed class RenderHostProtocolTests
         var exception = Assert.Throws<InvalidDataException>(
             () => RenderGraphDocument.LoadMinimalRaster(fixture.GraphPath));
 
-        Assert.Contains("supports only", exception.Message);
+        Assert.Contains("only MinimalRaster", exception.Message);
     }
 
     [Fact]
@@ -194,6 +194,7 @@ public sealed class RenderHostProtocolTests
 
         Assert.True(first.PassReloaded);
         Assert.Equal(typeof(RedCpuPass).FullName, first.PassType);
+        Assert.Equal(1, first.PassCount);
         Assert.StartsWith("sha256:", first.BuildId, StringComparison.Ordinal);
         Assert.Equal(new byte[] { 240, 20, 30, 255 }, firstFrame[40..44]);
 
@@ -215,6 +216,7 @@ public sealed class RenderHostProtocolTests
         Assert.True(second.PassReloaded);
         Assert.NotEqual(first.BuildId, second.BuildId);
         Assert.Equal(typeof(BlueCpuPass).FullName, second.PassType);
+        Assert.Equal(1, second.PassCount);
         Assert.Equal(new byte[] { 20, 30, 240, 255 }, secondFrame[40..44]);
         Assert.NotNull(host.LastUnloadedPassContextForTesting);
         AssertEventuallyUnloaded(host.LastUnloadedPassContextForTesting!);
@@ -222,6 +224,117 @@ public sealed class RenderHostProtocolTests
         var third = host.RenderOnce(fixture.RequestPath);
         Assert.False(third.PassReloaded);
         Assert.Equal(second.BuildId, third.BuildId);
+    }
+
+    [Fact]
+    public void TwoPassGraphPropagatesColorResourceAndReportsExecutedPassCount()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteTwoPassGraph(
+            typeof(RedCpuPass).FullName!,
+            typeof(SwapRedBlueCpuPass).FullName!);
+        WritePassManifest(
+            manifestPath,
+            MinimalRasterManifestPass(typeof(RedCpuPass)),
+            PostProcessManifestPass(typeof(SwapRedBlueCpuPass)));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+        var frame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.Equal(2, result.PassCount);
+        Assert.Equal(typeof(SwapRedBlueCpuPass).FullName, result.PassType);
+        Assert.Equal(new byte[] { 30, 20, 240, 255 }, frame[40..44]);
+    }
+
+    [Fact]
+    public void MutedTexturePassBypassesItsInputAndIsNotCountedAsExecuted()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteTwoPassGraph(
+            typeof(RedCpuPass).FullName!,
+            typeof(SwapRedBlueCpuPass).FullName!,
+            secondPassMuted: true);
+        WritePassManifest(
+            manifestPath,
+            MinimalRasterManifestPass(typeof(RedCpuPass)),
+            PostProcessManifestPass(typeof(SwapRedBlueCpuPass)));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+        var frame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.Equal(1, result.PassCount);
+        Assert.Equal(typeof(RedCpuPass).FullName, result.PassType);
+        Assert.Equal(new byte[] { 240, 20, 30, 255 }, frame[40..44]);
+    }
+
+    [Theory]
+    [InlineData("SceneGeometry", "RGBA8", "resource kind")]
+    [InlineData("Texture2D", "R8", "format")]
+    public void GraphRejectsIncompatiblePassResourceLinks(
+        string postInputKind,
+        string postInputFormat,
+        string expectedMessage)
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteTwoPassGraph(
+            typeof(RedCpuPass).FullName!,
+            typeof(SwapRedBlueCpuPass).FullName!);
+        WritePassManifest(
+            manifestPath,
+            MinimalRasterManifestPass(typeof(RedCpuPass)),
+            PostProcessManifestPass(
+                typeof(SwapRedBlueCpuPass),
+                postInputKind,
+                postInputFormat));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => host.RenderOnce(fixture.RequestPath));
+
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(fixture.OutputPath));
+    }
+
+    [Fact]
+    public void GraphRejectsUnconnectedRequiredPassInput()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteTwoPassGraph(
+            typeof(RedCpuPass).FullName!,
+            typeof(SwapRedBlueCpuPass).FullName!);
+        var graph = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        var links = graph["links"]!.AsArray();
+        links.Remove(links.Single(link =>
+            string.Equals(
+                link!["toSocket"]!.GetValue<string>(),
+                ProtocolFixture.PostProcessInputSocketGuid,
+                StringComparison.Ordinal)));
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+        WritePassManifest(
+            manifestPath,
+            MinimalRasterManifestPass(typeof(RedCpuPass)),
+            PostProcessManifestPass(typeof(SwapRedBlueCpuPass)));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => host.RenderOnce(fixture.RequestPath));
+
+        Assert.Contains("is not connected", exception.Message);
+        Assert.False(File.Exists(fixture.OutputPath));
     }
 
     [Fact]
@@ -253,8 +366,18 @@ public sealed class RenderHostProtocolTests
     }
 
     private static void WritePassManifest(string path, Type passType)
+        => WritePassManifest(path, MinimalRasterManifestPass(passType));
+
+    private static void WritePassManifest(string path, params ManifestPass[] passes)
     {
-        var assemblyPath = passType.Assembly.Location;
+        var assemblyPath = passes[0].PassType.Assembly.Location;
+        if (passes.Any(pass => !string.Equals(
+                pass.PassType.Assembly.Location,
+                assemblyPath,
+                StringComparison.Ordinal)))
+        {
+            throw new ArgumentException("Test manifest pass types must come from one assembly.", nameof(passes));
+        }
         var document = new JsonObject
         {
             ["schemaVersion"] = 1,
@@ -262,25 +385,15 @@ public sealed class RenderHostProtocolTests
             ["assemblyPath"] = assemblyPath,
             ["feirDirectory"] = "",
             ["projectRoot"] = ".",
-            ["passes"] = new JsonArray
-            {
-                new JsonObject
+            ["passes"] = new JsonArray(passes.Select(pass =>
+                (JsonNode)new JsonObject
                 {
-                    ["passGuid"] = RenderGraphDocument.MinimalRasterPassGuid,
-                    ["typeName"] = passType.FullName,
+                    ["passGuid"] = pass.PassGuid,
+                    ["typeName"] = pass.PassType.FullName,
                     ["assemblyPath"] = assemblyPath,
-                    ["inputs"] = new JsonArray
-                    {
-                        new JsonObject { ["socketGuid"] = RenderGraphDocument.GeometryInputSocketGuid },
-                        new JsonObject { ["socketGuid"] = RenderGraphDocument.MaterialsInputSocketGuid },
-                        new JsonObject { ["socketGuid"] = RenderGraphDocument.CameraInputSocketGuid }
-                    },
-                    ["outputs"] = new JsonArray
-                    {
-                        new JsonObject { ["socketGuid"] = RenderGraphDocument.ColorOutputSocketGuid }
-                    }
-                }
-            }
+                    ["inputs"] = new JsonArray(pass.Inputs.Select(SocketJson).ToArray()),
+                    ["outputs"] = new JsonArray(pass.Outputs.Select(SocketJson).ToArray())
+                }).ToArray())
         };
         var options = new JsonSerializerOptions { WriteIndented = true };
         var hashInput = document.ToJsonString(options);
@@ -292,6 +405,35 @@ public sealed class RenderHostProtocolTests
             hasher.GetHashAndReset()).ToLowerInvariant();
         File.WriteAllText(path, document.ToJsonString(options) + Environment.NewLine);
     }
+
+    private static ManifestPass MinimalRasterManifestPass(Type passType)
+        => new(
+            passType,
+            RenderGraphDocument.MinimalRasterPassGuid,
+            [
+                new(RenderGraphDocument.GeometryInputSocketGuid, "SceneGeometry", "Unknown"),
+                new(RenderGraphDocument.MaterialsInputSocketGuid, "MaterialTable", "Unknown"),
+                new(RenderGraphDocument.CameraInputSocketGuid, "Camera", "Unknown")
+            ],
+            [new(RenderGraphDocument.ColorOutputSocketGuid, "Texture2D", "RGBA8")]);
+
+    private static ManifestPass PostProcessManifestPass(
+        Type passType,
+        string inputKind = "Texture2D",
+        string inputFormat = "RGBA8")
+        => new(
+            passType,
+            ProtocolFixture.PostProcessPassGuid,
+            [new(ProtocolFixture.PostProcessInputSocketGuid, inputKind, inputFormat)],
+            [new(ProtocolFixture.PostProcessOutputSocketGuid, "Texture2D", "RGBA8")]);
+
+    private static JsonNode SocketJson(ManifestSocket socket)
+        => new JsonObject
+        {
+            ["socketGuid"] = socket.SocketGuid,
+            ["resourceKind"] = socket.ResourceKind,
+            ["format"] = socket.Format
+        };
 
     private static void AssertEventuallyUnloaded(WeakReference reference)
     {
@@ -314,6 +456,28 @@ public sealed class RenderHostProtocolTests
     public sealed class BlueCpuPass : CpuPassBase
     {
         protected override Rgba8 Color => new(20, 30, 240, 255);
+    }
+
+    [FeatherPass(ProtocolFixture.PostProcessPassGuid)]
+    public sealed class SwapRedBlueCpuPass : IComputePass
+    {
+        [Input(ProtocolFixture.PostProcessInputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Input { get; init; }
+
+        [Output(ProtocolFixture.PostProcessOutputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Output { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            var input = context.GetColorInput(Input).Span;
+            var output = new Rgba8[input.Length];
+            for (var index = 0; index < input.Length; index++)
+            {
+                var pixel = input[index];
+                output[index] = new Rgba8(pixel.B, pixel.G, pixel.R, pixel.A);
+            }
+            context.SetColorOutput(Output, output);
+        }
     }
 
     public abstract class CpuPassBase : IRasterPass
@@ -341,4 +505,15 @@ public sealed class RenderHostProtocolTests
             context.SetColorOutput(Output, pixels);
         }
     }
+
+    private sealed record ManifestPass(
+        Type PassType,
+        string PassGuid,
+        ManifestSocket[] Inputs,
+        ManifestSocket[] Outputs);
+
+    private sealed record ManifestSocket(
+        string SocketGuid,
+        string ResourceKind,
+        string Format);
 }
