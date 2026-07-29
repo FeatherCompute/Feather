@@ -64,6 +64,14 @@ public class PublicApiTests
         Assert.True(typeof(IRenderPass).IsAssignableFrom(typeof(IComputePass)));
         Assert.Equal(42UL, new TextureHandle(42).Value);
         Assert.Equal(43UL, new SceneGeometryHandle(43).Value);
+
+        var typedBuffer = new BufferHandle<float3>(44);
+        BufferHandle untypedBuffer = typedBuffer;
+        Assert.Equal(44UL, typedBuffer.Value);
+        Assert.Equal(typedBuffer.Value, typedBuffer.Untyped.Value);
+        Assert.Equal(typedBuffer.Value, untypedBuffer.Value);
+        Assert.Equal(typedBuffer, (BufferHandle<float3>)untypedBuffer);
+        Assert.Equal(typedBuffer, untypedBuffer.As<float3>());
     }
 
     [Fact]

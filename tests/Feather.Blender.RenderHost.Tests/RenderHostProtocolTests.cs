@@ -10,6 +10,17 @@ namespace Feather.Blender.RenderHost.Tests;
 
 public sealed class RenderHostProtocolTests
 {
+    private const string BufferProducerPassGuid = "a13d9b28-f076-4542-a807-3566f27f735a";
+    private const string BufferEvaluatePassGuid = "be95613d-4edd-43e7-97cf-3947ceedda48";
+    private const string BufferVisualizePassGuid = "dabc09ca-cbc6-4890-a886-acce544f8938";
+    private const string DirectionsOutputGuid = "e1505ffa-901e-4b3f-9b7b-2ae44757a2fc";
+    private const string WeightsOutputGuid = "1df28dd5-196c-40a8-941d-a7aac353fe3f";
+    private const string DirectionsInputGuid = "8354dcfd-fe3c-46e8-b172-c065c28fbae5";
+    private const string WeightsInputGuid = "3aaddfe4-d900-4215-a20f-04ed5f07ca68";
+    private const string ScoresOutputGuid = "0bc16d56-6333-4b8e-91b5-28d7fa40f1fc";
+    private const string ScoresInputGuid = "bf7f71a7-f86b-4769-8af3-a5e338c6a856";
+    private const string BufferColorOutputGuid = "aeaea2ce-b9da-484c-921a-c41e788656d6";
+
     [Fact]
     public void PublicationGenerationDoesNotChangeSceneOrGraphContentIdentity()
     {
@@ -278,6 +289,92 @@ public sealed class RenderHostProtocolTests
     }
 
     [Fact]
+    public void TypedBufferGraphTransfersFloat3IntAndFloatArraysBetweenPasses()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        WriteTypedBufferGraph(fixture);
+        WritePassManifest(manifestPath, TypedBufferManifestPasses());
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+        var frame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.Equal(3, result.PassCount);
+        Assert.Equal(typeof(BufferVisualizeCpuPass).FullName, result.PassType);
+        Assert.Equal(new byte[] { 60, 150, 2, 255 }, frame[40..44]);
+    }
+
+    [Fact]
+    public void TypedBufferGraphAcceptsCanonicalElementTypeAliases()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        WriteTypedBufferGraph(fixture);
+        var passes = TypedBufferManifestPasses();
+        passes[0] = passes[0] with
+        {
+            Outputs =
+            [
+                passes[0].Outputs[0] with { ElementType = "global::Feather.Math.float3" },
+                passes[0].Outputs[1] with { ElementType = "System.Int32" }
+            ]
+        };
+        passes[1] = passes[1] with
+        {
+            Inputs =
+            [
+                passes[1].Inputs[0] with { ElementType = "Feather.Math.float3" },
+                passes[1].Inputs[1] with { ElementType = "int32" }
+            ],
+            Outputs = [passes[1].Outputs[0] with { ElementType = "System.Single" }]
+        };
+        passes[2] = passes[2] with
+        {
+            Inputs = [passes[2].Inputs[0] with { ElementType = "single" }]
+        };
+        WritePassManifest(manifestPath, passes);
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+        var frame = File.ReadAllBytes(fixture.OutputPath);
+
+        Assert.Equal(3, result.PassCount);
+        Assert.Equal(new byte[] { 60, 150, 2, 255 }, frame[40..44]);
+    }
+
+    [Fact]
+    public void TypedBufferGraphRejectsMismatchedElementTypesBeforeExecution()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        WriteTypedBufferGraph(fixture);
+        var passes = TypedBufferManifestPasses();
+        passes[1] = passes[1] with
+        {
+            Inputs =
+            [
+                passes[1].Inputs[0] with { ElementType = "float" },
+                passes[1].Inputs[1]
+            ]
+        };
+        WritePassManifest(manifestPath, passes);
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => host.RenderOnce(fixture.RequestPath));
+
+        Assert.Contains("element type float3, expected float", exception.Message);
+        Assert.False(File.Exists(fixture.OutputPath));
+    }
+
+    [Fact]
     public void RenderHostHistoryReadsPreviousOutputAndResetsWhenViewProjectionChanges()
     {
         using var fixture = new ProtocolFixture();
@@ -480,6 +577,72 @@ public sealed class RenderHostProtocolTests
     private static void WritePassManifest(string path, Type passType)
         => WritePassManifest(path, MinimalRasterManifestPass(passType));
 
+    private static void WriteTypedBufferGraph(ProtocolFixture fixture)
+    {
+        var graph = new JsonObject
+        {
+            ["schemaVersion"] = 1,
+            ["generationId"] = ProtocolFixture.GenerationId,
+            ["graphId"] = "typed-buffer-graph",
+            ["viewId"] = "view-1",
+            ["executionMode"] = "REALTIME",
+            ["resolutionScale"] = 1.0f,
+            ["sampleCount"] = 1,
+            ["nodes"] = new JsonArray(
+                new JsonObject { ["nodeId"] = "scene-1", ["kind"] = "scene" },
+                new JsonObject
+                {
+                    ["nodeId"] = "produce",
+                    ["kind"] = "pass",
+                    ["passGuid"] = BufferProducerPassGuid,
+                    ["typeName"] = typeof(BufferProducerCpuPass).FullName,
+                    ["muted"] = false,
+                    ["parameters"] = new JsonObject()
+                },
+                new JsonObject
+                {
+                    ["nodeId"] = "evaluate",
+                    ["kind"] = "pass",
+                    ["passGuid"] = BufferEvaluatePassGuid,
+                    ["typeName"] = typeof(BufferEvaluateCpuPass).FullName,
+                    ["muted"] = false,
+                    ["parameters"] = new JsonObject()
+                },
+                new JsonObject
+                {
+                    ["nodeId"] = "visualize",
+                    ["kind"] = "pass",
+                    ["passGuid"] = BufferVisualizePassGuid,
+                    ["typeName"] = typeof(BufferVisualizeCpuPass).FullName,
+                    ["muted"] = false,
+                    ["parameters"] = new JsonObject()
+                },
+                new JsonObject { ["nodeId"] = "output-1", ["kind"] = "output" }),
+            ["links"] = new JsonArray(
+                Link("produce", DirectionsOutputGuid, "evaluate", DirectionsInputGuid),
+                Link("produce", WeightsOutputGuid, "evaluate", WeightsInputGuid),
+                Link("evaluate", ScoresOutputGuid, "visualize", ScoresInputGuid),
+                Link("visualize", BufferColorOutputGuid, "output-1", RenderGraphDocument.OutputColorSocketGuid)),
+            ["topologicalOrder"] = new JsonArray(
+                "scene-1", "produce", "evaluate", "visualize", "output-1"),
+            ["output"] = new JsonObject
+            {
+                ["nodeId"] = "output-1",
+                ["socketGuid"] = RenderGraphDocument.OutputColorSocketGuid
+            }
+        };
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+
+        static JsonNode Link(string fromNode, string fromSocket, string toNode, string toSocket)
+            => new JsonObject
+            {
+                ["fromNode"] = fromNode,
+                ["fromSocket"] = fromSocket,
+                ["toNode"] = toNode,
+                ["toSocket"] = toSocket
+            };
+    }
+
     private static void WritePassManifest(string path, params ManifestPass[] passes)
     {
         var assemblyPath = passes[0].PassType.Assembly.Location;
@@ -549,13 +712,46 @@ public sealed class RenderHostProtocolTests
                 new(ProtocolFixture.HistoryProbeNextOutputSocketGuid, "Texture2D", "RGBA8")
             ]);
 
+    private static ManifestPass[] TypedBufferManifestPasses()
+        =>
+        [
+            new(
+                typeof(BufferProducerCpuPass),
+                BufferProducerPassGuid,
+                [],
+                [
+                    new(DirectionsOutputGuid, "Buffer", "Unknown", "float3"),
+                    new(WeightsOutputGuid, "Buffer", "Unknown", "int")
+                ]),
+            new(
+                typeof(BufferEvaluateCpuPass),
+                BufferEvaluatePassGuid,
+                [
+                    new(DirectionsInputGuid, "Buffer", "Unknown", "float3"),
+                    new(WeightsInputGuid, "Buffer", "Unknown", "int")
+                ],
+                [new(ScoresOutputGuid, "Buffer", "Unknown", "float")]),
+            new(
+                typeof(BufferVisualizeCpuPass),
+                BufferVisualizePassGuid,
+                [new(ScoresInputGuid, "Buffer", "Unknown", "float")],
+                [new(BufferColorOutputGuid, "Texture2D", "RGBA8")])
+        ];
+
     private static JsonNode SocketJson(ManifestSocket socket)
-        => new JsonObject
+    {
+        var result = new JsonObject
         {
             ["socketGuid"] = socket.SocketGuid,
             ["resourceKind"] = socket.ResourceKind,
             ["format"] = socket.Format
         };
+        if (string.Equals(socket.ResourceKind, "Buffer", StringComparison.OrdinalIgnoreCase))
+        {
+            result["elementType"] = socket.ElementType;
+        }
+        return result;
+    }
 
     private static void AssertEventuallyUnloaded(WeakReference reference)
     {
@@ -623,6 +819,81 @@ public sealed class RenderHostProtocolTests
         }
     }
 
+    [FeatherPass(BufferProducerPassGuid)]
+    public sealed class BufferProducerCpuPass : IComputePass
+    {
+        [Output(DirectionsOutputGuid)]
+        public BufferHandle<float3> Directions { get; init; }
+
+        [Output(WeightsOutputGuid)]
+        public BufferHandle<int> Weights { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            context.SetBufferOutput(
+                Directions,
+                new[] { new float3(1, 2, 2), new float3(3, 0, 4) });
+            context.SetBufferOutput(Weights, new[] { 2, 3 });
+        }
+    }
+
+    [FeatherPass(BufferEvaluatePassGuid)]
+    public sealed class BufferEvaluateCpuPass : IComputePass
+    {
+        [Input(DirectionsInputGuid)]
+        public BufferHandle<float3> Directions { get; init; }
+
+        [Input(WeightsInputGuid)]
+        public BufferHandle<int> Weights { get; init; }
+
+        [Output(ScoresOutputGuid)]
+        public BufferHandle<float> Scores { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            var directions = context.GetBufferInput(Directions).Span;
+            var weights = context.GetBufferInput(Weights).Span;
+            if (directions.Length != weights.Length)
+            {
+                throw new InvalidDataException("Typed buffer test inputs have different lengths.");
+            }
+
+            var scores = new float[directions.Length];
+            for (var index = 0; index < scores.Length; index++)
+            {
+                var direction = directions[index];
+                scores[index] = MathF.Sqrt(
+                    direction.X * direction.X +
+                    direction.Y * direction.Y +
+                    direction.Z * direction.Z) * weights[index];
+            }
+            context.SetBufferOutput(Scores, scores);
+        }
+    }
+
+    [FeatherPass(BufferVisualizePassGuid)]
+    public sealed class BufferVisualizeCpuPass : IComputePass
+    {
+        [Input(ScoresInputGuid)]
+        public BufferHandle<float> Scores { get; init; }
+
+        [Output(BufferColorOutputGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Output { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            var scores = context.GetBufferInput(Scores).Span;
+            var pixels = new Rgba8[checked(context.Width * context.Height)];
+            var color = new Rgba8(
+                checked((byte)MathF.Round(scores[0] * 10)),
+                checked((byte)MathF.Round(scores[1] * 10)),
+                checked((byte)scores.Length),
+                255);
+            Array.Fill(pixels, color);
+            context.SetColorOutput(Output, pixels);
+        }
+    }
+
     public abstract class CpuPassBase : IRasterPass
     {
         [Input(RenderGraphDocument.GeometryInputSocketGuid)]
@@ -658,5 +929,6 @@ public sealed class RenderHostProtocolTests
     private sealed record ManifestSocket(
         string SocketGuid,
         string ResourceKind,
-        string Format);
+        string Format,
+        string ElementType = "Unknown");
 }

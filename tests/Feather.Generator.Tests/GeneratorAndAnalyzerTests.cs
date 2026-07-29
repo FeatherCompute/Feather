@@ -6582,6 +6582,7 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal(inputGuid, input.GetProperty("socketGuid").GetString());
         Assert.Equal("Scene", input.GetProperty("name").GetString());
         Assert.Equal("SceneGeometry", input.GetProperty("resourceKind").GetString());
+        Assert.False(input.TryGetProperty("elementType", out _));
         Assert.Equal("Unknown", input.GetProperty("format").GetString());
         Assert.Equal("Read", input.GetProperty("access").GetString());
 
@@ -6589,6 +6590,7 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal(outputGuid, output.GetProperty("socketGuid").GetString());
         Assert.Equal("HDR Color", output.GetProperty("name").GetString());
         Assert.Equal("Texture2D", output.GetProperty("resourceKind").GetString());
+        Assert.False(output.TryGetProperty("elementType", out _));
         Assert.Equal("RGBA16Float", output.GetProperty("format").GetString());
         Assert.Equal("Write", output.GetProperty("access").GetString());
 
@@ -6612,6 +6614,78 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal("Samples", implicitDefaultParameter.GetProperty("name").GetString());
         Assert.Equal("int", implicitDefaultParameter.GetProperty("type").GetString());
         Assert.Equal(0, implicitDefaultParameter.GetProperty("defaultValue").GetInt32());
+    }
+
+    [Fact]
+    public void GeneratorEmitsCanonicalTypedBufferElementTypes()
+    {
+        var compilation = CreateCompilation(
+            """
+            using Feather.Math;
+            using Feather.RenderGraph;
+
+            [FeatherPass("055bf9d0-e4b5-4cca-a5b0-0193cbac50de")]
+            public sealed class TypedBufferPass : IComputePass
+            {
+                [Input("83ad6bec-29d7-4b02-9794-0c7516d67d25")]
+                public BufferHandle<int> Integers { get; init; }
+
+                [Input("3290020e-4e75-474f-99b0-6643e30e7938")]
+                public BufferHandle<float> Scalars { get; init; }
+
+                [Input("90bc2c25-99e2-4cb4-9c57-c9dce7b4e414")]
+                public BufferHandle<float2> Coordinates { get; init; }
+
+                [Output("e7cc4f34-0b33-4c4b-b68e-c28fa3bfd25e")]
+                public BufferHandle<float3> Directions { get; init; }
+
+                [Output("fcba3c1a-9941-4c5f-8497-ed18fe374683")]
+                public BufferHandle<float4> Colors { get; init; }
+
+                [Output("8bcb9d2f-a7af-4ac0-a759-b2f878aa6814")]
+                public BufferHandle Legacy { get; init; }
+
+                public void Execute(RenderContext context)
+                {
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var generated = GetGeneratedTree(outputCompilation, diagnostics, "Feather.PassManifest.g.cs");
+        var jsonVariable = generated.GetRoot()
+            .DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(variable => variable.Identifier.ValueText == "Json");
+        var jsonField = Assert.IsAssignableFrom<IFieldSymbol>(
+            outputCompilation.GetSemanticModel(generated).GetDeclaredSymbol(jsonVariable));
+
+        using var manifest = JsonDocument.Parse(Assert.IsType<string>(jsonField.ConstantValue));
+        var pass = Assert.Single(manifest.RootElement.GetProperty("passes").EnumerateArray());
+        var sockets = pass.GetProperty("inputs").EnumerateArray()
+            .Concat(pass.GetProperty("outputs").EnumerateArray())
+            .ToDictionary(socket => socket.GetProperty("name").GetString()!);
+
+        AssertElementType(sockets, "Integers", "int");
+        AssertElementType(sockets, "Scalars", "float");
+        AssertElementType(sockets, "Coordinates", "float2");
+        AssertElementType(sockets, "Directions", "float3");
+        AssertElementType(sockets, "Colors", "float4");
+        AssertElementType(sockets, "Legacy", "Unknown");
+
+        static void AssertElementType(
+            IReadOnlyDictionary<string, JsonElement> sockets,
+            string name,
+            string expectedElementType)
+        {
+            var socket = sockets[name];
+            Assert.Equal("Buffer", socket.GetProperty("resourceKind").GetString());
+            Assert.Equal(expectedElementType, socket.GetProperty("elementType").GetString());
+            Assert.Equal("Unknown", socket.GetProperty("format").GetString());
+        }
     }
 
     [Fact]

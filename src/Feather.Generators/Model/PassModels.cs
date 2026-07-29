@@ -7,6 +7,7 @@ internal sealed record PassSocketModel(
     string Guid,
     string Name,
     string ResourceKind,
+    string? ElementType,
     string Format,
     string Access,
     Location Location);

@@ -300,6 +300,10 @@ internal static class PassManifestWriter
             AppendJsonString(builder, "socketGuid", socket.Guid, 10, trailingComma: true);
             AppendJsonString(builder, "name", socket.Name, 10, trailingComma: true);
             AppendJsonString(builder, "resourceKind", socket.ResourceKind, 10, trailingComma: true);
+            if (socket.ElementType is not null)
+            {
+                AppendJsonString(builder, "elementType", socket.ElementType, 10, trailingComma: true);
+            }
             AppendJsonString(builder, "format", socket.Format, 10, trailingComma: true);
             AppendJsonString(builder, "access", socket.Access, 10, trailingComma: false);
             builder.Append("        }").AppendLine(index + 1 < sockets.Length ? "," : string.Empty);

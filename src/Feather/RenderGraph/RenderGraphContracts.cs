@@ -95,7 +95,32 @@ public enum TextureFormat
 
 public readonly record struct ResourceHandle(ulong Value);
 
-public readonly record struct BufferHandle(ulong Value);
+public readonly record struct BufferHandle(ulong Value)
+{
+    /// <summary>
+    /// Treats this untyped handle as a buffer containing <typeparamref name="T"/> elements.
+    /// </summary>
+    public BufferHandle<T> As<T>()
+        where T : unmanaged
+        => new(Value);
+}
+
+/// <summary>
+/// Identifies a render-graph buffer whose logical elements have type <typeparamref name="T"/>.
+/// </summary>
+/// <typeparam name="T">The unmanaged buffer element type.</typeparam>
+public readonly record struct BufferHandle<T>(ulong Value)
+    where T : unmanaged
+{
+    /// <summary>
+    /// Gets the same graph resource without its compile-time element type.
+    /// </summary>
+    public BufferHandle Untyped => new(Value);
+
+    public static implicit operator BufferHandle(BufferHandle<T> handle) => handle.Untyped;
+
+    public static explicit operator BufferHandle<T>(BufferHandle handle) => new(handle.Value);
+}
 
 public readonly record struct TextureHandle(ulong Value);
 

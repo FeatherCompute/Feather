@@ -126,6 +126,7 @@ internal static class PassModelFactory
             GetConstructorString(attribute) ?? string.Empty,
             GetNamedString(attribute, "Name") ?? member.Name,
             ResourceKind(memberType),
+            BufferElementType(memberType),
             GetTextureFormat(attribute),
             access,
             member.Locations.FirstOrDefault() ?? Location.None);
@@ -200,6 +201,11 @@ internal static class PassModelFactory
 
     private static string ResourceKind(ITypeSymbol type)
     {
+        if (IsTypedBufferHandle(type))
+        {
+            return "Buffer";
+        }
+
         return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) switch
         {
             "global::Feather.RenderGraph.BufferHandle" => "Buffer",
@@ -213,6 +219,40 @@ internal static class PassModelFactory
             _ => "Value"
         };
     }
+
+    private static string? BufferElementType(ITypeSymbol type)
+    {
+        if (type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ==
+            "global::Feather.RenderGraph.BufferHandle")
+        {
+            return "Unknown";
+        }
+
+        return type is INamedTypeSymbol { IsGenericType: true } named && IsTypedBufferHandle(named)
+            ? CanonicalElementType(named.TypeArguments[0])
+            : null;
+    }
+
+    private static bool IsTypedBufferHandle(ITypeSymbol type)
+        => type is INamedTypeSymbol { IsGenericType: true } named &&
+           named.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ==
+           "global::Feather.RenderGraph.BufferHandle<T>";
+
+    private static string CanonicalElementType(ITypeSymbol type)
+    {
+        var shaderType = ShaderTypeFactory.FromTypeSymbol(type);
+        if (shaderType is not null)
+        {
+            return TrimGlobalPrefix(shaderType.CSharpTypeName);
+        }
+
+        return TrimGlobalPrefix(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+    }
+
+    private static string TrimGlobalPrefix(string typeName)
+        => typeName.StartsWith("global::", StringComparison.Ordinal)
+            ? typeName.Substring("global::".Length)
+            : typeName;
 
     private static string GetTextureFormat(AttributeData attribute)
     {

@@ -96,10 +96,21 @@ public interface IRenderContextBackend
 
     ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle);
 
+    ReadOnlyMemory<T> GetBufferInput<T>(BufferHandle<T> handle)
+        where T : unmanaged
+        => throw new NotSupportedException("This render host does not expose graph buffer inputs.");
+
     void SetColorOutput(
         TextureHandle handle,
         Rgba8[] pixels,
         DispatchPath dispatchPath);
+
+    void SetBufferOutput<T>(
+        BufferHandle<T> handle,
+        T[] values,
+        DispatchPath dispatchPath)
+        where T : unmanaged
+        => throw new NotSupportedException("This render host does not accept graph buffer outputs.");
 
     /// <summary>
     /// Receives the synchronous GPU readback duration for host diagnostics.
@@ -178,6 +189,14 @@ public sealed class RenderContext
         => Backend.GetColorInput(handle);
 
     /// <summary>
+    /// Resolves a typed buffer produced by an upstream graph pass. The returned memory remains
+    /// owned by the render host and is valid only for this execution.
+    /// </summary>
+    public ReadOnlyMemory<T> GetBufferInput<T>(BufferHandle<T> handle)
+        where T : unmanaged
+        => Backend.GetBufferInput(handle);
+
+    /// <summary>
     /// Synchronously reads an RGBA8 Feather texture and publishes it as a graph output.
     /// </summary>
     public void SetColorOutput<TValue>(
@@ -228,6 +247,40 @@ public sealed class RenderContext
         }
         Backend.SetColorOutput(handle, pixels.ToArray(), dispatchPath);
     }
+
+    /// <summary>
+    /// Synchronously reads a Feather buffer and publishes its logical elements as a graph output.
+    /// </summary>
+    public void SetBufferOutput<T>(
+        BufferHandle<T> handle,
+        GpuBuffer<T> buffer,
+        DispatchPath dispatchPath = DispatchPath.None)
+        where T : unmanaged
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        var values = new T[buffer.Length];
+        var readback = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            buffer.Read(values);
+        }
+        finally
+        {
+            readback.Stop();
+            Backend.ReportGpuReadback(readback.Elapsed);
+        }
+        Backend.SetBufferOutput(handle, values, dispatchPath);
+    }
+
+    /// <summary>
+    /// Publishes a typed CPU array as a graph buffer output.
+    /// </summary>
+    public void SetBufferOutput<T>(
+        BufferHandle<T> handle,
+        ReadOnlySpan<T> values,
+        DispatchPath dispatchPath = DispatchPath.None)
+        where T : unmanaged
+        => Backend.SetBufferOutput(handle, values.ToArray(), dispatchPath);
 
     private IRenderContextBackend Backend
         => backend ?? throw new InvalidOperationException("The render context is not bound to a render host.");

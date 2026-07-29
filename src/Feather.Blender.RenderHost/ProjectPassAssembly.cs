@@ -498,10 +498,25 @@ internal sealed class ProjectPassManifest
             {
                 throw new InvalidDataException($"Pass manifest contains duplicate socket GUID {normalized}.");
             }
+            var resourceKind = OptionalString(socket, "resourceKind") ?? InferResourceKind(normalized);
+            var format = OptionalString(socket, "format") ?? "Unknown";
+            var elementType = BufferElementTypeNames.NormalizeManifest(
+                OptionalString(socket, "elementType") ?? "Unknown");
+            if (string.Equals(resourceKind, "Buffer", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.Equals(format, "Unknown", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"Pass manifest Buffer socket {normalized} cannot declare texture format {format}.");
+                }
+            }
+            else if (!string.Equals(elementType, "Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Pass manifest {resourceKind} socket {normalized} cannot declare Buffer element type {elementType}.");
+            }
             result.Add(new ProjectPassSocketDefinition(
-                normalized,
-                OptionalString(socket, "resourceKind") ?? InferResourceKind(normalized),
-                OptionalString(socket, "format") ?? "Unknown"));
+                normalized, resourceKind, format, elementType));
         }
         return result.ToArray();
     }
@@ -540,19 +555,24 @@ internal sealed record ProjectPassDefinition(
 internal sealed record ProjectPassSocketDefinition(
     string SocketGuid,
     string ResourceKind,
-    string Format);
+    string Format,
+    string ElementType);
 
 internal sealed class GraphResourceResolver
 {
     private const ulong FirstTextureHandle = 1024;
+    private const ulong FirstBufferHandle = 1UL << 32;
 
     private readonly RenderGraphExecution graph;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
     private readonly HashSet<ulong> writableTextureHandles = [];
+    private readonly Dictionary<(string NodeId, string SocketGuid), BufferHandle> bufferHandles = new();
+    private readonly Dictionary<ulong, string> writableBufferElementTypes = [];
     private readonly Dictionary<string, TextureHandle> historyReadHandles = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextureHandle> historyWriteSources = new(StringComparer.Ordinal);
     private ulong nextTextureHandle = FirstTextureHandle;
+    private ulong nextBufferHandle = FirstBufferHandle;
 
     public GraphResourceResolver(RenderGraphExecution graph, ProjectPassManifest manifest)
     {
@@ -612,16 +632,20 @@ internal sealed class GraphResourceResolver
 
     public object ResolveOutputHandle(GraphNode passNode, ProjectPassSocketDefinition output)
     {
-        if (!IsTexture(output.ResourceKind))
-        {
-            throw new InvalidDataException(
-                $"Pass output resource kind '{output.ResourceKind}' is not supported yet.");
-        }
         if (passNode.Muted)
         {
             return ResolveSource(passNode.NodeId, output.SocketGuid).Handle;
         }
-        return TextureHandleFor(passNode.NodeId, output.SocketGuid);
+        if (IsTexture(output.ResourceKind))
+        {
+            return TextureHandleFor(passNode.NodeId, output.SocketGuid);
+        }
+        if (IsBuffer(output.ResourceKind))
+        {
+            return BufferHandleFor(passNode.NodeId, output.SocketGuid, output.ElementType);
+        }
+        throw new InvalidDataException(
+            $"Pass output resource kind '{output.ResourceKind}' is not supported yet.");
     }
 
     public TextureHandle ResolveTextureSource(string nodeId, string socketGuid)
@@ -637,6 +661,14 @@ internal sealed class GraphResourceResolver
 
     public bool IsWritable(TextureHandle handle)
         => writableTextureHandles.Contains(handle.Value);
+
+    public bool IsWritable(BufferHandle handle)
+        => writableBufferElementTypes.ContainsKey(handle.Value);
+
+    public string BufferElementType(BufferHandle handle)
+        => writableBufferElementTypes.TryGetValue(handle.Value, out var elementType)
+            ? elementType
+            : throw new KeyNotFoundException($"Unknown buffer output handle {handle.Value}.");
 
     public IReadOnlyDictionary<string, TextureHandle> HistoryReadHandles => historyReadHandles;
 
@@ -675,6 +707,7 @@ internal sealed class GraphResourceResolver
             return new ResolvedGraphResource(
                 "Texture2D",
                 "Unknown",
+                "Unknown",
                 historyReadHandles[node.HistoryKey]);
         }
         if (node.Kind != "pass")
@@ -687,7 +720,16 @@ internal sealed class GraphResourceResolver
         var output = definition.Output(socketGuid);
         if (!node.Muted)
         {
-            if (!IsTexture(output.ResourceKind))
+            object handle;
+            if (IsTexture(output.ResourceKind))
+            {
+                handle = TextureHandleFor(node.NodeId, output.SocketGuid);
+            }
+            else if (IsBuffer(output.ResourceKind))
+            {
+                handle = BufferHandleFor(node.NodeId, output.SocketGuid, output.ElementType);
+            }
+            else
             {
                 throw new InvalidDataException(
                     $"Pass output resource kind '{output.ResourceKind}' is not supported yet.");
@@ -695,17 +737,19 @@ internal sealed class GraphResourceResolver
             return new ResolvedGraphResource(
                 output.ResourceKind,
                 output.Format,
-                TextureHandleFor(node.NodeId, output.SocketGuid));
+                output.ElementType,
+                handle);
         }
 
         var bypassInputs = definition.Inputs
-            .Where(input => IsTexture(input.ResourceKind) &&
+            .Where(input => SocketMetadataCompatible(input, output) &&
                             graph.IncomingLink(node.NodeId, input.SocketGuid) is not null)
             .ToArray();
-        if (!IsTexture(output.ResourceKind) || bypassInputs.Length != 1)
+        if (bypassInputs.Length != 1)
         {
             throw new InvalidDataException(
-                $"Muted pass '{node.TypeName}' can be bypassed only with one connected Texture2D input.");
+                $"Muted pass '{node.TypeName}' can be bypassed only with one connected " +
+                $"{output.ResourceKind} input.");
         }
         var inputLink = graph.IncomingLink(node.NodeId, bypassInputs[0].SocketGuid)!;
         var source = ResolveSource(inputLink.FromNode, inputLink.FromSocket);
@@ -725,21 +769,36 @@ internal sealed class GraphResourceResolver
         return handle;
     }
 
+    private BufferHandle BufferHandleFor(
+        string nodeId,
+        string socketGuid,
+        string elementType)
+    {
+        var key = (nodeId, socketGuid.ToLowerInvariant());
+        if (!bufferHandles.TryGetValue(key, out var handle))
+        {
+            handle = new BufferHandle(nextBufferHandle++);
+            bufferHandles.Add(key, handle);
+            writableBufferElementTypes.Add(handle.Value, elementType);
+        }
+        return handle;
+    }
+
     private static ResolvedGraphResource SceneResource(string socketGuid)
         => socketGuid.ToLowerInvariant() switch
         {
             RenderGraphDocument.SceneGeometrySocketGuid => new(
-                "SceneGeometry", "Unknown", new SceneGeometryHandle(PassMemberBinder.GeometryHandleValue)),
+                "SceneGeometry", "Unknown", "Unknown", new SceneGeometryHandle(PassMemberBinder.GeometryHandleValue)),
             RenderGraphDocument.SceneMaterialsSocketGuid => new(
-                "MaterialTable", "Unknown", new MaterialTableHandle(PassMemberBinder.MaterialsHandleValue)),
+                "MaterialTable", "Unknown", "Unknown", new MaterialTableHandle(PassMemberBinder.MaterialsHandleValue)),
             RenderGraphDocument.SceneTexturesSocketGuid => new(
-                "TextureTable", "Unknown", new TextureTableHandle(PassMemberBinder.TexturesHandleValue)),
+                "TextureTable", "Unknown", "Unknown", new TextureTableHandle(PassMemberBinder.TexturesHandleValue)),
             RenderGraphDocument.SceneCameraSocketGuid => new(
-                "Camera", "Unknown", new CameraHandle(PassMemberBinder.CameraHandleValue)),
+                "Camera", "Unknown", "Unknown", new CameraHandle(PassMemberBinder.CameraHandleValue)),
             RenderGraphDocument.SceneLightsSocketGuid => new(
-                "LightTable", "Unknown", new LightTableHandle(PassMemberBinder.LightsHandleValue)),
+                "LightTable", "Unknown", "Unknown", new LightTableHandle(PassMemberBinder.LightsHandleValue)),
             RenderGraphDocument.SceneTimeSocketGuid => new(
-                "Time", "Unknown", new TimeHandle(PassMemberBinder.TimeHandleValue)),
+                "Time", "Unknown", "Unknown", new TimeHandle(PassMemberBinder.TimeHandleValue)),
             _ => throw new InvalidDataException($"Unknown scene resource socket {socketGuid}.")
         };
 
@@ -762,16 +821,129 @@ internal sealed class GraphResourceResolver
                 $"Graph link {link.FromNode}.{link.FromSocket} -> {link.ToNode}.{link.ToSocket} " +
                 $"has format {source.Format}, expected {target.Format}.");
         }
+        if (!string.Equals(source.ElementType, "Unknown", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(target.ElementType, "Unknown", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(source.ElementType, target.ElementType, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Graph link {link.FromNode}.{link.FromSocket} -> {link.ToNode}.{link.ToSocket} " +
+                $"has buffer element type {source.ElementType}, expected {target.ElementType}.");
+        }
     }
+
+    private static bool SocketMetadataCompatible(
+        ProjectPassSocketDefinition source,
+        ProjectPassSocketDefinition target)
+        => string.Equals(source.ResourceKind, target.ResourceKind, StringComparison.OrdinalIgnoreCase) &&
+           MetadataCompatible(source.Format, target.Format) &&
+           MetadataCompatible(source.ElementType, target.ElementType);
+
+    private static bool MetadataCompatible(string left, string right)
+        => string.Equals(left, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(right, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsTexture(string resourceKind)
         => string.Equals(resourceKind, "Texture2D", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBuffer(string resourceKind)
+        => string.Equals(resourceKind, "Buffer", StringComparison.OrdinalIgnoreCase);
 }
 
 internal sealed record ResolvedGraphResource(
     string ResourceKind,
     string Format,
+    string ElementType,
     object Handle);
+
+internal static class BufferElementTypeNames
+{
+    public static string NormalizeManifest(string value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        var normalized = value.Trim();
+        while (normalized.StartsWith("global::", StringComparison.Ordinal))
+        {
+            normalized = normalized.Substring("global::".Length);
+        }
+        if (normalized.Length == 0)
+        {
+            throw new InvalidDataException("Buffer element type must be a non-empty type name.");
+        }
+
+        return normalized.ToLowerInvariant() switch
+        {
+            "unknown" => "Unknown",
+            "sbyte" or "system.sbyte" => "sbyte",
+            "byte" or "system.byte" => "byte",
+            "short" or "int16" or "system.int16" => "short",
+            "ushort" or "uint16" or "system.uint16" => "ushort",
+            "int" or "int32" or "system.int32" => "int",
+            "uint" or "uint32" or "system.uint32" => "uint",
+            "long" or "int64" or "system.int64" => "long",
+            "ulong" or "uint64" or "system.uint64" => "ulong",
+            "float" or "single" or "system.single" => "float",
+            "double" or "system.double" => "double",
+            "bool" or "boolean" or "system.boolean" => "bool",
+            "char" or "system.char" => "char",
+            "decimal" or "system.decimal" => "decimal",
+            "nint" or "intptr" or "system.intptr" => "nint",
+            "nuint" or "uintptr" or "system.uintptr" => "nuint",
+            "feather.math.float2" => "float2",
+            "feather.math.float3" => "float3",
+            "feather.math.float4" => "float4",
+            "feather.math.int2" => "int2",
+            "feather.math.int3" => "int3",
+            "feather.math.int4" => "int4",
+            "feather.math.bool2" => "bool2",
+            "feather.math.bool3" => "bool3",
+            "feather.math.bool4" => "bool4",
+            "feather.math.float2x2" => "float2x2",
+            "feather.math.float3x3" => "float3x3",
+            "feather.math.float4x4" => "float4x4",
+            "feather.math.float2x3" => "float2x3",
+            "feather.math.float3x2" => "float3x2",
+            "feather.math.float2x4" => "float2x4",
+            "feather.math.float4x2" => "float4x2",
+            "feather.math.float3x4" => "float3x4",
+            "feather.math.float4x3" => "float4x3",
+            _ => normalized
+        };
+    }
+
+    public static string Canonical(Type type)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        if (type == typeof(sbyte)) return "sbyte";
+        if (type == typeof(byte)) return "byte";
+        if (type == typeof(short)) return "short";
+        if (type == typeof(ushort)) return "ushort";
+        if (type == typeof(int)) return "int";
+        if (type == typeof(uint)) return "uint";
+        if (type == typeof(long)) return "long";
+        if (type == typeof(ulong)) return "ulong";
+        if (type == typeof(float)) return "float";
+        if (type == typeof(double)) return "double";
+        if (type == typeof(bool)) return "bool";
+        if (type == typeof(char)) return "char";
+        if (type == typeof(decimal)) return "decimal";
+        if (type == typeof(nint)) return "nint";
+        if (type == typeof(nuint)) return "nuint";
+        return NormalizeManifest((type.FullName ?? type.Name).Replace('+', '.'));
+    }
+
+    public static void RequireCompatible(string expected, Type actual, string label)
+    {
+        var canonicalExpected = NormalizeManifest(expected);
+        if (!string.Equals(canonicalExpected, "Unknown", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(canonicalExpected, Canonical(actual), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"{label} declares buffer element type {canonicalExpected}, but the C# handle uses " +
+                $"{Canonical(actual)}.");
+        }
+    }
+}
 
 internal static class PassMemberBinder
 {
@@ -815,12 +987,14 @@ internal static class PassMemberBinder
             {
                 var socket = definition.Input(socketGuid);
                 value = resources.ResolveInputHandle(passNode, socket);
+                value = AdaptResourceHandle(value, MemberType(member), socket, member.Name);
                 boundInputs.Add(socketGuid);
             }
             else
             {
                 var socket = definition.Output(socketGuid);
                 value = resources.ResolveOutputHandle(passNode, socket);
+                value = AdaptResourceHandle(value, MemberType(member), socket, member.Name);
                 boundOutputs.Add(socketGuid);
             }
             SetValue(pass, member, value);
@@ -919,6 +1093,32 @@ internal static class PassMemberBinder
             _ => throw new ArgumentOutOfRangeException(nameof(member))
         };
 
+    private static object AdaptResourceHandle(
+        object value,
+        Type memberType,
+        ProjectPassSocketDefinition socket,
+        string memberName)
+    {
+        if (value is not BufferHandle buffer || memberType == typeof(BufferHandle))
+        {
+            return value;
+        }
+        if (!memberType.IsGenericType ||
+            memberType.GetGenericTypeDefinition() != typeof(BufferHandle<>))
+        {
+            return value;
+        }
+
+        var elementType = memberType.GetGenericArguments()[0];
+        BufferElementTypeNames.RequireCompatible(
+            socket.ElementType,
+            elementType,
+            $"Pass member '{memberName}'");
+        return Activator.CreateInstance(memberType, buffer.Value)
+            ?? throw new InvalidDataException(
+                $"Unable to construct typed buffer handle for pass member '{memberName}'.");
+    }
+
     private static void SetValue(object instance, MemberInfo member, object? value)
     {
         switch (member)
@@ -956,6 +1156,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly RenderTime time;
     private readonly GraphResourceResolver resources;
     private readonly Dictionary<ulong, RenderedFrame> frames = new();
+    private readonly Dictionary<ulong, GraphBufferData> buffers = new();
 
     public ProjectRenderContextBackend(
         RenderSceneResources scene,
@@ -1043,6 +1244,23 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             : throw new KeyNotFoundException(
                 $"Texture handle {handle.Value} has not been produced by an upstream pass.");
 
+    public ReadOnlyMemory<T> GetBufferInput<T>(BufferHandle<T> handle)
+        where T : unmanaged
+    {
+        if (!buffers.TryGetValue(handle.Value, out var buffer))
+        {
+            throw new KeyNotFoundException(
+                $"Buffer handle {handle.Value} has not been produced by an upstream pass.");
+        }
+        if (buffer.ElementType != typeof(T) || buffer.Values is not T[] values)
+        {
+            throw new InvalidDataException(
+                $"Buffer handle {handle.Value} contains {BufferElementTypeNames.Canonical(buffer.ElementType)}, " +
+                $"not {BufferElementTypeNames.Canonical(typeof(T))}.");
+        }
+        return values;
+    }
+
     public void SetColorOutput(
         TextureHandle handle,
         Rgba8[] pixels,
@@ -1062,6 +1280,30 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             throw new InvalidDataException("The pass color output has the wrong pixel count.");
         }
         frames.Add(handle.Value, new RenderedFrame(Width, Height, pixels, dispatchPath));
+    }
+
+    public void SetBufferOutput<T>(
+        BufferHandle<T> handle,
+        T[] values,
+        DispatchPath dispatchPath)
+        where T : unmanaged
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        var untyped = handle.Untyped;
+        if (!resources.IsWritable(untyped))
+        {
+            throw new KeyNotFoundException($"Unknown buffer output handle {handle.Value}.");
+        }
+        BufferElementTypeNames.RequireCompatible(
+            resources.BufferElementType(untyped),
+            typeof(T),
+            $"Buffer output {handle.Value}");
+        if (buffers.ContainsKey(handle.Value))
+        {
+            throw new InvalidOperationException(
+                $"Buffer handle {handle.Value} was submitted more than once.");
+        }
+        buffers.Add(handle.Value, new GraphBufferData(typeof(T), values, dispatchPath));
     }
 
     public RenderedFrame TakeFrame(TextureHandle handle)
@@ -1085,3 +1327,8 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         return result;
     }
 }
+
+internal sealed record GraphBufferData(
+    Type ElementType,
+    Array Values,
+    DispatchPath DispatchPath);
