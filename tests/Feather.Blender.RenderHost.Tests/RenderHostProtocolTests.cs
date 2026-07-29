@@ -11,6 +11,33 @@ namespace Feather.Blender.RenderHost.Tests;
 public sealed class RenderHostProtocolTests
 {
     [Fact]
+    public void PublicationGenerationDoesNotChangeSceneOrGraphContentIdentity()
+    {
+        using var fixture = new ProtocolFixture();
+        fixture.WriteScene();
+        fixture.WriteGraph();
+        var firstScene = SceneSnapshot.Load(fixture.ScenePath);
+        var firstGraph = RenderGraphDocument.Load(fixture.GraphPath);
+        const string replacementGeneration = "e53e3108-9276-4440-b503-94c45e094e3f";
+
+        var sceneBytes = File.ReadAllBytes(fixture.ScenePath);
+        var generationBytes = Encoding.UTF8.GetBytes(ProtocolFixture.GenerationId);
+        var generationOffset = sceneBytes.AsSpan().IndexOf(generationBytes);
+        Assert.True(generationOffset >= 0);
+        Encoding.UTF8.GetBytes(replacementGeneration).CopyTo(sceneBytes, generationOffset);
+        File.WriteAllBytes(fixture.ScenePath, sceneBytes);
+
+        var graphJson = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        graphJson["generationId"] = replacementGeneration;
+        File.WriteAllText(fixture.GraphPath, graphJson.ToJsonString());
+        var secondScene = SceneSnapshot.Load(fixture.ScenePath);
+        var secondGraph = RenderGraphDocument.Load(fixture.GraphPath);
+
+        Assert.Equal(firstScene.ContentFingerprint, secondScene.ContentFingerprint);
+        Assert.Equal(firstGraph.GraphFingerprint, secondGraph.GraphFingerprint);
+    }
+
+    [Fact]
     public void BlenderSceneV1BuildsIndexedEvaluatedGeometryWithInstanceTransform()
     {
         using var fixture = new ProtocolFixture();
@@ -251,6 +278,56 @@ public sealed class RenderHostProtocolTests
     }
 
     [Fact]
+    public void RenderHostHistoryReadsPreviousOutputAndResetsWhenViewProjectionChanges()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteHistoryGraph(typeof(HistoryProbeCpuPass).FullName!);
+        WritePassManifest(manifestPath, HistoryProbeManifestPass(typeof(HistoryProbeCpuPass)));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var first = host.RenderOnce(fixture.RequestPath);
+        var firstPixel = File.ReadAllBytes(fixture.OutputPath)[40..44];
+
+        Assert.Equal(new byte[] { 0, 0, 0, 255 }, firstPixel);
+        Assert.True(first.HistoryReset);
+        Assert.Equal(1, first.ResetCount);
+        Assert.Equal(1, first.Iteration);
+        Assert.True(first.PassReloaded);
+
+        fixture.WriteRequest(manifestPath: manifestPath, requestId: 43);
+        var second = host.RenderOnce(fixture.RequestPath);
+        var secondPixel = File.ReadAllBytes(fixture.OutputPath)[40..44];
+
+        Assert.Equal(new byte[] { 37, 73, 109, 255 }, secondPixel);
+        Assert.False(second.HistoryReset);
+        Assert.Equal(1, second.ResetCount);
+        Assert.Equal(2, second.Iteration);
+        Assert.False(second.PassReloaded);
+
+        fixture.WriteRequest(
+            manifestPath: manifestPath,
+            requestId: 44,
+            viewProjection:
+            [
+                2, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1
+            ]);
+        var reset = host.RenderOnce(fixture.RequestPath);
+        var resetPixel = File.ReadAllBytes(fixture.OutputPath)[40..44];
+
+        Assert.Equal(new byte[] { 0, 0, 0, 255 }, resetPixel);
+        Assert.True(reset.HistoryReset);
+        Assert.Equal(2, reset.ResetCount);
+        Assert.Equal(1, reset.Iteration);
+        Assert.False(reset.PassReloaded);
+    }
+
+    [Fact]
     public void MutedTexturePassBypassesItsInputAndIsNotCountedAsExecuted()
     {
         using var fixture = new ProtocolFixture();
@@ -335,6 +412,41 @@ public sealed class RenderHostProtocolTests
 
         Assert.Contains("is not connected", exception.Message);
         Assert.False(File.Exists(fixture.OutputPath));
+    }
+
+    [Fact]
+    public void DisconnectedDraftPassDoesNotInvalidateTheExecutableGraph()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteGraph(typeName: typeof(RedCpuPass).FullName!);
+        var graph = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        graph["nodes"]!.AsArray().Add(new JsonObject
+        {
+            ["nodeId"] = "disconnected-draft",
+            ["kind"] = "pass",
+            ["passGuid"] = ProtocolFixture.PostProcessPassGuid,
+            ["typeName"] = typeof(SwapRedBlueCpuPass).FullName,
+            ["muted"] = false,
+            ["parameters"] = new JsonObject()
+        });
+        graph["topologicalOrder"]!.AsArray().Add("disconnected-draft");
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+        WritePassManifest(
+            manifestPath,
+            MinimalRasterManifestPass(typeof(RedCpuPass)),
+            PostProcessManifestPass(typeof(SwapRedBlueCpuPass)));
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+
+        Assert.Equal(1, result.PassCount);
+        Assert.Equal(typeof(RedCpuPass).FullName, result.PassType);
+        Assert.Equal(
+            new byte[] { 240, 20, 30, 255 },
+            File.ReadAllBytes(fixture.OutputPath)[40..44]);
     }
 
     [Fact]
@@ -427,6 +539,16 @@ public sealed class RenderHostProtocolTests
             [new(ProtocolFixture.PostProcessInputSocketGuid, inputKind, inputFormat)],
             [new(ProtocolFixture.PostProcessOutputSocketGuid, "Texture2D", "RGBA8")]);
 
+    private static ManifestPass HistoryProbeManifestPass(Type passType)
+        => new(
+            passType,
+            ProtocolFixture.HistoryProbePassGuid,
+            [new(ProtocolFixture.HistoryProbeInputSocketGuid, "Texture2D", "RGBA8")],
+            [
+                new(ProtocolFixture.HistoryProbeObservedOutputSocketGuid, "Texture2D", "RGBA8"),
+                new(ProtocolFixture.HistoryProbeNextOutputSocketGuid, "Texture2D", "RGBA8")
+            ]);
+
     private static JsonNode SocketJson(ManifestSocket socket)
         => new JsonObject
         {
@@ -477,6 +599,27 @@ public sealed class RenderHostProtocolTests
                 output[index] = new Rgba8(pixel.B, pixel.G, pixel.R, pixel.A);
             }
             context.SetColorOutput(Output, output);
+        }
+    }
+
+    [FeatherPass(ProtocolFixture.HistoryProbePassGuid)]
+    public sealed class HistoryProbeCpuPass : IComputePass
+    {
+        [Input(ProtocolFixture.HistoryProbeInputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle History { get; init; }
+
+        [Output(ProtocolFixture.HistoryProbeObservedOutputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Observed { get; init; }
+
+        [Output(ProtocolFixture.HistoryProbeNextOutputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Next { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            context.SetColorOutput(Observed, context.GetColorInput(History).Span);
+            var next = new Rgba8[checked(context.Width * context.Height)];
+            Array.Fill(next, new Rgba8(37, 73, 109, 255));
+            context.SetColorOutput(Next, next);
         }
     }
 

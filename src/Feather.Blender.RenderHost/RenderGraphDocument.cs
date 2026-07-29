@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Feather.Blender.RenderHost;
 
@@ -18,14 +20,21 @@ internal sealed class RenderGraphDocument
     public const string CameraInputSocketGuid = "cc78191c-ac9a-57b6-bcac-91cce5e298f5";
     public const string ColorOutputSocketGuid = "bd711ea6-36f9-56cd-863a-cfec58727a46";
     public const string OutputColorSocketGuid = "082faef8-760d-5062-9766-2d627d8c42f8";
+    public const string HistoryReadSocketGuid = "b85a7129-ad17-5d67-b06b-60e15ce071d0";
+    public const string HistoryWriteSocketGuid = "8d513f8b-7212-557b-bcec-2f88ed212c21";
+    public const int MaximumScheduledSamples = 1_000_000_000;
 
     public int SchemaVersion { get; init; }
     public string GenerationId { get; init; } = "";
     public string GraphId { get; init; } = "";
     public string ViewId { get; init; } = "";
+    public string ViewKind { get; init; } = "";
     public string ExecutionMode { get; init; } = "";
     public float ResolutionScale { get; init; }
     public int SampleCount { get; init; }
+    public int TargetSamples { get; init; }
+    public int SamplesPerIteration { get; init; }
+    public int PreviewEverySamples { get; init; }
     public GraphNode[] Nodes { get; init; } = [];
     public GraphLink[] Links { get; init; } = [];
     public string[] TopologicalOrder { get; init; } = [];
@@ -36,16 +45,34 @@ internal sealed class RenderGraphDocument
         RenderGraphDocument graph;
         try
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            graph = JsonSerializer.Deserialize<RenderGraphDocument>(stream, ProtocolJson.Options)
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            var bytes = buffer.ToArray();
+            graph = JsonSerializer.Deserialize<RenderGraphDocument>(bytes, ProtocolJson.Options)
                 ?? throw new InvalidDataException("Render graph JSON contains null.");
+            return graph.Validate(ContentFingerprint(bytes));
         }
         catch (JsonException exception)
         {
             throw new InvalidDataException($"Render graph JSON is invalid: {exception.Message}", exception);
         }
+    }
 
-        return graph.Validate();
+    private static string ContentFingerprint(byte[] bytes)
+    {
+        var document = JsonNode.Parse(bytes)?.AsObject()
+            ?? throw new InvalidDataException("Render graph JSON contains null.");
+        if (!document.Remove("generationId"))
+        {
+            throw new InvalidDataException("Render graph generationId is missing.");
+        }
+        var content = JsonSerializer.SerializeToUtf8Bytes(document, ProtocolJson.Options);
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
     }
 
     public static RenderGraphExecution LoadMinimalRaster(string path)
@@ -55,7 +82,7 @@ internal sealed class RenderGraphDocument
         return graph;
     }
 
-    private RenderGraphExecution Validate()
+    private RenderGraphExecution Validate(string graphFingerprint)
     {
         if (SchemaVersion != CurrentSchemaVersion)
         {
@@ -68,7 +95,15 @@ internal sealed class RenderGraphDocument
         }
         RequireNonEmpty(GraphId, "graphId");
         RequireNonEmpty(ViewId, "viewId");
-        if (ExecutionMode is not ("REALTIME" or "ON_DEMAND" or "PROGRESSIVE" or "OFFLINE"))
+        var executionMode = ExecutionMode switch
+        {
+            "REALTIME" => RenderExecutionMode.Realtime,
+            "ON_DEMAND" => RenderExecutionMode.OnDemand,
+            "PROGRESSIVE" => RenderExecutionMode.Progressive,
+            "OFFLINE" => RenderExecutionMode.Offline,
+            _ => (RenderExecutionMode?)null
+        };
+        if (executionMode is null)
         {
             throw new InvalidDataException($"Unsupported graph executionMode: '{ExecutionMode}'.");
         }
@@ -79,6 +114,21 @@ internal sealed class RenderGraphDocument
         if (SampleCount is not (1 or 2 or 4 or 8 or 16))
         {
             throw new InvalidDataException("Render graph sampleCount must be 1, 2, 4, 8, or 16.");
+        }
+        if (TargetSamples is < 0 or > MaximumScheduledSamples)
+        {
+            throw new InvalidDataException(
+                $"Render graph targetSamples must be between 0 and {MaximumScheduledSamples}.");
+        }
+        if (SamplesPerIteration is < 0 or > MaximumScheduledSamples)
+        {
+            throw new InvalidDataException(
+                $"Render graph samplesPerIteration must be between 0 and {MaximumScheduledSamples}.");
+        }
+        if (PreviewEverySamples is < 0 or > MaximumScheduledSamples)
+        {
+            throw new InvalidDataException(
+                $"Render graph previewEverySamples must be between 0 and {MaximumScheduledSamples}.");
         }
         if (Output is null)
         {
@@ -104,7 +154,7 @@ internal sealed class RenderGraphDocument
             }
             RequireNonEmpty(node.NodeId, "nodes.nodeId");
             RequireNonEmpty(node.Kind, "nodes.kind");
-            if (node.Kind is not ("scene" or "pass" or "output"))
+            if (node.Kind is not ("scene" or "pass" or "output" or "history-read" or "history-write"))
             {
                 throw new InvalidDataException(
                     $"Render graph node '{node.NodeId}' has unsupported kind '{node.Kind}'.");
@@ -122,6 +172,15 @@ internal sealed class RenderGraphDocument
                         $"Render graph pass '{node.NodeId}' has invalid passGuid '{node.PassGuid}'.");
                 }
                 RequireNonEmpty(node.TypeName, "nodes.typeName");
+            }
+            else if (node.Kind is "history-read" or "history-write")
+            {
+                RequireNonEmpty(node.HistoryKey, "nodes.historyKey");
+                if (node.HistoryKey.Length > 128 || node.HistoryKey.Any(char.IsControl))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph history key '{node.HistoryKey}' is invalid.");
+                }
             }
         }
 
@@ -162,11 +221,6 @@ internal sealed class RenderGraphDocument
 
         var nodesById = Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
         var orderedNodes = TopologicalOrder.Select(nodeId => nodesById[nodeId]).ToArray();
-        var passes = orderedNodes.Where(node => node.Kind == "pass").ToArray();
-        if (passes.Length == 0)
-        {
-            throw new InvalidDataException("Render graph requires at least one pass node.");
-        }
 
         var scenes = Nodes.Where(node => node.Kind == "scene").ToArray();
         if (scenes.Length != 1)
@@ -188,6 +242,55 @@ internal sealed class RenderGraphDocument
             throw new InvalidDataException("The selected render graph output socket is not connected.");
         }
 
+        var executionNodeIds = new HashSet<string>(StringComparer.Ordinal)
+        {
+            output.NodeId,
+            scenes[0].NodeId
+        };
+        var pendingNodes = new Stack<string>();
+        pendingNodes.Push(output.NodeId);
+        foreach (var historyWrite in Nodes.Where(node => node.Kind == "history-write"))
+        {
+            if (Links.Any(link => string.Equals(link.ToNode, historyWrite.NodeId, StringComparison.Ordinal)))
+            {
+                executionNodeIds.Add(historyWrite.NodeId);
+                pendingNodes.Push(historyWrite.NodeId);
+            }
+        }
+        var incomingNodes = Links
+            .GroupBy(link => link.ToNode, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(link => link.FromNode).Distinct(StringComparer.Ordinal).ToArray(),
+                StringComparer.Ordinal);
+        while (pendingNodes.TryPop(out var nodeId))
+        {
+            if (!incomingNodes.TryGetValue(nodeId, out var dependencies))
+            {
+                continue;
+            }
+            foreach (var dependency in dependencies)
+            {
+                if (executionNodeIds.Add(dependency))
+                {
+                    pendingNodes.Push(dependency);
+                }
+            }
+        }
+
+        var executionNodes = orderedNodes
+            .Where(node => executionNodeIds.Contains(node.NodeId))
+            .ToArray();
+        var executionLinks = Links
+            .Where(link => executionNodeIds.Contains(link.FromNode) &&
+                           executionNodeIds.Contains(link.ToNode))
+            .ToArray();
+        var passes = executionNodes.Where(node => node.Kind == "pass").ToArray();
+        if (passes.Length == 0)
+        {
+            throw new InvalidDataException("Render graph output does not depend on a pass node.");
+        }
+
         if (Links.Any(link => nodesById[link.FromNode].Kind == "output"))
         {
             throw new InvalidDataException("Render graph output nodes cannot be resource sources.");
@@ -197,17 +300,88 @@ internal sealed class RenderGraphDocument
             throw new InvalidDataException("Render graph scene nodes cannot have resource inputs.");
         }
 
+        var historyReads = executionNodes.Where(node => node.Kind == "history-read").ToArray();
+        var historyWrites = executionNodes.Where(node => node.Kind == "history-write").ToArray();
+        RequireUniqueHistoryKeys(historyReads, "read");
+        RequireUniqueHistoryKeys(historyWrites, "write");
+        foreach (var read in historyReads)
+        {
+            if (executionLinks.Any(link => string.Equals(link.ToNode, read.NodeId, StringComparison.Ordinal)))
+            {
+                throw new InvalidDataException($"History Read '{read.HistoryKey}' cannot have inputs.");
+            }
+            if (executionLinks.Any(link =>
+                    string.Equals(link.FromNode, read.NodeId, StringComparison.Ordinal) &&
+                    !string.Equals(link.FromSocket, HistoryReadSocketGuid, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidDataException(
+                    $"History Read '{read.HistoryKey}' uses an unknown output socket.");
+            }
+        }
+        foreach (var write in historyWrites)
+        {
+            var incoming = executionLinks.Where(link =>
+                string.Equals(link.ToNode, write.NodeId, StringComparison.Ordinal)).ToArray();
+            if (incoming.Length != 1 ||
+                !string.Equals(incoming[0].ToSocket, HistoryWriteSocketGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"History Write '{write.HistoryKey}' requires exactly one Current input.");
+            }
+            if (executionLinks.Any(link => string.Equals(link.FromNode, write.NodeId, StringComparison.Ordinal)))
+            {
+                throw new InvalidDataException($"History Write '{write.HistoryKey}' cannot produce current-frame links.");
+            }
+        }
+
+        var selectedAov = string.IsNullOrWhiteSpace(Output.Aov) ? "Combined" : Output.Aov.Trim();
+        if (selectedAov.Length > 128 || selectedAov.Any(char.IsControl))
+        {
+            throw new InvalidDataException("Render graph output.aov is invalid.");
+        }
+
+        var samplesPerIteration = SamplesPerIteration == 0 ? 1 : SamplesPerIteration;
+        var previewEverySamples = PreviewEverySamples == 0 ? 1 : PreviewEverySamples;
+        var targetSamples = TargetSamples;
+        if (targetSamples == 0 && executionMode.Value != RenderExecutionMode.Progressive)
+        {
+            targetSamples = 1;
+        }
+
         return new RenderGraphExecution(
             GenerationId,
             GraphId,
             ViewId,
+            string.IsNullOrWhiteSpace(ViewKind) ? "CUSTOM" : ViewKind,
+            executionMode.Value,
             (Feather.SampleCount)SampleCount,
-            Nodes,
-            Links,
+            targetSamples,
+            samplesPerIteration,
+            previewEverySamples,
+            selectedAov,
+            executionNodes,
+            executionLinks,
             passes,
             scenes[0],
             output,
-            outputLink);
+            outputLink,
+            historyReads,
+            historyWrites)
+        {
+            GraphFingerprint = graphFingerprint
+        };
+
+        static void RequireUniqueHistoryKeys(GraphNode[] nodes, string direction)
+        {
+            var duplicate = nodes
+                .GroupBy(node => node.HistoryKey, StringComparer.Ordinal)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicate is not null)
+            {
+                throw new InvalidDataException(
+                    $"Render graph contains duplicate History {direction} key '{duplicate.Key}'.");
+            }
+        }
     }
 
     private static void RequireNonEmpty(string value, string name)
@@ -223,14 +397,33 @@ internal sealed record RenderGraphExecution(
     string GenerationId,
     string GraphId,
     string ViewId,
+    string ViewKind,
+    RenderExecutionMode ExecutionMode,
     Feather.SampleCount SampleCount,
+    int TargetSamples,
+    int SamplesPerIteration,
+    int PreviewEverySamples,
+    string SelectedAov,
     GraphNode[] Nodes,
     GraphLink[] Links,
     GraphNode[] Passes,
     GraphNode Scene,
     GraphNode Output,
-    GraphLink OutputLink)
+    GraphLink OutputLink,
+    GraphNode[] HistoryReads,
+    GraphNode[] HistoryWrites)
 {
+    public string GraphFingerprint { get; init; } = "";
+
+    public string ExecutionModeName => ExecutionMode switch
+    {
+        RenderExecutionMode.Realtime => "REALTIME",
+        RenderExecutionMode.OnDemand => "ON_DEMAND",
+        RenderExecutionMode.Progressive => "PROGRESSIVE",
+        RenderExecutionMode.Offline => "OFFLINE",
+        _ => throw new ArgumentOutOfRangeException(nameof(ExecutionMode))
+    };
+
     public GraphNode Pass => Passes.Single();
 
     public MinimalRasterSettings Settings => MinimalRasterSettings.FromParameters(Pass.Parameters);
@@ -293,6 +486,7 @@ internal sealed class GraphNode
     public string TypeName { get; init; } = "";
     public bool Muted { get; init; }
     public JsonElement Parameters { get; init; }
+    public string HistoryKey { get; init; } = "";
 }
 
 internal sealed class GraphLink
@@ -307,6 +501,15 @@ internal sealed class GraphOutput
 {
     public string NodeId { get; init; } = "";
     public string SocketGuid { get; init; } = "";
+    public string Aov { get; init; } = "";
+}
+
+internal enum RenderExecutionMode
+{
+    Realtime,
+    OnDemand,
+    Progressive,
+    Offline
 }
 
 internal sealed record MinimalRasterSettings(

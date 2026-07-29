@@ -65,6 +65,12 @@ public sealed class RenderHostGpuTests
         Assert.True(first.PassReloaded);
         Assert.Equal(HotReloadPassType, first.PassType);
         Assert.Equal("TypedEasyGpu", first.DispatchPath);
+        Assert.True(first.GpuReadbackMilliseconds > 0.0);
+        Assert.True(first.PassExecutionMilliseconds >= first.GpuReadbackMilliseconds);
+        Assert.True(first.SceneLoadMilliseconds >= 0.0);
+        Assert.True(first.SceneBuildMilliseconds >= 0.0);
+        Assert.True(first.FrameWriteMilliseconds > 0.0);
+        Assert.True(first.TotalMilliseconds >= first.PassExecutionMilliseconds);
         Assert.True(
             firstChannels.Red > firstChannels.Blue * 3,
             $"Expected a red shader result, got R={firstChannels.Red}, B={firstChannels.Blue}.");

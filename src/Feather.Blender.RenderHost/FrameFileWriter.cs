@@ -59,7 +59,6 @@ internal static class FrameFileWriter
                 BinaryPrimitives.WriteUInt64LittleEndian(header[32..40], frameId);
                 stream.Write(header);
                 stream.Write(MemoryMarshal.AsBytes(frame.Pixels.AsSpan()));
-                stream.Flush(flushToDisk: true);
             }
 
             File.Move(temporaryPath, outputPath, overwrite: true);

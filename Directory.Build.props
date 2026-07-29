@@ -9,19 +9,20 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.2.0</VersionPrefix>
-    <VersionSuffix>preview.1</VersionSuffix>
+    <VersionSuffix>preview.2</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
     <RepositoryUrl>https://github.com/FeatherCompute/Feather</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <FeatherPackRepositoryDocs Condition="'$(FeatherPackRepositoryDocs)' == ''">true</FeatherPackRepositoryDocs>
+    <PackageReadmeFile Condition="'$(FeatherPackRepositoryDocs)' == 'true'">README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds GPU struct instance callables with mutable receiver writeback, generic interface monomorphization for supported shader callables, inout callable parameter lowering through FEIR and EasyGPU, and updated documentation and samples for object-style GPU value patterns.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds the public Blender RenderGraph and scene-resource APIs, the version-matched Feather Blender RenderHost tool, and updated graphics pipeline support.</PackageReleaseNotes>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+  <ItemGroup Condition="'$(IsPackable)' == 'true' and '$(FeatherPackRepositoryDocs)' == 'true'">
     <None Include="$(MSBuildThisFileDirectory)README.md"
           Pack="true"
           PackagePath="\"

@@ -231,6 +231,7 @@ most applications should not reference them directly:
 | [`FeatherCompute.Native`](https://www.nuget.org/packages/FeatherCompute.Native) | Native loader and P/Invoke layer used by the main package. |
 | [`FeatherCompute.NativeAssets`](https://www.nuget.org/packages/FeatherCompute.NativeAssets) | RID-specific native binaries staged under NuGet's `runtimes/<rid>/native` layout. |
 | [`FeatherCompute.Generators`](https://www.nuget.org/packages/FeatherCompute.Generators) | Roslyn source generator package for advanced analyzer-only scenarios. |
+| `FeatherCompute.Blender.RenderHost` | Version-matched local .NET tool launched by Feather Blender projects. |
 
 When consuming Feather from this repository, reference both the runtime project and the generator project:
 

@@ -4,6 +4,7 @@ internal sealed class RenderHostRunner : IDisposable
 {
     private readonly MinimalRasterRenderer renderer = new();
     private readonly ProjectPassAssemblyManager projectPasses = new();
+    private readonly RenderScheduler scheduler = new();
 
     internal WeakReference? LastUnloadedPassContextForTesting
         => projectPasses.LastUnloadedContextForTesting;
@@ -11,6 +12,7 @@ internal sealed class RenderHostRunner : IDisposable
     public RenderHostResult RenderOnce(string requestPath)
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
+        var stage = System.Diagnostics.Stopwatch.StartNew();
         var request = RenderRequest.Load(requestPath);
         var graph = RenderGraphDocument.Load(request.GraphPath);
         if (!string.Equals(request.GenerationId, graph.GenerationId, StringComparison.Ordinal))
@@ -23,33 +25,47 @@ internal sealed class RenderHostRunner : IDisposable
             throw new InvalidDataException(
                 $"Render request view '{request.ViewId}' does not match graph view '{graph.ViewId}'.");
         }
+        stage.Stop();
+        var protocolLoadMilliseconds = stage.Elapsed.TotalMilliseconds;
 
+        stage.Restart();
         var snapshot = SceneSnapshot.Load(request.ScenePath);
         if (!string.Equals(request.GenerationId, snapshot.Metadata.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 $"Render request generation '{request.GenerationId}' does not match scene generation '{snapshot.Metadata.GenerationId}'.");
         }
-        var geometry = SceneGeometryBuilder.Build(snapshot);
+        stage.Stop();
+        var sceneLoadMilliseconds = stage.Elapsed.TotalMilliseconds;
+        var viewState = scheduler.Prepare(request, graph, snapshot.ContentFingerprint);
+        stage.Restart();
+        var scene = SceneResourceBuilder.Build(snapshot);
+        stage.Stop();
+        var sceneBuildMilliseconds = stage.Elapsed.TotalMilliseconds;
+        var geometry = scene.Geometry;
         RenderedFrame frame;
         string buildId;
         string passType;
         var passCount = 1;
         var passReloaded = false;
+        var gpuReadbackMilliseconds = 0.0;
+        stage.Restart();
         if (request.ManifestPath is not null)
         {
             var execution = projectPasses.Execute(
                 request.ManifestPath,
                 graph,
-                geometry,
+                scene,
                 request.Width,
                 request.Height,
-                request.ViewProjection);
+                request.ViewProjection,
+                viewState);
             frame = execution.Frame;
             buildId = execution.BuildId;
             passType = execution.PassType;
             passCount = execution.PassCount;
             passReloaded = execution.Reloaded;
+            gpuReadbackMilliseconds = execution.GpuReadbackMilliseconds;
         }
         else
         {
@@ -64,7 +80,17 @@ internal sealed class RenderHostRunner : IDisposable
             buildId = "builtin";
             passType = RenderGraphDocument.MinimalRasterPassType;
         }
-        FrameFileWriter.WriteAtomic(request.OutputPath, request.RequestId, frame);
+        stage.Stop();
+        var passExecutionMilliseconds = stage.Elapsed.TotalMilliseconds;
+        var iteration = viewState.CompleteIteration(graph);
+        var frameWriteMilliseconds = 0.0;
+        if (iteration.PublishFrame)
+        {
+            stage.Restart();
+            FrameFileWriter.WriteAtomic(request.OutputPath, request.RequestId, frame);
+            stage.Stop();
+            frameWriteMilliseconds = stage.Elapsed.TotalMilliseconds;
+        }
         started.Stop();
 
         return new RenderHostResult(
@@ -79,6 +105,22 @@ internal sealed class RenderHostRunner : IDisposable
             passType,
             passCount,
             passReloaded,
+            graph.ExecutionModeName,
+            graph.SelectedAov,
+            graph.TargetSamples,
+            iteration.Iteration,
+            iteration.AccumulatedSamples,
+            iteration.PublishFrame,
+            iteration.Completed,
+            iteration.NeedsMoreWork,
+            iteration.HistoryReset,
+            iteration.ResetCount,
+            protocolLoadMilliseconds,
+            sceneLoadMilliseconds,
+            sceneBuildMilliseconds,
+            passExecutionMilliseconds,
+            gpuReadbackMilliseconds,
+            frameWriteMilliseconds,
             started.Elapsed.TotalMilliseconds);
     }
 
@@ -101,4 +143,20 @@ internal sealed record RenderHostResult(
     string PassType,
     int PassCount,
     bool PassReloaded,
+    string ExecutionMode,
+    string Aov,
+    int TargetSamples,
+    long Iteration,
+    long AccumulatedSamples,
+    bool FramePublished,
+    bool Completed,
+    bool NeedsMoreWork,
+    bool HistoryReset,
+    long ResetCount,
+    double ProtocolLoadMilliseconds,
+    double SceneLoadMilliseconds,
+    double SceneBuildMilliseconds,
+    double PassExecutionMilliseconds,
+    double GpuReadbackMilliseconds,
+    double FrameWriteMilliseconds,
     double TotalMilliseconds);

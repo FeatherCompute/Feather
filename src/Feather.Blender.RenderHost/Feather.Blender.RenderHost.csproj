@@ -3,18 +3,38 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <IsPackable>false</IsPackable>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>feather-blender-renderhost</ToolCommandName>
+    <PackageId>FeatherCompute.Blender.RenderHost</PackageId>
+    <Title>FeatherCompute Blender RenderHost</Title>
+    <Description>Version-matched out-of-process Feather renderer for the Feather Blender fork.</Description>
+    <FeatherPackRepositoryDocs>false</FeatherPackRepositoryDocs>
+    <PackageReadmeFile>blender-render-host.md</PackageReadmeFile>
+    <NativeAssetStagingRoot Condition="'$(NativeAssetStagingRoot)' == ''">$(MSBuildThisFileDirectory)../../artifacts/native-assets/</NativeAssetStagingRoot>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Feather\Feather.csproj" />
     <ProjectReference Include="..\Feather.Generators\Feather.Generators.csproj"
                       OutputItemType="Analyzer"
-                      ReferenceOutputAssembly="false" />
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Feather.Blender.RenderHost.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../docs/blender-render-host.md"
+          Pack="true"
+          PackagePath="blender-render-host.md"
+          Visible="false" />
+    <None Include="$(NativeAssetStagingRoot)runtimes/**/native/*"
+          Pack="true"
+          PackagePath="tools/net10.0/any/runtimes/%(RecursiveDir)%(Filename)%(Extension)"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

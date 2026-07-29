@@ -72,11 +72,53 @@ public class PublicApiTests
         var vertex = new SceneVertex
         {
             Position = new float3(1, 2, 3),
-            Normal = new float3(0, 0, 1)
+            Normal = new float3(0, 0, 1),
+            UV = new float2(0.25f, 0.75f)
         };
-        var geometry = new SceneGeometry(new[] { vertex }, Array.Empty<uint>());
+        var geometry = new SceneGeometry(
+            new[] { vertex },
+            new uint[] { 0, 0, 0 },
+            new[] { new SceneSubmesh(0, 3, 0) });
         var camera = new RenderCamera(float4x4.Identity);
-        var backend = new FakeRenderContextBackend(geometry, camera);
+        var material = new SceneMaterial(
+            "material-0",
+            "Material",
+            new float4(0.1f, 0.2f, 0.3f, 1.0f),
+            0.4f,
+            0.5f,
+            new float4(0.0f, 0.0f, 0.0f, 1.0f),
+            1.0f,
+            emissionStrength: 2.0f);
+        var materials = new SceneMaterialTable(new[] { material }, 0);
+        var texture = new SceneTexture(
+            "texture-0",
+            "Texture",
+            1,
+            1,
+            new[] { new Rgba8(1, 2, 3, 255) },
+            "sRGB",
+            "STRAIGHT",
+            "GENERATED",
+            "hash");
+        var textures = new SceneTextureTable(new[] { texture });
+        var light = new SceneLight(
+            "Key",
+            SceneLightType.Directional,
+            float4x4.Identity,
+            new float3(1.0f, 0.9f, 0.8f),
+            2.0f,
+            0.1f,
+            0.0f,
+            0.0f);
+        var lights = new SceneLightTable(new[] { light });
+        var time = new RenderTime(12, 0.25f);
+        var backend = new FakeRenderContextBackend(
+            geometry,
+            camera,
+            materials,
+            textures,
+            lights,
+            time);
         var context = new RenderContext(backend);
 
         Assert.Equal(320, context.Width);
@@ -84,6 +126,15 @@ public class PublicApiTests
         Assert.Equal(SampleCount.X4, context.SampleCount);
         Assert.Same(geometry, context.GetSceneGeometry(new SceneGeometryHandle(1)));
         Assert.Equal(camera, context.GetCamera(new CameraHandle(2)));
+        Assert.Equal(new float2(0.25f, 0.75f), geometry.Vertices.Span[0].UV);
+        Assert.Equal(new SceneSubmesh(0, 3, 0), geometry.Submeshes.Span[0]);
+        Assert.Same(materials, context.GetMaterials(new MaterialTableHandle(4)));
+        Assert.Same(textures, context.GetTextures(new TextureTableHandle(5)));
+        Assert.Same(lights, context.GetLights(new LightTableHandle(6)));
+        Assert.Equal(time, context.GetTime(new TimeHandle(7)));
+        Assert.Equal(2.0f, material.EmissionStrength);
+        Assert.Equal(new Rgba8(1, 2, 3, 255), texture.Pixels.Span[0]);
+        Assert.Equal(new float3(0.0f, 0.0f, -1.0f), light.Direction);
         Assert.Equal(
             new Rgba8(10, 20, 30, 255),
             context.GetColorInput(new TextureHandle(3)).Span[0]);
@@ -91,6 +142,21 @@ public class PublicApiTests
         Assert.Throws<ArgumentException>(() => new SceneGeometry(
             Array.Empty<SceneVertex>(),
             new uint[] { 0, 1 }));
+    }
+
+    [Fact]
+    public void ExistingRenderContextBackendsCanOmitNewSceneTables()
+    {
+        var context = new RenderContext(new LegacyRenderContextBackend());
+
+        Assert.Throws<NotSupportedException>(
+            () => context.GetMaterials(new MaterialTableHandle(1)));
+        Assert.Throws<NotSupportedException>(
+            () => context.GetTextures(new TextureTableHandle(1)));
+        Assert.Throws<NotSupportedException>(
+            () => context.GetLights(new LightTableHandle(1)));
+        Assert.Throws<NotSupportedException>(
+            () => context.GetTime(new TimeHandle(1)));
     }
 
     [Fact]
@@ -262,7 +328,11 @@ public class PublicApiTests
 
     private sealed class FakeRenderContextBackend(
         SceneGeometry geometry,
-        RenderCamera camera) : IRenderContextBackend
+        RenderCamera camera,
+        SceneMaterialTable materials,
+        SceneTextureTable textures,
+        SceneLightTable lights,
+        RenderTime time) : IRenderContextBackend
     {
         public int Width => 320;
         public int Height => 180;
@@ -274,6 +344,18 @@ public class PublicApiTests
         public RenderCamera GetCamera(CameraHandle handle)
             => handle.Value == 2 ? camera : throw new KeyNotFoundException();
 
+        public SceneMaterialTable GetMaterials(MaterialTableHandle handle)
+            => handle.Value == 4 ? materials : throw new KeyNotFoundException();
+
+        public SceneTextureTable GetTextures(TextureTableHandle handle)
+            => handle.Value == 5 ? textures : throw new KeyNotFoundException();
+
+        public SceneLightTable GetLights(LightTableHandle handle)
+            => handle.Value == 6 ? lights : throw new KeyNotFoundException();
+
+        public RenderTime GetTime(TimeHandle handle)
+            => handle.Value == 7 ? time : throw new KeyNotFoundException();
+
         public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
             => handle.Value == 3
                 ? new[] { new Rgba8(10, 20, 30, 255) }
@@ -283,6 +365,26 @@ public class PublicApiTests
             TextureHandle handle,
             Rgba8[] pixels,
             DispatchPath dispatchPath)
+        {
+        }
+    }
+
+    private sealed class LegacyRenderContextBackend : IRenderContextBackend
+    {
+        public int Width => 1;
+        public int Height => 1;
+        public SampleCount SampleCount => SampleCount.X1;
+
+        public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
+            => new(Array.Empty<SceneVertex>(), Array.Empty<uint>());
+
+        public RenderCamera GetCamera(CameraHandle handle)
+            => new(float4x4.Identity);
+
+        public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
+            => ReadOnlyMemory<Rgba8>.Empty;
+
+        public void SetColorOutput(TextureHandle handle, Rgba8[] pixels, DispatchPath dispatchPath)
         {
         }
     }

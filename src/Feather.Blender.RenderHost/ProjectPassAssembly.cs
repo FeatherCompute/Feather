@@ -19,10 +19,11 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
     public ProjectPassExecutionResult Execute(
         string manifestPath,
         RenderGraphExecution graph,
-        RenderGeometry geometry,
+        RenderSceneResources scene,
         int width,
         int height,
-        float4x4 viewProjection)
+        float4x4 viewProjection,
+        RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         var manifest = ProjectPassManifest.Load(manifestPath);
@@ -40,7 +41,11 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
             }
         }
 
-        return current!.Execute(graph, geometry, width, height, viewProjection, reloaded);
+        // Each View remembers the assembly build it last executed. A reload may happen while a
+        // different View is active, so checking every execution prevents stale per-View history.
+        viewState.PreparePassBuild(manifest.BuildId, graph);
+
+        return current!.Execute(graph, scene, width, height, viewProjection, reloaded, viewState);
     }
 
     public void Dispose()
@@ -65,7 +70,8 @@ internal sealed record ProjectPassExecutionResult(
     string BuildId,
     string PassType,
     int PassCount,
-    bool Reloaded);
+    bool Reloaded,
+    double GpuReadbackMilliseconds);
 
 internal sealed class PassAssemblyGeneration : IDisposable
 {
@@ -159,21 +165,23 @@ internal sealed class PassAssemblyGeneration : IDisposable
 
     public ProjectPassExecutionResult Execute(
         RenderGraphExecution graph,
-        RenderGeometry geometry,
+        RenderSceneResources scene,
         int width,
         int height,
         float4x4 viewProjection,
-        bool reloaded)
+        bool reloaded,
+        RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         var resources = new GraphResourceResolver(graph, manifest);
         var backend = new ProjectRenderContextBackend(
-            geometry,
+            scene,
             width,
             height,
             graph.SampleCount,
             viewProjection,
-            resources);
+            resources,
+            viewState.History);
         var executedTypes = new List<string>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
         {
@@ -202,12 +210,16 @@ internal sealed class PassAssemblyGeneration : IDisposable
         var finalHandle = resources.ResolveTextureSource(
             graph.OutputLink.FromNode,
             graph.OutputLink.FromSocket);
+        var frame = backend.TakeFrame(finalHandle);
+        var historyUpdates = backend.CaptureHistory();
+        viewState.CommitHistory(historyUpdates);
         return new ProjectPassExecutionResult(
-            backend.TakeFrame(finalHandle),
+            frame,
             manifest.BuildId,
             executedTypes.LastOrDefault() ?? "bypass",
             executedTypes.Count,
-            reloaded);
+            reloaded,
+            backend.GpuReadbackMilliseconds);
     }
 
     public void Dispose()
@@ -537,12 +549,20 @@ internal sealed class GraphResourceResolver
     private readonly RenderGraphExecution graph;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
+    private readonly HashSet<ulong> writableTextureHandles = [];
+    private readonly Dictionary<string, TextureHandle> historyReadHandles = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TextureHandle> historyWriteSources = new(StringComparer.Ordinal);
     private ulong nextTextureHandle = FirstTextureHandle;
 
     public GraphResourceResolver(RenderGraphExecution graph, ProjectPassManifest manifest)
     {
         this.graph = graph;
         this.manifest = manifest;
+
+        foreach (var historyRead in graph.HistoryReads)
+        {
+            historyReadHandles.Add(historyRead.HistoryKey, new TextureHandle(nextTextureHandle++));
+        }
 
         foreach (var passNode in graph.Passes)
         {
@@ -572,6 +592,15 @@ internal sealed class GraphResourceResolver
             {
                 throw new InvalidDataException(
                     $"Graph output '{target.NodeId}.{link.ToSocket}' requires a Texture2D resource.");
+            }
+            else if (target.Kind == "history-write")
+            {
+                if (!IsTexture(source.ResourceKind) || source.Handle is not TextureHandle texture)
+                {
+                    throw new InvalidDataException(
+                        $"History Write '{target.HistoryKey}' requires a Texture2D resource.");
+                }
+                historyWriteSources.Add(target.HistoryKey, texture);
             }
         }
 
@@ -607,7 +636,11 @@ internal sealed class GraphResourceResolver
     }
 
     public bool IsWritable(TextureHandle handle)
-        => textureHandles.Values.Contains(handle);
+        => writableTextureHandles.Contains(handle.Value);
+
+    public IReadOnlyDictionary<string, TextureHandle> HistoryReadHandles => historyReadHandles;
+
+    public IReadOnlyDictionary<string, TextureHandle> HistoryWriteSources => historyWriteSources;
 
     private ResolvedGraphResource ResolveInput(
         GraphNode passNode,
@@ -628,6 +661,21 @@ internal sealed class GraphResourceResolver
         if (node.Kind == "scene")
         {
             return SceneResource(socketGuid);
+        }
+        if (node.Kind == "history-read")
+        {
+            if (!string.Equals(
+                    socketGuid,
+                    RenderGraphDocument.HistoryReadSocketGuid,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"History Read '{node.HistoryKey}' has no output socket {socketGuid}.");
+            }
+            return new ResolvedGraphResource(
+                "Texture2D",
+                "Unknown",
+                historyReadHandles[node.HistoryKey]);
         }
         if (node.Kind != "pass")
         {
@@ -672,6 +720,7 @@ internal sealed class GraphResourceResolver
         {
             handle = new TextureHandle(nextTextureHandle++);
             textureHandles.Add(key, handle);
+            writableTextureHandles.Add(handle.Value);
         }
         return handle;
     }
@@ -900,29 +949,63 @@ internal static class PassMemberBinder
 internal sealed class ProjectRenderContextBackend : IRenderContextBackend
 {
     private readonly SceneGeometry geometry;
+    private readonly SceneMaterialTable materials;
+    private readonly SceneTextureTable textures;
     private readonly RenderCamera camera;
+    private readonly SceneLightTable lights;
+    private readonly RenderTime time;
     private readonly GraphResourceResolver resources;
     private readonly Dictionary<ulong, RenderedFrame> frames = new();
 
     public ProjectRenderContextBackend(
-        RenderGeometry geometry,
+        RenderSceneResources scene,
         int width,
         int height,
         SampleCount sampleCount,
         float4x4 viewProjection,
-        GraphResourceResolver resources)
+        GraphResourceResolver resources,
+        IReadOnlyDictionary<string, RenderedFrame> history)
     {
-        this.geometry = new SceneGeometry(geometry.Vertices, geometry.Indices);
+        geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
+        materials = scene.Materials;
+        textures = scene.Textures;
         camera = new RenderCamera(viewProjection);
+        lights = scene.Lights;
+        time = scene.Time;
         this.resources = resources;
         Width = width;
         Height = height;
         SampleCount = sampleCount;
+
+        foreach (var (key, handle) in resources.HistoryReadHandles)
+        {
+            RenderedFrame frame;
+            if (history.TryGetValue(key, out var previous))
+            {
+                if (previous.Width != width || previous.Height != height)
+                {
+                    throw new InvalidDataException(
+                        $"History resource '{key}' dimensions do not match the current render request.");
+                }
+                frame = previous;
+            }
+            else
+            {
+                var pixels = new Rgba8[checked(width * height)];
+                Array.Fill(pixels, new Rgba8(0, 0, 0, 255));
+                frame = new RenderedFrame(width, height, pixels, DispatchPath.None);
+            }
+            frames.Add(handle.Value, frame);
+        }
     }
 
     public int Width { get; }
     public int Height { get; }
     public SampleCount SampleCount { get; }
+    public double GpuReadbackMilliseconds { get; private set; }
+
+    public void ReportGpuReadback(TimeSpan elapsed)
+        => GpuReadbackMilliseconds += elapsed.TotalMilliseconds;
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
         => handle.Value == PassMemberBinder.GeometryHandleValue
@@ -933,6 +1016,26 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         => handle.Value == PassMemberBinder.CameraHandleValue
             ? camera
             : throw new KeyNotFoundException($"Unknown camera handle {handle.Value}.");
+
+    public SceneMaterialTable GetMaterials(MaterialTableHandle handle)
+        => handle.Value == PassMemberBinder.MaterialsHandleValue
+            ? materials
+            : throw new KeyNotFoundException($"Unknown material table handle {handle.Value}.");
+
+    public SceneTextureTable GetTextures(TextureTableHandle handle)
+        => handle.Value == PassMemberBinder.TexturesHandleValue
+            ? textures
+            : throw new KeyNotFoundException($"Unknown texture table handle {handle.Value}.");
+
+    public SceneLightTable GetLights(LightTableHandle handle)
+        => handle.Value == PassMemberBinder.LightsHandleValue
+            ? lights
+            : throw new KeyNotFoundException($"Unknown light table handle {handle.Value}.");
+
+    public RenderTime GetTime(TimeHandle handle)
+        => handle.Value == PassMemberBinder.TimeHandleValue
+            ? time
+            : throw new KeyNotFoundException($"Unknown time handle {handle.Value}.");
 
     public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
         => frames.TryGetValue(handle.Value, out var frame)
@@ -966,4 +1069,19 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             ? frame
             : throw new InvalidDataException(
                 $"The selected graph texture {handle.Value} was not produced.");
+
+    public IReadOnlyDictionary<string, RenderedFrame> CaptureHistory()
+    {
+        var result = new Dictionary<string, RenderedFrame>(StringComparer.Ordinal);
+        foreach (var (key, handle) in resources.HistoryWriteSources)
+        {
+            if (!frames.TryGetValue(handle.Value, out var frame))
+            {
+                throw new InvalidDataException(
+                    $"History Write '{key}' references texture {handle.Value}, which was not produced.");
+            }
+            result.Add(key, frame);
+        }
+        return result;
+    }
 }

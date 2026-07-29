@@ -1,15 +1,21 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Feather.Math;
 using Feather.RenderGraph;
 
 namespace Feather.Blender.RenderHost;
 
-internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
+internal sealed record SceneSnapshot(
+    SceneMetadata Metadata,
+    byte[] Payload,
+    string ContentFingerprint)
 {
     private static ReadOnlySpan<byte> Magic => "FTHSCN01"u8;
     private const int HeaderSize = 24;
-    private const int CurrentSchemaVersion = 1;
+    private const int MinimumSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
     private const int MaximumMetadataLength = 64 * 1024 * 1024;
     private const int MaximumPayloadLength = 1024 * 1024 * 1024;
 
@@ -31,7 +37,7 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
         var version = BinaryPrimitives.ReadUInt32LittleEndian(header[8..12]);
         var metadataLength = BinaryPrimitives.ReadUInt32LittleEndian(header[12..16]);
         var payloadLength = BinaryPrimitives.ReadUInt64LittleEndian(header[16..24]);
-        if (version != CurrentSchemaVersion)
+        if (version is < MinimumSchemaVersion or > CurrentSchemaVersion)
         {
             throw new InvalidDataException($"Unsupported scene snapshot version: {version}.");
         }
@@ -67,10 +73,10 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
             throw new InvalidDataException($"Scene snapshot metadata JSON is invalid: {exception.Message}", exception);
         }
 
-        if (metadata.SchemaVersion != CurrentSchemaVersion)
+        if (metadata.SchemaVersion != version)
         {
             throw new InvalidDataException(
-                $"Scene metadata schema version {metadata.SchemaVersion} does not match the file header.");
+                $"Scene metadata schema version {metadata.SchemaVersion} does not match file header version {version}.");
         }
         if (!Guid.TryParse(metadata.GenerationId, out _))
         {
@@ -81,12 +87,27 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
             throw new InvalidDataException($"Unsupported scene matrix layout: '{metadata.MatrixLayout}'.");
         }
 
-        return new SceneSnapshot(metadata, payload);
+        return new SceneSnapshot(metadata, payload, ContentFingerprintFrom(metadataBytes, payload));
+    }
+
+    private static string ContentFingerprintFrom(byte[] metadataBytes, byte[] payload)
+    {
+        var metadata = JsonNode.Parse(metadataBytes)?.AsObject()
+            ?? throw new InvalidDataException("Scene snapshot metadata contains null.");
+        if (!metadata.Remove("generationId"))
+        {
+            throw new InvalidDataException("Scene snapshot metadata generationId is missing.");
+        }
+
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hasher.AppendData(JsonSerializer.SerializeToUtf8Bytes(metadata, ProtocolJson.Options));
+        hasher.AppendData(payload);
+        return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
     }
 
     public float[] ReadFloat32(ArrayDescriptor descriptor, string name, params int[] expectedShape)
     {
-        ValidateDescriptor(descriptor, name, "float32", expectedShape);
+        ValidateDescriptor(descriptor, name, "float32", sizeof(float), expectedShape);
         var result = new float[descriptor.ByteLength / sizeof(float)];
         var span = Payload.AsSpan(checked((int)descriptor.Offset), descriptor.ByteLength);
         for (var index = 0; index < result.Length; index++)
@@ -103,7 +124,7 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
 
     public uint[] ReadUInt32(ArrayDescriptor descriptor, string name, params int[] expectedShape)
     {
-        ValidateDescriptor(descriptor, name, "uint32", expectedShape);
+        ValidateDescriptor(descriptor, name, "uint32", sizeof(uint), expectedShape);
         var result = new uint[descriptor.ByteLength / sizeof(uint)];
         var span = Payload.AsSpan(checked((int)descriptor.Offset), descriptor.ByteLength);
         for (var index = 0; index < result.Length; index++)
@@ -114,10 +135,17 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
         return result;
     }
 
+    public byte[] ReadUInt8(ArrayDescriptor descriptor, string name, params int[] expectedShape)
+    {
+        ValidateDescriptor(descriptor, name, "uint8", sizeof(byte), expectedShape);
+        return Payload.AsSpan(checked((int)descriptor.Offset), descriptor.ByteLength).ToArray();
+    }
+
     private void ValidateDescriptor(
         ArrayDescriptor descriptor,
         string name,
         string componentType,
+        int componentSize,
         IReadOnlyList<int> expectedShape)
     {
         if (descriptor is null)
@@ -128,10 +156,10 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
         {
             throw new InvalidDataException($"Scene array '{name}' must use {componentType} components.");
         }
-        if (!descriptor.Shape.SequenceEqual(expectedShape))
+        if (descriptor.Shape is null || !descriptor.Shape.SequenceEqual(expectedShape))
         {
             throw new InvalidDataException(
-                $"Scene array '{name}' shape [{string.Join(',', descriptor.Shape)}] does not match " +
+                $"Scene array '{name}' shape [{string.Join(',', descriptor.Shape ?? [])}] does not match " +
                 $"[{string.Join(',', expectedShape)}].");
         }
 
@@ -144,7 +172,7 @@ internal sealed record SceneSnapshot(SceneMetadata Metadata, byte[] Payload)
             }
             elementCount = checked(elementCount * dimension);
         }
-        var expectedLength = checked(elementCount * sizeof(uint));
+        var expectedLength = checked(elementCount * componentSize);
         if (descriptor.ByteLength != expectedLength)
         {
             throw new InvalidDataException(
@@ -167,6 +195,9 @@ internal sealed class SceneMetadata
     public float Subframe { get; init; }
     public SceneMesh[] Meshes { get; init; } = [];
     public SceneInstance[] Instances { get; init; } = [];
+    public SceneMaterialMetadata[] Materials { get; init; } = [];
+    public SceneTextureMetadata[] Textures { get; init; } = [];
+    public SceneLightMetadata[] Lights { get; init; } = [];
 }
 
 internal sealed class SceneMesh
@@ -176,6 +207,7 @@ internal sealed class SceneMesh
     public int VertexCount { get; init; }
     public int CornerCount { get; init; }
     public int TriangleCount { get; init; }
+    public string?[] MaterialSlots { get; init; } = [];
     public SceneMeshAttributes Attributes { get; init; } = new();
 }
 
@@ -185,6 +217,8 @@ internal sealed class SceneMeshAttributes
     public ArrayDescriptor LoopVertexIndices { get; init; } = null!;
     public ArrayDescriptor CornerNormals { get; init; } = null!;
     public ArrayDescriptor TriangleLoopIndices { get; init; } = null!;
+    public ArrayDescriptor? CornerUvs { get; init; }
+    public ArrayDescriptor? TriangleMaterialIndices { get; init; }
 }
 
 internal sealed class ArrayDescriptor
@@ -204,15 +238,84 @@ internal sealed class SceneInstance
     public bool IsInstance { get; init; }
 }
 
-internal sealed record RenderGeometry(SceneVertex[] Vertices, uint[] Indices);
+internal sealed class SceneMaterialMetadata
+{
+    public string MaterialId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public float[] BaseColor { get; init; } = [];
+    public float[] DiffuseColor { get; init; } = [];
+    public float? Metallic { get; init; }
+    public float? Roughness { get; init; }
+    public float[] EmissionColor { get; init; } = [];
+    public float? EmissionStrength { get; init; }
+    public float? Alpha { get; init; }
+    public string? BaseColorTextureId { get; init; }
+    public string? GraphStatus { get; init; }
+    public string? Diagnostic { get; init; }
+    public bool UseNodes { get; init; }
+    public string? NodeTree { get; init; }
+}
+
+internal sealed class SceneTextureMetadata
+{
+    public string TextureId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public int Channels { get; init; }
+    public string ComponentType { get; init; } = "";
+    public string ColorSpace { get; init; } = "";
+    public string AlphaMode { get; init; } = "";
+    public string Source { get; init; } = "";
+    public string ContentHash { get; init; } = "";
+    public string Format { get; init; } = "";
+    public string Origin { get; init; } = "";
+    public bool IsData { get; init; }
+    public bool Packed { get; init; }
+    public ArrayDescriptor Pixels { get; init; } = null!;
+}
+
+internal sealed class SceneLightMetadata
+{
+    public string LightId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string Type { get; init; } = "";
+    public float[] MatrixWorld { get; init; } = [];
+    public float[] Color { get; init; } = [];
+    public float[] Position { get; init; } = [];
+    public float[] Direction { get; init; } = [];
+    public float Energy { get; init; }
+    public float Radius { get; init; }
+    public float SpotSize { get; init; }
+    public float SpotBlend { get; init; }
+    public string? AreaShape { get; init; }
+    public float AreaSize { get; init; }
+    public float AreaSizeY { get; init; }
+}
+
+internal sealed record RenderGeometry(
+    SceneVertex[] Vertices,
+    uint[] Indices,
+    SceneSubmesh[] Submeshes);
 
 internal static class SceneGeometryBuilder
 {
     public static RenderGeometry Build(SceneSnapshot snapshot)
+        => SceneResourceBuilder.Build(snapshot).Geometry;
+
+    internal static RenderGeometry BuildResolved(
+        SceneSnapshot snapshot,
+        IReadOnlyDictionary<string, int> materialIndices,
+        int defaultMaterialIndex)
     {
         var meshes = new Dictionary<string, ParsedMesh>(StringComparer.Ordinal);
-        foreach (var mesh in snapshot.Metadata.Meshes)
+        foreach (var mesh in snapshot.Metadata.Meshes ??
+                 throw new InvalidDataException("Scene metadata meshes are missing."))
         {
+            if (mesh is null)
+            {
+                throw new InvalidDataException("Scene metadata contains a null mesh.");
+            }
             if (string.IsNullOrWhiteSpace(mesh.MeshId) || !meshes.TryAdd(mesh.MeshId, ParseMesh(snapshot, mesh)))
             {
                 throw new InvalidDataException($"Scene contains a missing or duplicate mesh ID '{mesh.MeshId}'.");
@@ -221,8 +324,14 @@ internal static class SceneGeometryBuilder
 
         var vertices = new List<SceneVertex>();
         var indices = new List<uint>();
-        foreach (var instance in snapshot.Metadata.Instances)
+        var submeshes = new List<SceneSubmesh>();
+        foreach (var instance in snapshot.Metadata.Instances ??
+                 throw new InvalidDataException("Scene metadata instances are missing."))
         {
+            if (instance is null)
+            {
+                throw new InvalidDataException("Scene metadata contains a null instance.");
+            }
             if (!meshes.TryGetValue(instance.MeshId, out var mesh))
             {
                 throw new InvalidDataException(
@@ -279,21 +388,32 @@ internal static class SceneGeometryBuilder
                 vertices.Add(new SceneVertex
                 {
                     Position = new float3(position.X, position.Y, position.Z),
-                    Normal = normal
+                    Normal = normal,
+                    UV = new float2(mesh.CornerUvs[corner * 2], mesh.CornerUvs[(corner * 2) + 1])
                 });
             }
 
-            foreach (var loopIndex in mesh.TriangleLoopIndices)
+            for (var triangle = 0; triangle < mesh.TriangleCount; triangle++)
             {
-                if (loopIndex >= mesh.CornerCount)
+                var firstIndex = indices.Count;
+                for (var triangleCorner = 0; triangleCorner < 3; triangleCorner++)
                 {
-                    throw new InvalidDataException($"Mesh '{instance.MeshId}' triangle references an invalid loop.");
+                    var loopIndex = mesh.TriangleLoopIndices[(triangle * 3) + triangleCorner];
+                    if (loopIndex >= mesh.CornerCount)
+                    {
+                        throw new InvalidDataException(
+                            $"Mesh '{instance.MeshId}' triangle references an invalid loop.");
+                    }
+                    indices.Add(checked(baseVertex + loopIndex));
                 }
-                indices.Add(checked(baseVertex + loopIndex));
+                AddSubmesh(
+                    submeshes,
+                    firstIndex,
+                    ResolveMaterialIndex(mesh, triangle, materialIndices, defaultMaterialIndex));
             }
         }
 
-        return new RenderGeometry(vertices.ToArray(), indices.ToArray());
+        return new RenderGeometry(vertices.ToArray(), indices.ToArray(), submeshes.ToArray());
     }
 
     private static ParsedMesh ParseMesh(SceneSnapshot snapshot, SceneMesh mesh)
@@ -302,13 +422,82 @@ internal static class SceneGeometryBuilder
         {
             throw new InvalidDataException($"Mesh '{mesh.MeshId}' has a negative element count.");
         }
+        if (mesh.Attributes is null)
+        {
+            throw new InvalidDataException($"Mesh '{mesh.MeshId}' attributes are missing.");
+        }
+        var cornerUvs = mesh.Attributes.CornerUvs is null
+            ? new float[checked(mesh.CornerCount * 2)]
+            : snapshot.ReadFloat32(
+                mesh.Attributes.CornerUvs,
+                $"{mesh.MeshId}.cornerUvs",
+                mesh.CornerCount,
+                2);
+        var triangleMaterialIndices = mesh.Attributes.TriangleMaterialIndices is null
+            ? new uint[mesh.TriangleCount]
+            : snapshot.ReadUInt32(
+                mesh.Attributes.TriangleMaterialIndices,
+                $"{mesh.MeshId}.triangleMaterialIndices",
+                mesh.TriangleCount);
         return new ParsedMesh(
             mesh.VertexCount,
             mesh.CornerCount,
+            mesh.TriangleCount,
             snapshot.ReadFloat32(mesh.Attributes.Positions, $"{mesh.MeshId}.positions", mesh.VertexCount, 3),
             snapshot.ReadUInt32(mesh.Attributes.LoopVertexIndices, $"{mesh.MeshId}.loopVertexIndices", mesh.CornerCount),
             snapshot.ReadFloat32(mesh.Attributes.CornerNormals, $"{mesh.MeshId}.cornerNormals", mesh.CornerCount, 3),
-            snapshot.ReadUInt32(mesh.Attributes.TriangleLoopIndices, $"{mesh.MeshId}.triangleLoopIndices", mesh.TriangleCount, 3));
+            cornerUvs,
+            snapshot.ReadUInt32(
+                mesh.Attributes.TriangleLoopIndices,
+                $"{mesh.MeshId}.triangleLoopIndices",
+                mesh.TriangleCount,
+                3),
+            triangleMaterialIndices,
+            mesh.MaterialSlots ?? []);
+    }
+
+    private static int ResolveMaterialIndex(
+        ParsedMesh mesh,
+        int triangle,
+        IReadOnlyDictionary<string, int> materialIndices,
+        int defaultMaterialIndex)
+    {
+        if (mesh.MaterialSlots.Length == 0)
+        {
+            return defaultMaterialIndex;
+        }
+
+        var slotIndex = mesh.TriangleMaterialIndices[triangle];
+        if (slotIndex >= mesh.MaterialSlots.Length)
+        {
+            throw new InvalidDataException(
+                $"Scene triangle references material slot {slotIndex}, but the mesh has {mesh.MaterialSlots.Length} slots.");
+        }
+        var materialId = mesh.MaterialSlots[slotIndex];
+        if (materialId is null)
+        {
+            return defaultMaterialIndex;
+        }
+        if (!materialIndices.TryGetValue(materialId, out var materialIndex))
+        {
+            throw new InvalidDataException($"Scene mesh references unknown material '{materialId}'.");
+        }
+        return materialIndex;
+    }
+
+    private static void AddSubmesh(List<SceneSubmesh> submeshes, int firstIndex, int materialIndex)
+    {
+        if (submeshes.Count > 0)
+        {
+            var previous = submeshes[^1];
+            if (previous.MaterialIndex == materialIndex &&
+                previous.FirstIndex + previous.IndexCount == firstIndex)
+            {
+                submeshes[^1] = previous with { IndexCount = checked(previous.IndexCount + 3) };
+                return;
+            }
+        }
+        submeshes.Add(new SceneSubmesh(firstIndex, 3, materialIndex));
     }
 
     private static float3 Normalize(float3 value)
@@ -322,8 +511,12 @@ internal static class SceneGeometryBuilder
     private sealed record ParsedMesh(
         int VertexCount,
         int CornerCount,
+        int TriangleCount,
         float[] Positions,
         uint[] LoopVertexIndices,
         float[] CornerNormals,
-        uint[] TriangleLoopIndices);
+        float[] CornerUvs,
+        uint[] TriangleLoopIndices,
+        uint[] TriangleMaterialIndices,
+        string?[] MaterialSlots);
 }

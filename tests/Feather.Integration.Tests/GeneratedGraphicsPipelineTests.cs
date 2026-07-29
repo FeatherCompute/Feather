@@ -420,35 +420,72 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineRejectsExplicitMsaaDepthLoad()
+    public void GeneratedGraphicsPipelineMsaaDepthLoadPreservesEarlierOcclusion()
     {
-        using var vertices = GPU.CreateBuffer<float4>(
+        using var nearVertices = GPU.CreateBuffer<float4>(
         [
-            new float4(-1, -1, 0.5f, 1),
-            new float4(1, -1, 0.5f, 1),
-            new float4(0, 1, 0.5f, 1)
+            new float4(-1, -1, 0.25f, 1),
+            new float4(3, -1, 0.25f, 1),
+            new float4(-1, 3, 0.25f, 1)
         ]);
-        using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(16, 16, PixelFormat.Rgba8);
+        using var farVertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0.75f, 1),
+            new float4(3, -1, 0.75f, 1),
+            new float4(-1, 3, 0.75f, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(16, 16, PixelFormat.Rgba32Float);
         using var depth = GPU.CreateDepthTexture2D(16, 16);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
-        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>(
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
             new GraphicsPipelineDesc
             {
                 SampleCount = SampleCount.X4,
-                DepthStencil = DepthStencilState.Default with { DepthTest = true, DepthWrite = true },
-                DebugName = "GeneratedMsaaDepthLoadReject"
+                DepthStencil = DepthStencilState.Default with
+                {
+                    DepthTest = true,
+                    DepthWrite = true,
+                    DepthCompare = CompareOp.Less
+                },
+                DebugName = "GeneratedMsaaDepthLoadPreserve"
             });
 
-        var ex = Assert.Throws<FeatherNativeException>(() => pipeline.Draw(
-            new GeneratedVertexShader(vertices.AsReadOnly()),
-            new GeneratedFragmentShader(sampler),
+        pipeline.Draw(
+            new GeneratedVertexShader(nearVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(
+                sampler,
+                new Uniform<float4>(new float4(1.0f, 0.0f, 0.0f, 1.0f))),
             target,
             depth,
             vertexCount: 3,
-            drawDesc: new GraphicsDrawDesc { DepthLoadOp = GraphicsDepthLoadOp.Load }));
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Clear,
+                ClearColor = new float4(0.0f, 0.0f, 0.0f, 1.0f),
+                DepthLoadOp = GraphicsDepthLoadOp.Clear,
+                ClearDepth = 1.0f
+            });
+        pipeline.Draw(
+            new GeneratedVertexShader(farVertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(
+                sampler,
+                new Uniform<float4>(new float4(0.0f, 1.0f, 0.0f, 1.0f))),
+            target,
+            depth,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc
+            {
+                ColorLoadOp = GraphicsColorLoadOp.Load,
+                DepthLoadOp = GraphicsDepthLoadOp.Load
+            });
 
-        Assert.Contains("MSAA depth load is not supported", ex.Message);
-        Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
+        var readback = new float4[256];
+        target.Read(readback);
+        var pixel = readback[(8 * 16) + 8];
+        Assert.True(
+            pixel.X > 0.8f && pixel.Y < 0.2f,
+            $"Expected the earlier near red draw to occlude the later far green draw, got {pixel}.");
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
     }
 
     [Fact]

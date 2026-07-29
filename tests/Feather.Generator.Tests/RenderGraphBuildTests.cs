@@ -53,11 +53,18 @@ public class RenderGraphBuildTests
             Assert.Equal("Passes/MinimalRasterPass.cs", pass.GetProperty("source").GetProperty("path").GetString());
             Assert.Equal("RGBA8", Assert.Single(pass.GetProperty("outputs").EnumerateArray()).GetProperty("format").GetString());
 
-            var parameter = Assert.Single(pass.GetProperty("parameters").EnumerateArray());
-            Assert.Equal("Exposure", parameter.GetProperty("name").GetString());
-            Assert.Equal(1.0, parameter.GetProperty("defaultValue").GetDouble());
-            Assert.Equal(0.0, parameter.GetProperty("min").GetDouble());
-            Assert.Equal(8.0, parameter.GetProperty("max").GetDouble());
+            var parameters = pass.GetProperty("parameters")
+                .EnumerateArray()
+                .ToDictionary(item => item.GetProperty("name").GetString()!);
+            Assert.Equal(2, parameters.Count);
+            var exposure = parameters["Exposure"];
+            Assert.Equal(1.0, exposure.GetProperty("defaultValue").GetDouble());
+            Assert.Equal(0.0, exposure.GetProperty("min").GetDouble());
+            Assert.Equal(8.0, exposure.GetProperty("max").GetDouble());
+            var viewMode = parameters["ViewMode"];
+            Assert.Equal(0, viewMode.GetProperty("defaultValue").GetInt32());
+            Assert.Equal(0.0, viewMode.GetProperty("min").GetDouble());
+            Assert.Equal(2.0, viewMode.GetProperty("max").GetDouble());
 
             await BuildSampleAsync(
                 repositoryRoot,

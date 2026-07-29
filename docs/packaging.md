@@ -16,6 +16,7 @@ inside `FeatherCompute.NativeAssets`.
 | `src/Feather.Generators` | `FeatherCompute.Generators` | Roslyn analyzer/source generator for kernels and shaders. Published separately for advanced analyzer-only scenarios. |
 | `src/Feather.Native` | `FeatherCompute.Native` | P/Invoke declarations and native library resolver. |
 | `src/Feather.NativeAssets` | `FeatherCompute.NativeAssets` | RID-specific native runtime assets. |
+| `src/Feather.Blender.RenderHost` | `FeatherCompute.Blender.RenderHost` | Version-matched local .NET tool used by Feather Blender projects. |
 
 ## NuGet Consumption
 
@@ -28,6 +29,13 @@ dotnet add package FeatherCompute --prerelease
 The main package depends on the native binding and native asset packages, and it
 also carries `Feather.Generators.dll` under `analyzers/dotnet/cs` so generated
 kernels work without a second package reference.
+
+Feather Blender projects additionally pin the matching RenderHost as a local
+tool in `.config/dotnet-tools.json`. Blender runs `dotnet tool restore` on first
+use and then launches `feather-blender-renderhost`; no Feather source checkout
+or machine-specific SDK path is required. The tool package carries the staged
+native runtimes because .NET tool packages do not consume the ordinary
+`FeatherCompute.NativeAssets` runtime layout transitively.
 
 ## Source Consumption
 
@@ -99,6 +107,11 @@ identifier:
 packs files from that staging directory into `FeatherCompute.NativeAssets`. Do
 not commit generated native binaries under `src/`.
 
+The same staging tree is packed under the RenderHost tool's
+`tools/net10.0/any/runtimes/<rid>/native` directory. A local tool package built
+on one machine therefore contains only the RIDs present in staging; the release
+workflow assembles all supported release RIDs before packing.
+
 Release native assets are built with SPIRV-Tools optimization enabled and the
 `Ultra` preset. On platforms where shader-toolchain libraries are dynamically
 linked, the staging script includes those transitive native dependencies.
@@ -147,8 +160,9 @@ The workflow currently builds packaged native assets for:
 - `osx-arm64`
 - `win-x64`
 
-It validates that `FeatherCompute.NativeAssets` contains all three native files
-and that `FeatherCompute` contains the analyzer before uploading or publishing.
+It validates that `FeatherCompute.NativeAssets` contains all three native files,
+that `FeatherCompute` contains the analyzer, and that the RenderHost tool carries
+the same three native runtimes before uploading or publishing all five packages.
 
 For preview releases, use an immutable prerelease version such as:
 

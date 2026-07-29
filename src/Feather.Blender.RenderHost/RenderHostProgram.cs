@@ -37,8 +37,17 @@ internal static class RenderHostProgram
             using var host = new RenderHostRunner();
             if (!options.Watch)
             {
-                var result = host.RenderOnce(options.RequestPath!);
-                WriteEvent("frame", result);
+                RenderHostResult result;
+                do
+                {
+                    result = host.RenderOnce(options.RequestPath!);
+                    WriteRenderResult(result);
+                    if (result.NeedsMoreWork && result.TargetSamples == 0)
+                    {
+                        break;
+                    }
+                }
+                while (result.NeedsMoreWork);
                 return 0;
             }
 
@@ -66,6 +75,7 @@ internal static class RenderHostProgram
     {
         RenderInputSignature? previous = null;
         RenderInputSignature? failed = null;
+        RenderInputSignature? pending = null;
         var failureCount = 0;
         var retryAfter = DateTimeOffset.MinValue;
         WriteEvent("ready", new { requestPath = Path.GetFullPath(options.RequestPath!) });
@@ -74,21 +84,24 @@ internal static class RenderHostProgram
         {
             var current = RenderInputSignature.TryRead(options.RequestPath!);
             var retryIsDue = current != failed || DateTimeOffset.UtcNow >= retryAfter;
-            if (current is not null && current != previous && retryIsDue)
+            var continuesPendingRender = current is not null && current == pending;
+            if (current is not null && (current != previous || continuesPendingRender) && retryIsDue)
             {
                 try
                 {
                     var result = host.RenderOnce(options.RequestPath!);
                     previous = current;
+                    pending = result.NeedsMoreWork ? current : null;
                     failed = null;
                     failureCount = 0;
-                    WriteEvent("frame", result);
+                    WriteRenderResult(result);
                 }
                 catch (InvalidDataException exception)
                 {
                     // Protocol errors are deterministic for this immutable request. A newly
                     // published request gets a new file signature and will be attempted normally.
                     previous = current;
+                    pending = null;
                     failed = null;
                     failureCount = 0;
                     WriteError(exception);
@@ -97,6 +110,7 @@ internal static class RenderHostProgram
                 {
                     failureCount = current == failed ? failureCount + 1 : 1;
                     failed = current;
+                    pending = null;
                     var exponent = System.Math.Min(failureCount - 1, 5);
                     var retryMilliseconds = System.Math.Min(2000, 100 * (1 << exponent));
                     retryAfter = DateTimeOffset.UtcNow.AddMilliseconds(retryMilliseconds);
@@ -112,6 +126,9 @@ internal static class RenderHostProgram
 
     private static void WriteEvent(string eventName, object value)
         => Console.WriteLine(JsonSerializer.Serialize(new { @event = eventName, value }, ProtocolJson.Options));
+
+    private static void WriteRenderResult(RenderHostResult result)
+        => WriteEvent(result.FramePublished ? "frame" : "progress", result);
 
     private static void WriteError(Exception exception)
         => Console.Error.WriteLine(JsonSerializer.Serialize(

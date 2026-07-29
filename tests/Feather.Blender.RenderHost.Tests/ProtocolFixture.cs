@@ -9,6 +9,10 @@ internal sealed class ProtocolFixture : IDisposable
     public const string PostProcessPassGuid = "20fc3bf1-eecb-41b1-bd03-d5c8a344ce6d";
     public const string PostProcessInputSocketGuid = "071e6d38-8fbc-4fe0-a736-f5d5142ac2aa";
     public const string PostProcessOutputSocketGuid = "14c671df-f382-4aa6-8cf6-3a7ced0456f8";
+    public const string HistoryProbePassGuid = "3a458b99-47a9-47ac-8388-5e5146b2bc35";
+    public const string HistoryProbeInputSocketGuid = "cb160cbd-52f8-4528-977e-9e0becd9cc6e";
+    public const string HistoryProbeObservedOutputSocketGuid = "b5710275-26d7-48b7-846f-8075f67d48e4";
+    public const string HistoryProbeNextOutputSocketGuid = "db62a9f6-7937-417e-9024-f5f308baf0a7";
 
     private readonly string root = Path.Combine(
         Path.GetTempPath(),
@@ -272,12 +276,101 @@ internal sealed class ProtocolFixture : IDisposable
         File.WriteAllText(GraphPath, JsonSerializer.Serialize(graph));
     }
 
-    public void WriteRequest(string clipSpace = "vulkan", string? manifestPath = null)
+    public void WriteHistoryGraph(string passType)
     {
+        var graph = new
+        {
+            schemaVersion = 1,
+            generationId = GenerationId,
+            graphId = "history-graph-1",
+            viewId = "view-1",
+            executionMode = "REALTIME",
+            resolutionScale = 1.0f,
+            sampleCount = 1,
+            nodes = new object[]
+            {
+                new { nodeId = "scene-1", kind = "scene" },
+                new
+                {
+                    nodeId = "history-read-1",
+                    kind = "history-read",
+                    historyKey = "accumulation"
+                },
+                new
+                {
+                    nodeId = "pass-1",
+                    kind = "pass",
+                    passGuid = HistoryProbePassGuid,
+                    typeName = passType,
+                    muted = false,
+                    parameters = Array.Empty<object>()
+                },
+                new { nodeId = "output-1", kind = "output" },
+                new
+                {
+                    nodeId = "history-write-1",
+                    kind = "history-write",
+                    historyKey = "accumulation"
+                }
+            },
+            links = new[]
+            {
+                new
+                {
+                    fromNode = "history-read-1",
+                    fromSocket = RenderGraphDocument.HistoryReadSocketGuid,
+                    toNode = "pass-1",
+                    toSocket = HistoryProbeInputSocketGuid
+                },
+                new
+                {
+                    fromNode = "pass-1",
+                    fromSocket = HistoryProbeObservedOutputSocketGuid,
+                    toNode = "output-1",
+                    toSocket = RenderGraphDocument.OutputColorSocketGuid
+                },
+                new
+                {
+                    fromNode = "pass-1",
+                    fromSocket = HistoryProbeNextOutputSocketGuid,
+                    toNode = "history-write-1",
+                    toSocket = RenderGraphDocument.HistoryWriteSocketGuid
+                }
+            },
+            topologicalOrder = new[]
+            {
+                "scene-1",
+                "history-read-1",
+                "pass-1",
+                "output-1",
+                "history-write-1"
+            },
+            output = new
+            {
+                nodeId = "output-1",
+                socketGuid = RenderGraphDocument.OutputColorSocketGuid
+            }
+        };
+        File.WriteAllText(GraphPath, JsonSerializer.Serialize(graph));
+    }
+
+    public void WriteRequest(
+        string clipSpace = "vulkan",
+        string? manifestPath = null,
+        ulong requestId = 42,
+        float[]? viewProjection = null)
+    {
+        viewProjection ??=
+        [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+        ];
         var request = new
         {
             schemaVersion = 1,
-            requestId = 42,
+            requestId,
             generationId = GenerationId,
             viewId = "view-1",
             scenePath = Path.GetFileName(ScenePath),
@@ -288,13 +381,7 @@ internal sealed class ProtocolFixture : IDisposable
             height = 64,
             matrixLayout = "row-major",
             clipSpace,
-            viewProjection = new float[]
-            {
-                1, 0, 0, 0,
-                0, 1, 0, 0,
-                0, 0, 1, 0,
-                0, 0, 0, 1
-            }
+            viewProjection
         };
         File.WriteAllText(RequestPath, JsonSerializer.Serialize(request));
     }

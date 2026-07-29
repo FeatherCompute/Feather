@@ -10143,11 +10143,6 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     if (draw.clear_depth != 0) {
         clear_depth = has_depth_attachment;
     }
-    if (sample_count != GPU::Backend::SampleCount::X1 && has_depth_attachment && !clear_depth) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "MSAA depth load is not supported because EasyGPU uses transient multisampled depth attachments; clear depth for MSAA draws.");
-    }
-
     const auto color_load_op = static_cast<GraphicsColorLoadOp>(draw.color_load_op);
     GPU::Backend::AttachmentLoadOp backend_color_load_op = GPU::Backend::AttachmentLoadOp::Default;
     bool clear_color = false;

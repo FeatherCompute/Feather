@@ -11,6 +11,7 @@ public struct SceneVertex
 {
     public float3 Position;
     public float3 Normal;
+    public float2 UV;
 }
 
 /// <summary>
@@ -19,19 +20,39 @@ public struct SceneVertex
 public sealed class SceneGeometry
 {
     public SceneGeometry(ReadOnlyMemory<SceneVertex> vertices, ReadOnlyMemory<uint> indices)
+        : this(vertices, indices, ReadOnlyMemory<SceneSubmesh>.Empty)
+    {
+    }
+
+    public SceneGeometry(
+        ReadOnlyMemory<SceneVertex> vertices,
+        ReadOnlyMemory<uint> indices,
+        ReadOnlyMemory<SceneSubmesh> submeshes)
     {
         if (indices.Length % 3 != 0)
         {
             throw new ArgumentException("Scene indices must contain complete triangles.", nameof(indices));
         }
+        foreach (var submesh in submeshes.Span)
+        {
+            if (submesh.FirstIndex < 0 || submesh.IndexCount < 0 || submesh.MaterialIndex < 0 ||
+                submesh.FirstIndex % 3 != 0 || submesh.IndexCount % 3 != 0 ||
+                submesh.FirstIndex > indices.Length - submesh.IndexCount)
+            {
+                throw new ArgumentException("Scene submeshes must contain valid triangle index ranges.", nameof(submeshes));
+            }
+        }
 
         Vertices = vertices;
         Indices = indices;
+        Submeshes = submeshes;
     }
 
     public ReadOnlyMemory<SceneVertex> Vertices { get; }
 
     public ReadOnlyMemory<uint> Indices { get; }
+
+    public ReadOnlyMemory<SceneSubmesh> Submeshes { get; }
 }
 
 /// <summary>
@@ -61,12 +82,31 @@ public interface IRenderContextBackend
 
     RenderCamera GetCamera(CameraHandle handle);
 
+    SceneMaterialTable GetMaterials(MaterialTableHandle handle)
+        => throw new NotSupportedException("This render host does not expose scene materials.");
+
+    SceneTextureTable GetTextures(TextureTableHandle handle)
+        => throw new NotSupportedException("This render host does not expose scene textures.");
+
+    SceneLightTable GetLights(LightTableHandle handle)
+        => throw new NotSupportedException("This render host does not expose scene lights.");
+
+    RenderTime GetTime(TimeHandle handle)
+        => throw new NotSupportedException("This render host does not expose render time.");
+
     ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle);
 
     void SetColorOutput(
         TextureHandle handle,
         Rgba8[] pixels,
         DispatchPath dispatchPath);
+
+    /// <summary>
+    /// Receives the synchronous GPU readback duration for host diagnostics.
+    /// </summary>
+    void ReportGpuReadback(TimeSpan elapsed)
+    {
+    }
 }
 
 /// <summary>
@@ -118,6 +158,18 @@ public sealed class RenderContext
     public RenderCamera GetCamera(CameraHandle handle)
         => Backend.GetCamera(handle);
 
+    public SceneMaterialTable GetMaterials(MaterialTableHandle handle)
+        => Backend.GetMaterials(handle);
+
+    public SceneTextureTable GetTextures(TextureTableHandle handle)
+        => Backend.GetTextures(handle);
+
+    public SceneLightTable GetLights(LightTableHandle handle)
+        => Backend.GetLights(handle);
+
+    public RenderTime GetTime(TimeHandle handle)
+        => Backend.GetTime(handle);
+
     /// <summary>
     /// Resolves an RGBA8 texture produced by an upstream graph pass.
     /// The returned memory remains owned by the render host and is valid only for this execution.
@@ -147,7 +199,16 @@ public sealed class RenderContext
         }
 
         var pixels = new Rgba8[checked(Width * Height)];
-        texture.Read(pixels);
+        var readback = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            texture.Read(pixels);
+        }
+        finally
+        {
+            readback.Stop();
+            Backend.ReportGpuReadback(readback.Elapsed);
+        }
         Backend.SetColorOutput(handle, pixels, dispatchPath);
     }
 
