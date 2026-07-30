@@ -100,6 +100,37 @@ public interface IRenderContextBackend
         where T : unmanaged
         => throw new NotSupportedException("This render host does not expose graph buffer inputs.");
 
+    /// <summary>
+    /// Resolves a host-owned graph texture, allocating it on first use. The host owns the
+    /// returned texture so it outlives the pass and downstream passes can read it without a
+    /// round trip through system memory; a pass must not dispose it.
+    /// </summary>
+    GpuTexture2D<TPixel, TValue> GetOrCreateGraphTexture<TPixel, TValue>(
+        TextureHandle handle,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => throw new NotSupportedException("This render host does not expose GPU-resident graph textures.");
+
+    /// <summary>
+    /// Resolves a GPU-resident texture published by an upstream graph pass.
+    /// </summary>
+    IGpuTexture2D GetTextureInput(TextureHandle handle)
+        => throw new NotSupportedException("This render host does not expose GPU-resident graph textures.");
+
+    /// <summary>
+    /// Publishes a GPU-resident texture as a graph output without reading it back. Any pixel
+    /// format is accepted; conversion to the display format happens once, when the host takes
+    /// the final frame.
+    /// </summary>
+    void SetTextureOutput(
+        TextureHandle handle,
+        IGpuTexture2D texture,
+        DispatchPath dispatchPath)
+        => throw new NotSupportedException("This render host does not accept GPU-resident graph textures.");
+
     void SetColorOutput(
         TextureHandle handle,
         Rgba8[] pixels,
@@ -281,6 +312,49 @@ public sealed class RenderContext
         DispatchPath dispatchPath = DispatchPath.None)
         where T : unmanaged
         => Backend.SetBufferOutput(handle, values.ToArray(), dispatchPath);
+
+    /// <summary>
+    /// Resolves a host-owned graph texture sized to the current render, allocating it on first
+    /// use. Use this for pass outputs and for scratch that has to survive between passes.
+    /// </summary>
+    /// <remarks>
+    /// The host owns the texture, so it must not be disposed by the pass and must not be wrapped
+    /// in a <c>using</c> declaration. Textures obtained from <c>GPU.Create*</c> remain
+    /// pass-private and do have to be disposed.
+    /// </remarks>
+    public GpuTexture2D<TPixel, TValue> GetOrCreateTexture<TPixel, TValue>(
+        TextureHandle handle,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => Backend.GetOrCreateGraphTexture<TPixel, TValue>(handle, Width, Height, format);
+
+    /// <summary>
+    /// Resolves a GPU-resident texture published by an upstream graph pass, keeping the data on
+    /// the GPU instead of reading it back.
+    /// </summary>
+    public IGpuTexture2D GetTextureInput(TextureHandle handle)
+        => Backend.GetTextureInput(handle);
+
+    /// <summary>
+    /// Publishes a GPU-resident texture as a graph output. Unlike <see cref="SetColorOutput"/>
+    /// this performs no readback and accepts any pixel format, so simulation state can stay in a
+    /// float target across passes and frames.
+    /// </summary>
+    public void SetTextureOutput(
+        TextureHandle handle,
+        IGpuTexture2D texture,
+        DispatchPath dispatchPath = DispatchPath.None)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        if (texture.Width != Width || texture.Height != Height)
+        {
+            throw new ArgumentException(
+                $"Texture output is {texture.Width}x{texture.Height}; expected {Width}x{Height}.",
+                nameof(texture));
+        }
+        Backend.SetTextureOutput(handle, texture, dispatchPath);
+    }
 
     private IRenderContextBackend Backend
         => backend ?? throw new InvalidOperationException("The render context is not bound to a render host.");

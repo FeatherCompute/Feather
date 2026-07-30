@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Feather.Math;
 using Feather.RenderGraph;
+using Feather.Resources;
 
 namespace Feather.Blender.RenderHost;
 
@@ -79,6 +80,10 @@ internal sealed class PassAssemblyGeneration : IDisposable
     private readonly Assembly assembly;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<string, Type> passTypes;
+
+    // Owned here rather than by the per-execution backend so GPU-resident history survives across
+    // frames instead of being reallocated and cleared every render.
+    private readonly GraphTexturePool texturePool = new();
     private bool disposed;
 
     private PassAssemblyGeneration(
@@ -174,6 +179,9 @@ internal sealed class PassAssemblyGeneration : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         var resources = new GraphResourceResolver(graph, manifest);
+        // Socket identities are only comparable within one topology, so a changed graph has to
+        // start from an empty pool.
+        texturePool.PrepareForGraph(graph.GraphFingerprint);
         var backend = new ProjectRenderContextBackend(
             scene,
             width,
@@ -181,7 +189,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
             graph.SampleCount,
             viewProjection,
             resources,
-            viewState.History);
+            viewState.History,
+            texturePool);
         var executedTypes = new List<string>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
         {
@@ -229,6 +238,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             return;
         }
 
+        texturePool.Dispose();
         passTypes.Clear();
         loadContext.Unload();
         disposed = true;
@@ -566,6 +576,7 @@ internal sealed class GraphResourceResolver
     private readonly RenderGraphExecution graph;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
+    private readonly Dictionary<ulong, string> textureIdentities = [];
     private readonly HashSet<ulong> writableTextureHandles = [];
     private readonly Dictionary<(string NodeId, string SocketGuid), BufferHandle> bufferHandles = new();
     private readonly Dictionary<ulong, string> writableBufferElementTypes = [];
@@ -581,7 +592,9 @@ internal sealed class GraphResourceResolver
 
         foreach (var historyRead in graph.HistoryReads)
         {
-            historyReadHandles.Add(historyRead.HistoryKey, new TextureHandle(nextTextureHandle++));
+            var handle = new TextureHandle(nextTextureHandle++);
+            historyReadHandles.Add(historyRead.HistoryKey, handle);
+            textureIdentities.Add(handle.Value, $"history|{historyRead.HistoryKey}");
         }
 
         foreach (var passNode in graph.Passes)
@@ -661,6 +674,16 @@ internal sealed class GraphResourceResolver
 
     public bool IsWritable(TextureHandle handle)
         => writableTextureHandles.Contains(handle.Value);
+
+    /// <summary>
+    /// Returns the graph-stable identity of a texture handle. Handle values are assigned in
+    /// resolution order and so are only meaningful within one execution; the node and socket pair
+    /// is stable across executions and is what a cross-frame texture pool must key on.
+    /// </summary>
+    public string TextureIdentity(TextureHandle handle)
+        => textureIdentities.TryGetValue(handle.Value, out var identity)
+            ? identity
+            : throw new KeyNotFoundException($"Unknown texture handle {handle.Value}.");
 
     public bool IsWritable(BufferHandle handle)
         => writableBufferElementTypes.ContainsKey(handle.Value);
@@ -764,6 +787,8 @@ internal sealed class GraphResourceResolver
         {
             handle = new TextureHandle(nextTextureHandle++);
             textureHandles.Add(key, handle);
+            // GUIDs cannot contain '|', so this identity is unambiguous.
+            textureIdentities.Add(handle.Value, $"socket|{key.Item1}|{key.Item2}");
             writableTextureHandles.Add(handle.Value);
         }
         return handle;
@@ -1040,7 +1065,46 @@ internal static class PassMemberBinder
             {
                 throw new InvalidDataException($"Pass parameter '{name}' cannot be null.");
             }
+            EnforceDeclaredRange(name, attribute, converted);
             SetValue(pass, member, converted);
+        }
+    }
+
+    /// <summary>
+    /// Rejects numeric parameters that fall outside the range the pass declares.
+    ///
+    /// This matters most for iteration counts: an iterative pass dispatches its kernel once per
+    /// step, and a dispatch already in flight cannot be cancelled, so an unreasonable count from a
+    /// saved graph would stall the host. Enforcing the pass's own declared bound turns that into a
+    /// reported error, and keeps every other declared range honest at the same time.
+    /// </summary>
+    private static void EnforceDeclaredRange(string name, ParameterAttribute attribute, object? value)
+    {
+        if (value is null || (double.IsNaN(attribute.Min) && double.IsNaN(attribute.Max)))
+        {
+            return;
+        }
+        var numeric = value switch
+        {
+            int intValue => intValue,
+            uint uintValue => uintValue,
+            float floatValue => floatValue,
+            double doubleValue => doubleValue,
+            _ => (double?)null,
+        };
+        if (numeric is not { } candidate)
+        {
+            return;
+        }
+        if (!double.IsNaN(attribute.Min) && candidate < attribute.Min)
+        {
+            throw new InvalidDataException(
+                $"Pass parameter '{name}' is {candidate}; the pass declares a minimum of {attribute.Min}.");
+        }
+        if (!double.IsNaN(attribute.Max) && candidate > attribute.Max)
+        {
+            throw new InvalidDataException(
+                $"Pass parameter '{name}' is {candidate}; the pass declares a maximum of {attribute.Max}.");
         }
     }
 
@@ -1156,7 +1220,13 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly RenderTime time;
     private readonly GraphResourceResolver resources;
     private readonly Dictionary<ulong, RenderedFrame> frames = new();
+
+    // GPU-resident outputs live alongside the CPU frames rather than replacing them, so software
+    // passes that publish arrays keep working and can be mixed with GPU passes in one graph.
+    private readonly Dictionary<ulong, IGpuTexture2D> gpuTextures = new();
+    private readonly Dictionary<ulong, DispatchPath> gpuDispatchPaths = new();
     private readonly Dictionary<ulong, GraphBufferData> buffers = new();
+    private readonly GraphTexturePool texturePool;
 
     public ProjectRenderContextBackend(
         RenderSceneResources scene,
@@ -1165,8 +1235,10 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         SampleCount sampleCount,
         float4x4 viewProjection,
         GraphResourceResolver resources,
-        IReadOnlyDictionary<string, RenderedFrame> history)
+        IReadOnlyDictionary<string, RenderedFrame> history,
+        GraphTexturePool texturePool)
     {
+        this.texturePool = texturePool;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         materials = scene.Materials;
         textures = scene.Textures;
@@ -1239,10 +1311,76 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             : throw new KeyNotFoundException($"Unknown time handle {handle.Value}.");
 
     public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
-        => frames.TryGetValue(handle.Value, out var frame)
-            ? frame.Pixels
-            : throw new KeyNotFoundException(
-                $"Texture handle {handle.Value} has not been produced by an upstream pass.");
+    {
+        if (frames.TryGetValue(handle.Value, out var frame))
+        {
+            return frame.Pixels;
+        }
+        if (gpuTextures.ContainsKey(handle.Value))
+        {
+            throw new InvalidDataException(
+                $"Texture handle {handle.Value} holds a GPU-resident texture. Read it with " +
+                "GetTextureInput to keep the data on the GPU, or have the producing pass publish " +
+                "an RGBA8 frame instead.");
+        }
+        throw new KeyNotFoundException(
+            $"Texture handle {handle.Value} has not been produced by an upstream pass.");
+    }
+
+    public GpuTexture2D<TPixel, TValue> GetOrCreateGraphTexture<TPixel, TValue>(
+        TextureHandle handle,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => texturePool.GetOrCreate<TPixel, TValue>(
+            resources.TextureIdentity(handle),
+            width,
+            height,
+            format);
+
+    public IGpuTexture2D GetTextureInput(TextureHandle handle)
+    {
+        if (gpuTextures.TryGetValue(handle.Value, out var texture))
+        {
+            return texture;
+        }
+        if (frames.TryGetValue(handle.Value, out var frame))
+        {
+            // The producer was a software pass. Uploading here is the one implicit CPU-to-GPU
+            // transfer in the graph; it lets mixed software and GPU graphs work.
+            var uploaded = texturePool.GetOrCreate<Rgba8, float4>(
+                $"upload|{resources.TextureIdentity(handle)}",
+                Width,
+                Height,
+                PixelFormat.Rgba8);
+            uploaded.Upload(frame.Pixels);
+            gpuTextures[handle.Value] = uploaded;
+            return uploaded;
+        }
+        throw new KeyNotFoundException(
+            $"Texture handle {handle.Value} has not been produced by an upstream pass.");
+    }
+
+    public void SetTextureOutput(
+        TextureHandle handle,
+        IGpuTexture2D texture,
+        DispatchPath dispatchPath)
+    {
+        ArgumentNullException.ThrowIfNull(texture);
+        if (!resources.IsWritable(handle))
+        {
+            throw new KeyNotFoundException($"Texture handle {handle.Value} is not a graph output.");
+        }
+        if (gpuTextures.ContainsKey(handle.Value) || frames.ContainsKey(handle.Value))
+        {
+            throw new InvalidOperationException(
+                $"Texture handle {handle.Value} has already been written this execution.");
+        }
+        gpuTextures.Add(handle.Value, texture);
+        gpuDispatchPaths[handle.Value] = dispatchPath;
+    }
 
     public ReadOnlyMemory<T> GetBufferInput<T>(BufferHandle<T> handle)
         where T : unmanaged
@@ -1306,11 +1444,45 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         buffers.Add(handle.Value, new GraphBufferData(typeof(T), values, dispatchPath));
     }
 
+    /// <summary>
+    /// Produces the CPU frame that gets published to the viewport. This is the only place the
+    /// graph reads back from the GPU, so intermediate passes never pay for a transfer.
+    /// </summary>
     public RenderedFrame TakeFrame(TextureHandle handle)
-        => frames.TryGetValue(handle.Value, out var frame)
-            ? frame
-            : throw new InvalidDataException(
+    {
+        if (frames.TryGetValue(handle.Value, out var frame))
+        {
+            return frame;
+        }
+        if (!gpuTextures.TryGetValue(handle.Value, out var texture))
+        {
+            throw new InvalidDataException(
                 $"The selected graph texture {handle.Value} was not produced.");
+        }
+        if (texture is not GpuTexture2D<Rgba8, float4> displayTexture)
+        {
+            throw new InvalidDataException(
+                $"The selected graph output uses {texture.Format}; the viewport contract requires " +
+                "an RGBA8 texture. Add a pass that converts the result to RGBA8 before the " +
+                "Feather Output node.");
+        }
+
+        var pixels = new Rgba8[checked(Width * Height)];
+        var readback = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            displayTexture.Read(pixels);
+        }
+        finally
+        {
+            readback.Stop();
+            ReportGpuReadback(readback.Elapsed);
+        }
+        var path = gpuDispatchPaths.TryGetValue(handle.Value, out var dispatchPath)
+            ? dispatchPath
+            : DispatchPath.None;
+        return new RenderedFrame(Width, Height, pixels, path);
+    }
 
     public IReadOnlyDictionary<string, RenderedFrame> CaptureHistory()
     {

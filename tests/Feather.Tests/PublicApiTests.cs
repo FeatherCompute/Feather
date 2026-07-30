@@ -168,6 +168,42 @@ public class PublicApiTests
     }
 
     [Fact]
+    public void ExistingRenderContextBackendsCanOmitGpuResidentTextures()
+    {
+        // A host that only implements the CPU frame contract keeps working; the GPU-resident
+        // entry points report that they are unavailable rather than failing to compile.
+        var context = new RenderContext(new LegacyRenderContextBackend());
+
+        Assert.Throws<NotSupportedException>(
+            () => context.GetOrCreateTexture<Rgba8, float4>(new TextureHandle(1), PixelFormat.Rgba8));
+        Assert.Throws<NotSupportedException>(
+            () => context.GetTextureInput(new TextureHandle(1)));
+    }
+
+    [Fact]
+    public void GpuResidentTextureOutputRejectsMismatchedDimensions()
+    {
+        var context = new RenderContext(new LegacyRenderContextBackend());
+
+        // Dimensions are validated before the backend is consulted, so an unsupported host still
+        // reports the more specific error.
+        Assert.Throws<ArgumentException>(
+            () => context.SetTextureOutput(
+                new TextureHandle(1),
+                new StubGpuTexture2D(64, 64, PixelFormat.R32Float)));
+        Assert.Throws<ArgumentNullException>(
+            () => context.SetTextureOutput(new TextureHandle(1), null!));
+    }
+
+    private sealed class StubGpuTexture2D(int width, int height, PixelFormat format) : IGpuTexture2D
+    {
+        public int Width => width;
+        public int Height => height;
+        public PixelFormat Format => format;
+        public TextureAccess Access => TextureAccess.ReadWrite;
+    }
+
+    [Fact]
     public void ShaderMathSupportsCpuEquivalentSmokeOperations()
     {
         var a = new float3(1, 2, 3);
