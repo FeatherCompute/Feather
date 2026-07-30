@@ -41,6 +41,47 @@ public class ProjectShapeTests
     }
 
     [Fact]
+    public void ShaderLibraryPacksWhereTheTargetsFileLooksForIt()
+    {
+        // The two halves of shader injection live in different files and are only wrong together:
+        // Feather.csproj decides where the sources land in the package, FeatherCompute.targets decides
+        // where to glob for them, and the targets file resolves that path relative to its own
+        // directory. NuGet imports it from buildTransitive, so the sources have to be there too.
+        //
+        // Source mode reads the sources straight out of the checkout, so it keeps working either way.
+        // That asymmetry is what makes this worth a test: nothing in a local build or in the generator
+        // suite notices, and the first symptom is a consumer whose project cannot resolve a shared
+        // helper against a published package.
+        var root = FindRepositoryRoot();
+        var project = XDocument.Load(Path.Combine(root, "src", "Feather", "Feather.csproj"));
+        var targets = File.ReadAllText(
+            Path.Combine(root, "src", "Feather", "build", "FeatherCompute.targets"));
+
+        var shaderItem = project.Descendants("None")
+            .Single(element => (string?)element.Attribute("Include") == @"Shaders\**\*.cs");
+        var targetsItem = project.Descendants("None")
+            .Single(element => (string?)element.Attribute("Include") == @"build\FeatherCompute.targets");
+
+        Assert.Equal("true", (string?)shaderItem.Attribute("Pack"));
+        Assert.Equal(@"buildTransitive\shaders", (string?)shaderItem.Attribute("PackagePath"));
+
+        // Read the directory the targets file falls back to out of the targets file itself, so the two
+        // cannot drift apart without one of these assertions failing.
+        var packagedTargetsDirectory = Path.GetDirectoryName(
+            ((string?)targetsItem.Attribute("PackagePath"))!.Replace('\\', '/'));
+        var packagedShaderDirectory = ((string?)shaderItem.Attribute("PackagePath"))!.Replace('\\', '/');
+
+        Assert.Contains(
+            "<FeatherShaderLibraryDirectory Condition=\"'$(FeatherShaderLibraryDirectory)' == ''\">$(MSBuildThisFileDirectory)shaders</FeatherShaderLibraryDirectory>",
+            targets);
+        Assert.Equal($"{packagedTargetsDirectory}/shaders", packagedShaderDirectory);
+
+        // The helpers are only shareable as source; a compiled copy is rejected with FE0008.
+        Assert.Contains(@"<Compile Remove=""Shaders\**\*.cs"" />", File.ReadAllText(
+            Path.Combine(root, "src", "Feather", "Feather.csproj")), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NativeBuildLinksEasyGpuCore()
     {
         var root = FindRepositoryRoot();

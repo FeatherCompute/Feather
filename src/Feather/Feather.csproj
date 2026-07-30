@@ -21,12 +21,18 @@
   <!-- Shared shader helpers reach consumers as injected source (see FeatherCompute.targets), so they
        must not also be compiled into this assembly: a consuming project would then see the same
        types twice. Packed as content beside buildTransitive instead. Feather.Integration.Tests
-       includes the directory explicitly, which is what type-checks it in CI. -->
+       includes the directory explicitly, which is what type-checks it in CI.
+
+       The path has to be buildTransitive\shaders rather than build\shaders: the targets file locates
+       the sources relative to its own directory, and NuGet imports it from buildTransitive, so
+       packing them under build\ leaves the glob matching nothing. Source mode reads the checkout
+       directly and so keeps working either way, which is what makes the mistake easy to ship: the
+       two modes are supposed to compile identical text. ProjectShapeTests pins the pair. -->
   <ItemGroup>
     <Compile Remove="Shaders\**\*.cs" />
     <None Include="Shaders\**\*.cs"
           Pack="true"
-          PackagePath="build\shaders"
+          PackagePath="buildTransitive\shaders"
           Visible="true" />
   </ItemGroup>
 
