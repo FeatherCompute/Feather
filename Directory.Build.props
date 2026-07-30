@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.2.0</VersionPrefix>
-    <VersionSuffix>preview.3</VersionSuffix>
+    <VersionSuffix>preview.4</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
