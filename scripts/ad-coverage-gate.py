@@ -54,7 +54,7 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
     ScopeEntry(
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
         "AD marker validation, AD callable policy, and traceable parameter analysis",
-        ((272, 411), (713, 734), (1978, 2022), (2033, 2123)),
+        ((272, 411), (713, 734), (1979, 2023), (2034, 2124)),
         ("Feather.Generators/Model/ShaderModelFactory.cs",),
         (
             ("var lossCount = 0;", "private static bool IsAutoDiffMarkerMethod("),
@@ -123,7 +123,7 @@ LINE_EXCLUSIONS: dict[tuple[str, int], str] = {
     **{
         ("src/Feather.Generators/Model/ShaderModelFactory.cs", line):
             "type-null guard for AD marker value-type helper is defensive after Roslyn binding"
-        for line in (1981, 1982)
+        for line in (1982, 1983)
     },
     **{
         ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
@@ -241,43 +241,43 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "non-buffer source guard is retained defensively; texture/sampler and buffer paths are covered at diagnostics",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1980,
+        1981,
     ): "type-null guard for AD marker value-type helper; concrete supported/unsupported marker types are tested",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2041,
+        2042,
     ): "traceable-source resource-kind and argument-count guard includes defensive non-resource element access branches",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2047,
+        2048,
     ): "resource-name syntax switch fallback bookkeeping; identifier buffer sources are covered by AD metadata tests",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2055,
+        2056,
     ): "empty resource/index defensive guard is unreachable for parsed buffer element syntax",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2060,
+        2061,
     ): "value-type null fallback for parsed buffer element syntax; scalar/vector parameter metadata is covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2076,
+        2077,
     ): "local-alias declaration-shape guard; direct, casted, mutated, and untraceable aliases are covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2084,
+        2085,
     ): "alias Execute-body absence guard is unreachable for validated kernels",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2092,
+        2093,
     ): "alias assignment scan line mixes covered reassignment rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2109,
+        2110,
     ): "alias increment scan line mixes covered increment/decrement rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2114,
+        2115,
     ): "increment/decrement operation pattern includes defensive non-local target subbranches",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
