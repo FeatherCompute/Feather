@@ -58,7 +58,31 @@ public sealed class SceneGeometry
 /// <summary>
 /// Camera data resolved by a render host for the current render request.
 /// </summary>
-public readonly record struct RenderCamera(float4x4 ViewProjection);
+/// <param name="ViewProjection">
+/// The clip-space view-projection a rasterizer feeds to <c>gl_Position</c>. On the Blender path this
+/// carries the OpenGL-to-Vulkan viewport fixup (Y flip, depth 0..1), so it is intentionally NOT the
+/// mutual inverse of <paramref name="InverseViewProjection"/>.
+/// </param>
+/// <param name="InverseViewProjection">
+/// The inverse of the raw camera view-projection, before any rasterizer viewport fixup. A compute
+/// pass unprojects clip-space NDC through this to build world-space rays; keeping it in the raw space
+/// decouples ray reconstruction from rasterization-only clip conventions.
+/// </param>
+/// <param name="WorldPosition">The camera eye in world space, used for eye-distance shading.</param>
+public readonly record struct RenderCamera(
+    float4x4 ViewProjection,
+    float4x4 InverseViewProjection,
+    float3 WorldPosition)
+{
+    /// <summary>
+    /// Back-compat constructor for callers that only have a view-projection: the inverse is derived
+    /// and the eye defaults to the origin. Keeps existing <c>new RenderCamera(vp)</c> call sites working.
+    /// </summary>
+    public RenderCamera(float4x4 viewProjection)
+        : this(viewProjection, viewProjection.Inverse(), new float3(0.0f, 0.0f, 0.0f))
+    {
+    }
+}
 
 /// <summary>
 /// Host-side storage for the RGBA8 viewport output contract.

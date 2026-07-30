@@ -59,6 +59,8 @@ internal sealed class RenderHostRunner : IDisposable
                 request.Width,
                 request.Height,
                 request.ViewProjection,
+                request.InverseViewProjection,
+                request.CameraPosition,
                 viewState);
             frame = execution.Frame;
             buildId = execution.BuildId;

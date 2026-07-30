@@ -23,6 +23,10 @@ internal sealed class RenderRequest
     public string ClipSpace { get; init; } = "blender-opengl";
     public float[] ViewProjection { get; init; } = [];
 
+    // Optional camera eye in world space. Added without a schema bump: older hosts ignore the extra
+    // field, and this host defaults the eye when it is absent, so old and new add-ons interoperate.
+    public float[]? CameraPosition { get; init; }
+
     public static ResolvedRenderRequest Load(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -54,7 +58,9 @@ internal sealed class RenderRequest
             ResolvePath(baseDirectory, request.OutputPath),
             request.Width,
             request.Height,
-            MatrixProtocol.ConvertViewProjection(request.ViewProjection, request.ClipSpace));
+            MatrixProtocol.ConvertViewProjection(request.ViewProjection, request.ClipSpace),
+            MatrixProtocol.FromRowMajor(request.ViewProjection).Inverse(),
+            MatrixProtocol.ResolveCameraPosition(request.CameraPosition, request.ViewProjection));
     }
 
     private void Validate()
@@ -100,6 +106,12 @@ internal sealed class RenderRequest
         {
             throw new InvalidDataException($"Unsupported request clip space: '{ClipSpace}'.");
         }
+
+        if (CameraPosition is not null
+            && (CameraPosition.Length != 3 || CameraPosition.Any(value => !float.IsFinite(value))))
+        {
+            throw new InvalidDataException("cameraPosition, when present, must contain 3 finite values.");
+        }
     }
 
     private static void RequirePath(string value, string name)
@@ -124,7 +136,9 @@ internal sealed record ResolvedRenderRequest(
     string OutputPath,
     int Width,
     int Height,
-    float4x4 ViewProjection);
+    float4x4 ViewProjection,
+    float4x4 InverseViewProjection,
+    float3 CameraPosition);
 
 internal static class MatrixProtocol
 {
@@ -140,6 +154,28 @@ internal static class MatrixProtocol
             new float4(values[1], values[5], values[9], values[13]),
             new float4(values[2], values[6], values[10], values[14]),
             new float4(values[3], values[7], values[11], values[15]));
+    }
+
+    /// <summary>
+    /// Resolves the camera eye in world space. When the request omits <c>cameraPosition</c>, the eye is
+    /// recovered by unprojecting the screen-centre near-plane point through the inverse raw
+    /// view-projection, which keeps ray origins valid for older add-ons that do not send it.
+    /// </summary>
+    public static float3 ResolveCameraPosition(IReadOnlyList<float>? position, IReadOnlyList<float> viewProjection)
+    {
+        if (position is { Count: 3 })
+        {
+            return new float3(position[0], position[1], position[2]);
+        }
+
+        var inverse = FromRowMajor(viewProjection).Inverse();
+        var near = inverse * new float4(0.0f, 0.0f, -1.0f, 1.0f);
+        if (near.W == 0.0f || !float.IsFinite(near.W))
+        {
+            return new float3(0.0f, 0.0f, 0.0f);
+        }
+
+        return new float3(near.X / near.W, near.Y / near.W, near.Z / near.W);
     }
 
     public static float4x4 ConvertViewProjection(IReadOnlyList<float> values, string clipSpace)

@@ -24,6 +24,8 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         int width,
         int height,
         float4x4 viewProjection,
+        float4x4 inverseViewProjection,
+        float3 cameraPosition,
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -46,7 +48,8 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         // different View is active, so checking every execution prevents stale per-View history.
         viewState.PreparePassBuild(manifest.BuildId, graph);
 
-        return current!.Execute(graph, scene, width, height, viewProjection, reloaded, viewState);
+        return current!.Execute(
+            graph, scene, width, height, viewProjection, inverseViewProjection, cameraPosition, reloaded, viewState);
     }
 
     public void Dispose()
@@ -174,6 +177,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
         int width,
         int height,
         float4x4 viewProjection,
+        float4x4 inverseViewProjection,
+        float3 cameraPosition,
         bool reloaded,
         RenderViewState viewState)
     {
@@ -188,6 +193,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
             height,
             graph.SampleCount,
             viewProjection,
+            inverseViewProjection,
+            cameraPosition,
             resources,
             viewState.History,
             texturePool);
@@ -1374,6 +1381,8 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         int height,
         SampleCount sampleCount,
         float4x4 viewProjection,
+        float4x4 inverseViewProjection,
+        float3 cameraPosition,
         GraphResourceResolver resources,
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool)
@@ -1382,7 +1391,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         materials = scene.Materials;
         textures = scene.Textures;
-        camera = new RenderCamera(viewProjection);
+        camera = new RenderCamera(viewProjection, inverseViewProjection, cameraPosition);
         lights = scene.Lights;
         time = scene.Time;
         this.resources = resources;

@@ -358,7 +358,8 @@ internal sealed class ProtocolFixture : IDisposable
         string clipSpace = "vulkan",
         string? manifestPath = null,
         ulong requestId = 42,
-        float[]? viewProjection = null)
+        float[]? viewProjection = null,
+        float[]? cameraPosition = null)
     {
         viewProjection ??=
         [
@@ -367,22 +368,27 @@ internal sealed class ProtocolFixture : IDisposable
             0, 0, 1, 0,
             0, 0, 0, 1
         ];
-        var request = new
+        var request = new Dictionary<string, object?>
         {
-            schemaVersion = 1,
-            requestId,
-            generationId = GenerationId,
-            viewId = "view-1",
-            scenePath = Path.GetFileName(ScenePath),
-            graphPath = Path.GetFileName(GraphPath),
-            manifestPath,
-            outputPath = Path.GetFileName(OutputPath),
-            width = 64,
-            height = 64,
-            matrixLayout = "row-major",
-            clipSpace,
-            viewProjection
+            ["schemaVersion"] = 1,
+            ["requestId"] = requestId,
+            ["generationId"] = GenerationId,
+            ["viewId"] = "view-1",
+            ["scenePath"] = Path.GetFileName(ScenePath),
+            ["graphPath"] = Path.GetFileName(GraphPath),
+            ["manifestPath"] = manifestPath,
+            ["outputPath"] = Path.GetFileName(OutputPath),
+            ["width"] = 64,
+            ["height"] = 64,
+            ["matrixLayout"] = "row-major",
+            ["clipSpace"] = clipSpace,
+            ["viewProjection"] = viewProjection
         };
+        // Only emit cameraPosition when supplied, so tests can exercise the absent-field default path.
+        if (cameraPosition is not null)
+        {
+            request["cameraPosition"] = cameraPosition;
+        }
         File.WriteAllText(RequestPath, JsonSerializer.Serialize(request));
     }
 
