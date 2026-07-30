@@ -9,6 +9,25 @@
     <FeatherDotNetHostPath Condition="'$(FeatherDotNetHostPath)' == ''">dotnet</FeatherDotNetHostPath>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <FeatherInjectShaderLibrary Condition="'$(FeatherInjectShaderLibrary)' == ''">true</FeatherInjectShaderLibrary>
+    <FeatherShaderLibraryDirectory Condition="'$(FeatherShaderLibraryDirectory)' == '' and Exists('$(MSBuildThisFileDirectory)../Shaders')">$(MSBuildThisFileDirectory)../Shaders</FeatherShaderLibraryDirectory>
+    <FeatherShaderLibraryDirectory Condition="'$(FeatherShaderLibraryDirectory)' == ''">$(MSBuildThisFileDirectory)shaders</FeatherShaderLibraryDirectory>
+  </PropertyGroup>
+
+  <!-- The shared shader library has to arrive as source, not as a reference. The generator lowers
+       [Callable] bodies from syntax, so a callable that only exists in a compiled assembly is
+       rejected with FE0008 ("must be source-available"). Injecting the text is what lets a helper
+       like FeatherCamera be shared instead of copy-pasted into every project.
+
+       Two locations because the file sits at src/Feather/Shaders in a checkout but ships beside
+       buildTransitive in the package; both SDK modes must see identical source. -->
+  <ItemGroup Condition="'$(FeatherInjectShaderLibrary)' == 'true' and Exists('$(FeatherShaderLibraryDirectory)')">
+    <Compile Include="$(FeatherShaderLibraryDirectory)/**/*.cs"
+             Visible="false"
+             FeatherInjectedShaderLibrary="true" />
+  </ItemGroup>
+
   <ItemGroup>
     <CompilerVisibleItemMetadata Include="Compile" MetadataName="FeatherProjectRelativePath" />
     <Compile Update="@(Compile)" FeatherProjectRelativePath="%(Identity)" />

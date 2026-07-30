@@ -18,6 +18,18 @@
     <ProjectReference Include="..\Feather.NativeAssets\Feather.NativeAssets.csproj" />
   </ItemGroup>
 
+  <!-- Shared shader helpers reach consumers as injected source (see FeatherCompute.targets), so they
+       must not also be compiled into this assembly: a consuming project would then see the same
+       types twice. Packed as content beside buildTransitive instead. Feather.Integration.Tests
+       includes the directory explicitly, which is what type-checks it in CI. -->
+  <ItemGroup>
+    <Compile Remove="Shaders\**\*.cs" />
+    <None Include="Shaders\**\*.cs"
+          Pack="true"
+          PackagePath="build\shaders"
+          Visible="true" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="build\FeatherCompute.targets"
           Pack="true"

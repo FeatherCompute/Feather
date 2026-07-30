@@ -24,4 +24,12 @@
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!-- Feather.csproj deliberately does not compile its shader helpers, because consumers receive
+       them as injected source instead. Including them here is what type-checks them and runs the
+       generator over them, so a mistake surfaces in CI rather than in someone's project. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\Feather\Shaders\**\*.cs"
+             LinkBase="InjectedShaders" />
+  </ItemGroup>
 </Project>
