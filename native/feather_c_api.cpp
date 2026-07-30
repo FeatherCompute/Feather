@@ -2697,6 +2697,9 @@ std::string easygpu_intrinsic_name(const std::string& symbol) {
     if (symbol == "global::Feather.Math.ShaderMath.Cross" || symbol == "global::Feather.Math.Hlsl.Cross") {
         return "cross";
     }
+    if (symbol == "global::Feather.Math.ShaderMath.Reflect" || symbol == "global::Feather.Math.Hlsl.Reflect") {
+        return "reflect";
+    }
 
     return {};
 }

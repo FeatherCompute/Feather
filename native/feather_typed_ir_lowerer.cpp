@@ -2550,6 +2550,10 @@ private:
         if (symbol == "global::Feather.Math.ShaderMath.Cross" || symbol == "global::Feather.Math.Hlsl.Cross") {
             return "cross";
         }
+        if (symbol == "global::Feather.Math.ShaderMath.Reflect" ||
+            symbol == "global::Feather.Math.Hlsl.Reflect") {
+            return "reflect";
+        }
         if (symbol == "global::Feather.Math.ShaderMath.Mul" || symbol == "global::Feather.Math.Hlsl.Mul") {
             return "matrix_multiply";
         }

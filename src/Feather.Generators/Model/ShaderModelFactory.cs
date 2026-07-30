@@ -1110,6 +1110,7 @@ internal static class ShaderModelFactory
             "Smoothstep" => ShaderSemanticFacts.HasFloatSignature(symbol, 3),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(symbol),
             "Cross" => ShaderSemanticFacts.HasFloat3CrossSignature(symbol),
+            "Reflect" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),
             "Mul" => ShaderSemanticFacts.HasMatrixMulSignature(symbol),
             "Transpose" or "Inverse" => ShaderSemanticFacts.HasMatrixTransformSignature(symbol),
             "Determinant" => ShaderSemanticFacts.HasMatrixScalarSignature(symbol),

@@ -23,6 +23,24 @@ public static class ShaderMath
     /// <summary>
     /// Computes the cross product of two three-component vectors.
     /// </summary>
+    /// <summary>Reflects <paramref name="incident"/> about <paramref name="normal"/>.</summary>
+    /// <remarks>The normal is assumed to be unit length, matching GLSL's builtin.</remarks>
+    public static float2 Reflect(float2 incident, float2 normal)
+    {
+        var scale = 2.0f * Dot(incident, normal);
+        return new float2(incident.X - scale * normal.X, incident.Y - scale * normal.Y);
+    }
+
+    /// <inheritdoc cref="Reflect(float2, float2)"/>
+    public static float3 Reflect(float3 incident, float3 normal)
+    {
+        var scale = 2.0f * Dot(incident, normal);
+        return new float3(
+            incident.X - scale * normal.X,
+            incident.Y - scale * normal.Y,
+            incident.Z - scale * normal.Z);
+    }
+
     public static float3 Cross(float3 a, float3 b)
         => new(
             (a.Y * b.Z) - (a.Z * b.Y),
@@ -286,6 +304,9 @@ public static class ShaderMath
     /// </summary>
     public static float Min(float x, float y) => MathF.Min(x, y);
 
+    /// <summary>Integer minimum, for clamping indices inside a kernel.</summary>
+    public static int Min(int x, int y) => System.Math.Min(x, y);
+
     /// <summary>
     /// Returns the lesser value for each component.
     /// </summary>
@@ -306,6 +327,9 @@ public static class ShaderMath
     /// </summary>
     public static float Max(float x, float y) => MathF.Max(x, y);
 
+    /// <summary>Integer maximum, for clamping indices inside a kernel.</summary>
+    public static int Max(int x, int y) => System.Math.Max(x, y);
+
     /// <summary>
     /// Returns the greater value for each component.
     /// </summary>
@@ -325,6 +349,9 @@ public static class ShaderMath
     /// Clamps a scalar to a closed interval.
     /// </summary>
     public static float Clamp(float x, float min, float max) => System.Math.Clamp(x, min, max);
+
+    /// <summary>Integer clamp, for keeping a texture index inside bounds.</summary>
+    public static int Clamp(int x, int min, int max) => System.Math.Clamp(x, min, max);
 
     /// <summary>
     /// Clamps each vector component to a closed scalar interval.

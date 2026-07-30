@@ -89,9 +89,37 @@ internal static class ShaderSemanticFacts
             && IsSameType(method.ReturnType, method.Parameters[0].Type)
             && (IsFloatType(method.ReturnType) || IsFloatVectorType(method.ReturnType));
 
+    /// <summary>
+    /// Reports whether a method takes and returns <c>int</c> only, which GLSL's integer overloads of
+    /// min, max and clamp accept directly.
+    /// </summary>
+    public static bool HasIntSignature(IMethodSymbol method, int parameterCount)
+    {
+        if (method.Parameters.Length != parameterCount ||
+            method.ReturnType.SpecialType != SpecialType.System_Int32)
+        {
+            return false;
+        }
+        foreach (var parameter in method.Parameters)
+        {
+            if (parameter.Type.SpecialType != SpecialType.System_Int32)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static bool HasFloatOrMatchingFloatVectorBinarySignature(IMethodSymbol method)
     {
         if (HasFloatSignature(method, 2))
+        {
+            return true;
+        }
+
+        // GLSL min/max accept integers, and clamping an index is common enough in a kernel that
+        // forcing a hand-written comparison chain is a pointless restriction.
+        if (HasIntSignature(method, 2))
         {
             return true;
         }
@@ -105,6 +133,11 @@ internal static class ShaderSemanticFacts
     public static bool HasFloatOrMatchingFloatVectorClampSignature(IMethodSymbol method)
     {
         if (HasFloatSignature(method, 3))
+        {
+            return true;
+        }
+
+        if (HasIntSignature(method, 3))
         {
             return true;
         }

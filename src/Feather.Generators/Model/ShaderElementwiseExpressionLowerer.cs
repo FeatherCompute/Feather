@@ -538,6 +538,7 @@ internal static class ShaderElementwiseExpressionLowerer
             "Smoothstep" => ShaderSemanticFacts.HasFloatSignature(method, 3),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(method),
             "Cross" => ShaderSemanticFacts.HasFloat3CrossSignature(method),
+            "Reflect" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),
             "Mul" => ShaderSemanticFacts.HasMatrixMulSignature(method),
             "Transpose" or "Inverse" => ShaderSemanticFacts.HasMatrixTransformSignature(method),
             "Determinant" => ShaderSemanticFacts.HasMatrixScalarSignature(method),
