@@ -154,7 +154,8 @@ internal sealed class RenderGraphDocument
             }
             RequireNonEmpty(node.NodeId, "nodes.nodeId");
             RequireNonEmpty(node.Kind, "nodes.kind");
-            if (node.Kind is not ("scene" or "pass" or "output" or "history-read" or "history-write"))
+            if (node.Kind is not ("scene" or "pass" or "output" or "history-read" or "history-write"
+                    or "texture"))
             {
                 throw new InvalidDataException(
                     $"Render graph node '{node.NodeId}' has unsupported kind '{node.Kind}'.");
@@ -180,6 +181,26 @@ internal sealed class RenderGraphDocument
                 {
                     throw new InvalidDataException(
                         $"Render graph history key '{node.HistoryKey}' is invalid.");
+                }
+            }
+            else if (node.Kind == "texture")
+            {
+                RequireNonEmpty(node.TextureKey, "nodes.textureKey");
+                if (node.TextureKey.Length > 128 || node.TextureKey.Any(char.IsControl))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph texture key '{node.TextureKey}' is invalid.");
+                }
+                if (node.Source is not ("IMAGE" or "COMPUTE"))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph texture '{node.TextureKey}' has unsupported source '{node.Source}'.");
+                }
+                if (!node.MatchRenderSize && (node.Width < 1 || node.Height < 1 ||
+                    node.Width > 8192 || node.Height > 8192))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph texture '{node.TextureKey}' has an invalid explicit size.");
                 }
             }
         }
@@ -255,6 +276,17 @@ internal sealed class RenderGraphDocument
             {
                 executionNodeIds.Add(historyWrite.NodeId);
                 pendingNodes.Push(historyWrite.NodeId);
+            }
+        }
+        // A Texture node that something writes into is a destination in its own right. Without
+        // seeding it the pass feeding it would be pruned whenever the output does not also read it,
+        // which is exactly the case for a simulation that only shows its result a frame later.
+        foreach (var textureNode in Nodes.Where(node => node.Kind == "texture"))
+        {
+            if (Links.Any(link => string.Equals(link.ToNode, textureNode.NodeId, StringComparison.Ordinal)))
+            {
+                executionNodeIds.Add(textureNode.NodeId);
+                pendingNodes.Push(textureNode.NodeId);
             }
         }
         var incomingNodes = Links
@@ -487,6 +519,16 @@ internal sealed class GraphNode
     public bool Muted { get; init; }
     public JsonElement Parameters { get; init; }
     public string HistoryKey { get; init; } = "";
+
+    // Texture nodes declare a graph resource the user controls: a Blender image to sample, or an
+    // empty target a compute pass writes into.
+    public string TextureKey { get; init; } = "";
+    public string Source { get; init; } = "";
+    public string Format { get; init; } = "";
+    public bool MatchRenderSize { get; init; } = true;
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public string ImageName { get; init; } = "";
 }
 
 internal sealed class GraphLink

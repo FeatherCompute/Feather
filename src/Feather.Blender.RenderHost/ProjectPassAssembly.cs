@@ -580,6 +580,8 @@ internal sealed class GraphResourceResolver
     private readonly HashSet<ulong> writableTextureHandles = [];
     private readonly Dictionary<(string NodeId, string SocketGuid), BufferHandle> bufferHandles = new();
     private readonly Dictionary<ulong, string> writableBufferElementTypes = [];
+    private readonly Dictionary<string, TextureHandle> textureNodeHandles = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GraphNode> textureNodes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextureHandle> historyReadHandles = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextureHandle> historyWriteSources = new(StringComparer.Ordinal);
     private ulong nextTextureHandle = FirstTextureHandle;
@@ -589,6 +591,17 @@ internal sealed class GraphResourceResolver
     {
         this.graph = graph;
         this.manifest = manifest;
+
+        // A Texture node is a graph-visible resource, so it gets its own handle: a pass can
+        // sample it, and a pass linked into its Write socket renders into it.
+        foreach (var textureNode in graph.Nodes.Where(node => node.Kind == "texture"))
+        {
+            var handle = new TextureHandle(nextTextureHandle++);
+            textureNodeHandles.Add(textureNode.NodeId, handle);
+            textureNodes.Add(textureNode.NodeId, textureNode);
+            textureIdentities.Add(handle.Value, $"texture|{textureNode.TextureKey}");
+            writableTextureHandles.Add(handle.Value);
+        }
 
         foreach (var historyRead in graph.HistoryReads)
         {
@@ -651,7 +664,7 @@ internal sealed class GraphResourceResolver
         }
         if (IsTexture(output.ResourceKind))
         {
-            return TextureHandleFor(passNode.NodeId, output.SocketGuid);
+            return PassTextureOutputHandle(passNode.NodeId, output.SocketGuid);
         }
         if (IsBuffer(output.ResourceKind))
         {
@@ -753,6 +766,36 @@ internal sealed class GraphResourceResolver
         return Enum.IsDefined(pixelFormat);
     }
 
+    /// <summary>Texture nodes declared in the graph, keyed by node ID.</summary>
+    public IReadOnlyDictionary<string, GraphNode> TextureNodes => textureNodes;
+
+    public TextureHandle TextureNodeHandle(string nodeId) => textureNodeHandles[nodeId];
+
+    /// <summary>
+    /// Reports the size and format a Texture node declares for the resource behind
+    /// <paramref name="handle"/>. Width and height are zero when the node follows the render size.
+    /// </summary>
+    public bool TryGetTextureNodeAllocation(
+        TextureHandle handle,
+        out (int Width, int Height, PixelFormat Format) allocation)
+    {
+        foreach (var (nodeId, nodeHandle) in textureNodeHandles)
+        {
+            if (nodeHandle.Value != handle.Value)
+            {
+                continue;
+            }
+            var node = textureNodes[nodeId];
+            var format = TryParsePixelFormat(node.Format, out var parsed) ? parsed : PixelFormat.Rgba8;
+            allocation = node.MatchRenderSize
+                ? (0, 0, format)
+                : (node.Width, node.Height, format);
+            return true;
+        }
+        allocation = default;
+        return false;
+    }
+
     public IReadOnlyDictionary<string, TextureHandle> HistoryReadHandles => historyReadHandles;
 
     public IReadOnlyDictionary<string, TextureHandle> HistoryWriteSources => historyWriteSources;
@@ -793,6 +836,14 @@ internal sealed class GraphResourceResolver
                 "Unknown",
                 historyReadHandles[node.HistoryKey]);
         }
+        if (node.Kind == "texture")
+        {
+            return new ResolvedGraphResource(
+                "Texture2D",
+                string.IsNullOrEmpty(node.Format) ? "Unknown" : node.Format,
+                "Unknown",
+                textureNodeHandles[node.NodeId]);
+        }
         if (node.Kind != "pass")
         {
             throw new InvalidDataException(
@@ -806,7 +857,7 @@ internal sealed class GraphResourceResolver
             object handle;
             if (IsTexture(output.ResourceKind))
             {
-                handle = TextureHandleFor(node.NodeId, output.SocketGuid);
+                handle = PassTextureOutputHandle(node.NodeId, output.SocketGuid);
             }
             else if (IsBuffer(output.ResourceKind))
             {
@@ -838,6 +889,25 @@ internal sealed class GraphResourceResolver
         var source = ResolveSource(inputLink.FromNode, inputLink.FromSocket);
         RequireCompatible(source, output, inputLink);
         return source;
+    }
+
+    /// <summary>
+    /// Resolves where a pass's texture output actually lands.
+    ///
+    /// Wiring the output into a Texture node's Write socket makes that node's resource the
+    /// destination, so the texture the user declared in the graph receives the work. Every consumer
+    /// of the same output has to resolve to the same handle, otherwise a second consumer -- a
+    /// History Write, say -- would look for a resource nothing produced.
+    /// </summary>
+    private TextureHandle PassTextureOutputHandle(string nodeId, string socketGuid)
+    {
+        var writeTarget = graph.Links.FirstOrDefault(link =>
+            string.Equals(link.FromNode, nodeId, StringComparison.Ordinal) &&
+            string.Equals(link.FromSocket, socketGuid, StringComparison.OrdinalIgnoreCase) &&
+            textureNodeHandles.ContainsKey(link.ToNode));
+        return writeTarget is not null
+            ? textureNodeHandles[writeTarget.ToNode]
+            : TextureHandleFor(nodeId, socketGuid);
     }
 
     private TextureHandle TextureHandleFor(string nodeId, string socketGuid)
@@ -1412,11 +1482,21 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         PixelFormat format)
         where TPixel : unmanaged
         where TValue : unmanaged
-        => texturePool.GetOrCreate<TPixel, TValue>(
+    {
+        // A Texture node owns its format and size, so its declaration wins over whatever the pass
+        // asked for. That is the point of putting the texture in the graph: the user controls it.
+        if (resources.TryGetTextureNodeAllocation(handle, out var declared))
+        {
+            width = declared.Width > 0 ? declared.Width : width;
+            height = declared.Height > 0 ? declared.Height : height;
+            format = declared.Format;
+        }
+        return texturePool.GetOrCreate<TPixel, TValue>(
             resources.TextureIdentity(handle),
             width,
             height,
             format);
+    }
 
     public IGpuTexture2D GetTextureInput(TextureHandle handle)
     {
@@ -1436,6 +1516,19 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             uploaded.Upload(frame.Pixels);
             gpuTextures[handle.Value] = uploaded;
             return uploaded;
+        }
+        if (resources.TryGetTextureNodeAllocation(handle, out var declared))
+        {
+            // A Texture node exists whether or not anything has written it yet, so reading one on
+            // the first frame allocates it cleared rather than failing. A compute target has to be
+            // readable before its producer runs for ping-pong to work at all.
+            var allocated = texturePool.GetOrCreate<float, float4>(
+                resources.TextureIdentity(handle),
+                declared.Width > 0 ? declared.Width : Width,
+                declared.Height > 0 ? declared.Height : Height,
+                declared.Format);
+            gpuTextures[handle.Value] = allocated;
+            return allocated;
         }
         throw new KeyNotFoundException(
             $"Texture handle {handle.Value} has not been produced by an upstream pass.");
