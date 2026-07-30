@@ -693,6 +693,66 @@ internal sealed class GraphResourceResolver
             ? elementType
             : throw new KeyNotFoundException($"Unknown buffer output handle {handle.Value}.");
 
+    /// <summary>
+    /// Resolves the pixel format a History Read should be seeded with, taken from the format
+    /// declared by the pass input that consumes it.
+    ///
+    /// A History Read node carries no format of its own, so without this a float consumer would be
+    /// handed an RGBA8 seed on the first frame and would keep restarting from it.
+    /// </summary>
+    public PixelFormat HistoryReadFormat(string historyKey)
+    {
+        if (!historyReadHandles.TryGetValue(historyKey, out var handle))
+        {
+            return PixelFormat.Rgba8;
+        }
+
+        PixelFormat? resolved = null;
+        foreach (var passNode in graph.Passes)
+        {
+            var definition = manifest.DefinitionFor(passNode);
+            foreach (var input in definition.Inputs)
+            {
+                var link = graph.IncomingLink(passNode.NodeId, input.SocketGuid);
+                if (link is null)
+                {
+                    continue;
+                }
+                var source = ResolveSource(link.FromNode, link.FromSocket);
+                if (source.Handle is not TextureHandle sourceHandle ||
+                    sourceHandle.Value != handle.Value ||
+                    !TryParsePixelFormat(input.Format, out var candidate))
+                {
+                    continue;
+                }
+                if (resolved is { } existing && existing != candidate)
+                {
+                    throw new InvalidDataException(
+                        $"History resource '{historyKey}' is read as both {existing} and {candidate}. " +
+                        "Give every consumer the same format.");
+                }
+                resolved = candidate;
+            }
+        }
+        return resolved ?? PixelFormat.Rgba8;
+    }
+
+    /// <summary>
+    /// Maps a manifest format string onto <see cref="PixelFormat"/>. The two enumerations share
+    /// their member values, so a parsed <see cref="TextureFormat"/> converts directly.
+    /// </summary>
+    public static bool TryParsePixelFormat(string format, out PixelFormat pixelFormat)
+    {
+        pixelFormat = PixelFormat.Unknown;
+        if (!Enum.TryParse<TextureFormat>(format, ignoreCase: true, out var textureFormat) ||
+            textureFormat == TextureFormat.Unknown)
+        {
+            return false;
+        }
+        pixelFormat = (PixelFormat)(uint)textureFormat;
+        return Enum.IsDefined(pixelFormat);
+    }
+
     public IReadOnlyDictionary<string, TextureHandle> HistoryReadHandles => historyReadHandles;
 
     public IReadOnlyDictionary<string, TextureHandle> HistoryWriteSources => historyWriteSources;
@@ -1268,9 +1328,22 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
                 continue;
             }
 
-            // No previous frame exists yet. A GPU-resident consumer replaces this seed on its
-            // first read; keeping the CPU seed here means a software consumer still starts from a
-            // defined image.
+            // No previous frame exists yet. Seed in the format the consuming pass declares:
+            // handing a float consumer an RGBA8 seed would give it the wrong texture type, and a
+            // simulation would restart from that seed on every frame instead of advancing.
+            var seedFormat = resources.HistoryReadFormat(key);
+            if (seedFormat != PixelFormat.Rgba8)
+            {
+                gpuTextures.Add(
+                    handle.Value,
+                    texturePool.GetOrCreate<float, float4>(
+                        $"history-seed|{key}",
+                        width,
+                        height,
+                        seedFormat));
+                continue;
+            }
+
             var pixels = new Rgba8[checked(width * height)];
             Array.Fill(pixels, new Rgba8(0, 0, 0, 255));
             frames.Add(handle.Value, new RenderedFrame(width, height, pixels, DispatchPath.None));
