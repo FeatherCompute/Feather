@@ -998,8 +998,18 @@ internal sealed class GraphResourceResolver
            string.Equals(right, "Unknown", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Reports whether a resource kind is carried by a <see cref="TextureHandle"/>.
+    ///
+    /// The Blender side already classifies these kinds as textures for socket colouring, so matching
+    /// only Texture2D here made the two disagree: a Texture3D or DepthTarget socket drawn as a
+    /// texture would fail resolution with "resource kind is not supported yet".
+    /// </summary>
     private static bool IsTexture(string resourceKind)
-        => string.Equals(resourceKind, "Texture2D", StringComparison.OrdinalIgnoreCase);
+        => string.Equals(resourceKind, "Texture2D", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(resourceKind, "Texture1D", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(resourceKind, "Texture3D", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(resourceKind, "DepthTarget", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsBuffer(string resourceKind)
         => string.Equals(resourceKind, "Buffer", StringComparison.OrdinalIgnoreCase);
