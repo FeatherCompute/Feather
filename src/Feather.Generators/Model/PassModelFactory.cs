@@ -299,7 +299,16 @@ internal static class PassModelFactory
             SpecialType.System_UInt16 => "ushort",
             SpecialType.System_UInt32 => "uint",
             SpecialType.System_UInt64 => "ulong",
-            _ => type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)
+            // Vector parameters are named without their namespace, matching how the shader side and
+            // the Blender UI refer to them. A fully-qualified name would not be recognised as a
+            // vector, so the parameter would fall back to a scalar control.
+            _ => type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) switch
+            {
+                "Feather.Math.float2" => "float2",
+                "Feather.Math.float3" => "float3",
+                "Feather.Math.float4" => "float4",
+                var other => other
+            }
         };
     }
 
@@ -328,9 +337,68 @@ internal static class PassModelFactory
             {
                 return JsonValue(constant.Value);
             }
+
+            // A vector default is written `new float3(x, y, z)`, which is not a compile-time
+            // constant, so read its arguments from the syntax instead. Without this the manifest
+            // records no default and the host rejects the parameter as an unconvertible value.
+            if (VectorInitializer(semanticModel, expression, cancellationToken) is { } vector)
+            {
+                return vector;
+            }
         }
 
         return null;
+    }
+
+    private static string? VectorInitializer(
+        SemanticModel semanticModel,
+        ExpressionSyntax expression,
+        CancellationToken cancellationToken)
+    {
+        if (expression is not BaseObjectCreationExpressionSyntax creation)
+        {
+            return null;
+        }
+
+        var type = semanticModel.GetTypeInfo(expression, cancellationToken).Type;
+        var expected = type?.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) switch
+        {
+            "Feather.Math.float2" => 2,
+            "Feather.Math.float3" => 3,
+            "Feather.Math.float4" => 4,
+            _ => 0
+        };
+        if (expected == 0)
+        {
+            return null;
+        }
+
+        var arguments = creation.ArgumentList?.Arguments ?? default;
+        var components = new List<string>(expected);
+        foreach (var argument in arguments)
+        {
+            var value = semanticModel.GetConstantValue(argument.Expression, cancellationToken);
+            if (!value.HasValue || value.Value is null)
+            {
+                return null;
+            }
+            components.Add(JsonValue(value.Value) ?? "0");
+        }
+
+        // A single scalar argument fills every component, matching the vector constructors.
+        if (components.Count == 1)
+        {
+            var repeated = components[0];
+            while (components.Count < expected)
+            {
+                components.Add(repeated);
+            }
+        }
+        if (components.Count != expected)
+        {
+            return null;
+        }
+        return "[" + string.Join(", ", components) + "]";
     }
 
     private static string? DefaultValue(ITypeSymbol type)
