@@ -38,6 +38,14 @@ internal sealed class GraphTexturePool : IDisposable
     }
 
     /// <summary>
+    /// Reports whether the next <see cref="GetOrCreate{TPixel,TValue}"/> for this identity would
+    /// allocate. Callers use this to clear a texture the first time it is handed out, since a
+    /// fresh allocation has undefined contents.
+    /// </summary>
+    public bool IsAllocated(string identity)
+        => textures.ContainsKey(identity);
+
+    /// <summary>
     /// Returns the pooled texture for <paramref name="identity"/>, allocating it on first use and
     /// reallocating it when the render size or pixel format changes.
     /// </summary>

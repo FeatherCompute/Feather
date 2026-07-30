@@ -38,9 +38,9 @@ public sealed class RenderSchedulingTests
         var graph = Graph(RenderExecutionMode.Realtime);
         var request = Request(1);
         var state = scheduler.Prepare(request, graph, SceneFingerprint);
-        state.CommitHistory(new Dictionary<string, RenderedFrame>
+        state.CommitHistory(new Dictionary<string, GraphHistoryEntry>
         {
-            ["taa"] = Frame(2, 2, 7)
+            ["taa"] = GraphHistoryEntry.FromFrame(Frame(2, 2, 7))
         });
         _ = state.CompleteIteration(graph);
 
@@ -78,9 +78,9 @@ public sealed class RenderSchedulingTests
         var scheduler = new RenderScheduler();
         var graph = Graph(RenderExecutionMode.Progressive, targetSamples: 0);
         var state = scheduler.Prepare(Request(1), graph, SceneFingerprint);
-        state.CommitHistory(new Dictionary<string, RenderedFrame>
+        state.CommitHistory(new Dictionary<string, GraphHistoryEntry>
         {
-            ["accumulation"] = Frame(1, 1, 42)
+            ["accumulation"] = GraphHistoryEntry.FromFrame(Frame(1, 1, 42))
         });
         _ = state.CompleteIteration(graph);
 

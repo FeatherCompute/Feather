@@ -1235,7 +1235,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         SampleCount sampleCount,
         float4x4 viewProjection,
         GraphResourceResolver resources,
-        IReadOnlyDictionary<string, RenderedFrame> history,
+        IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool)
     {
         this.texturePool = texturePool;
@@ -1252,7 +1252,6 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
 
         foreach (var (key, handle) in resources.HistoryReadHandles)
         {
-            RenderedFrame frame;
             if (history.TryGetValue(key, out var previous))
             {
                 if (previous.Width != width || previous.Height != height)
@@ -1260,15 +1259,21 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
                     throw new InvalidDataException(
                         $"History resource '{key}' dimensions do not match the current render request.");
                 }
-                frame = previous;
+                if (previous.Texture is { } previousTexture)
+                {
+                    gpuTextures.Add(handle.Value, previousTexture);
+                    continue;
+                }
+                frames.Add(handle.Value, previous.Frame!);
+                continue;
             }
-            else
-            {
-                var pixels = new Rgba8[checked(width * height)];
-                Array.Fill(pixels, new Rgba8(0, 0, 0, 255));
-                frame = new RenderedFrame(width, height, pixels, DispatchPath.None);
-            }
-            frames.Add(handle.Value, frame);
+
+            // No previous frame exists yet. A GPU-resident consumer replaces this seed on its
+            // first read; keeping the CPU seed here means a software consumer still starts from a
+            // defined image.
+            var pixels = new Rgba8[checked(width * height)];
+            Array.Fill(pixels, new Rgba8(0, 0, 0, 255));
+            frames.Add(handle.Value, new RenderedFrame(width, height, pixels, DispatchPath.None));
         }
     }
 
@@ -1484,17 +1489,27 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         return new RenderedFrame(Width, Height, pixels, path);
     }
 
-    public IReadOnlyDictionary<string, RenderedFrame> CaptureHistory()
+    /// <summary>
+    /// Hands this frame's History Write results to the view state. A GPU-resident result is passed
+    /// by reference so it stays on the device; only a software pass's output is a pixel array.
+    /// </summary>
+    public IReadOnlyDictionary<string, GraphHistoryEntry> CaptureHistory()
     {
-        var result = new Dictionary<string, RenderedFrame>(StringComparer.Ordinal);
+        var result = new Dictionary<string, GraphHistoryEntry>(StringComparer.Ordinal);
         foreach (var (key, handle) in resources.HistoryWriteSources)
         {
-            if (!frames.TryGetValue(handle.Value, out var frame))
+            if (gpuTextures.TryGetValue(handle.Value, out var texture))
             {
-                throw new InvalidDataException(
-                    $"History Write '{key}' references texture {handle.Value}, which was not produced.");
+                result.Add(key, GraphHistoryEntry.FromTexture(texture));
+                continue;
             }
-            result.Add(key, frame);
+            if (frames.TryGetValue(handle.Value, out var frame))
+            {
+                result.Add(key, GraphHistoryEntry.FromFrame(frame));
+                continue;
+            }
+            throw new InvalidDataException(
+                $"History Write '{key}' references texture {handle.Value}, which was not produced.");
         }
         return result;
     }

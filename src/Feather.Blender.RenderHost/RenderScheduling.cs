@@ -44,7 +44,7 @@ internal sealed class RenderScheduler
 
 internal sealed class RenderViewState
 {
-    private readonly Dictionary<string, RenderedFrame> history = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GraphHistoryEntry> history = new(StringComparer.Ordinal);
     private RenderInputIdentity? identity;
     private string? passBuildId;
     private long nextPreviewSample;
@@ -59,7 +59,7 @@ internal sealed class RenderViewState
     public long AccumulatedSamples { get; private set; }
     public long ResetCount { get; private set; }
     public bool ResetOccurred { get; private set; }
-    public IReadOnlyDictionary<string, RenderedFrame> History => history;
+    public IReadOnlyDictionary<string, GraphHistoryEntry> History => history;
 
     public void Prepare(RenderInputIdentity nextIdentity, RenderGraphExecution graph)
     {
@@ -91,11 +91,11 @@ internal sealed class RenderViewState
         ResetForPassReload(graph);
     }
 
-    public void CommitHistory(IReadOnlyDictionary<string, RenderedFrame> updates)
+    public void CommitHistory(IReadOnlyDictionary<string, GraphHistoryEntry> updates)
     {
-        foreach (var (key, frame) in updates)
+        foreach (var (key, entry) in updates)
         {
-            history[key] = frame;
+            history[key] = entry;
         }
     }
 
