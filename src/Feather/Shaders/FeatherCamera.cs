@@ -51,37 +51,29 @@ public static class GpuCameraFactory
     public static GpuCamera FromYUp(RenderCamera camera)
         => Create(camera, upAxisIsZ: false);
 
-    private static GpuCamera Create(RenderCamera camera, bool upAxisIsZ)
-    {
-        var inverse = camera.InverseViewProjection;
-        var eye = camera.WorldPosition;
-        if (upAxisIsZ)
-        {
-            // Unproject into the host's world first, then swap into the shader's, so the conversion
-            // rides along with every ray the matrix produces.
-            inverse = SwapYZ * inverse;
-            eye = new float3(eye.X, eye.Z, eye.Y);
-        }
-
-        return new GpuCamera
-        {
-            InverseViewProjection = inverse,
-            WorldPosition = eye
-        };
-    }
-
     /// <summary>
-    /// Exchanges the Y and Z axes, converting between a Z-up and a Y-up world.
+    /// Takes the camera in whichever convention it already carries, applying no conversion.
     /// </summary>
     /// <remarks>
-    /// Columns, because <see cref="float4x4"/> is column-major. The swap is its own inverse, so the
-    /// same matrix converts in both directions.
+    /// This is the form to use with a View Camera node, which has already applied the graph's chosen
+    /// up axis. Converting again here would undo it.
     /// </remarks>
-    private static float4x4 SwapYZ { get; } = new(
-        new float4(1.0f, 0.0f, 0.0f, 0.0f),
-        new float4(0.0f, 0.0f, 1.0f, 0.0f),
-        new float4(0.0f, 1.0f, 0.0f, 0.0f),
-        new float4(0.0f, 0.0f, 0.0f, 1.0f));
+    public static GpuCamera FromResolved(RenderCamera camera)
+        => Create(camera, upAxisIsZ: false);
+
+    private static GpuCamera Create(RenderCamera camera, bool upAxisIsZ)
+    {
+        // Unproject into the host's world first, then swap into the shader's, so the conversion rides
+        // along with every ray the matrix produces. The swap itself lives on RenderCamera because the
+        // host applies the same one when a graph's View Camera node asks for it, and two copies of an
+        // axis convention are two things that can disagree.
+        var resolved = upAxisIsZ ? camera.SwapUpAxis() : camera;
+        return new GpuCamera
+        {
+            InverseViewProjection = resolved.InverseViewProjection,
+            WorldPosition = resolved.WorldPosition
+        };
+    }
 }
 
 /// <summary>
@@ -114,16 +106,18 @@ public static class FeatherCamera
     /// The world-space direction through the centre of a pixel, normalised.
     /// </summary>
     /// <remarks>
-    /// Frames are stored bottom-up, so a pixel's Y already climbs in the same direction as clip
-    /// space and needs no flip. Getting that backwards renders the world upside down, which is why
-    /// it lives here once rather than in every effect.
+    /// A kernel's row zero is the top of the frame -- that is what the frame header declares, and what
+    /// the rasteriser produces -- while clip space climbs upward, so the vertical axis has to be
+    /// flipped. Dropping the flip renders the world upside down, and the symptom is easy to
+    /// misattribute because the sky is still smooth and the water still detailed, just swapped. It
+    /// lives here once rather than in every effect.
     /// </remarks>
     [Callable]
     public static float3 RayDirection(GpuCamera camera, float2 pixel, float2 size)
     {
         var ndc = new float2(
             (((pixel.X + 0.5f) / size.X) * 2.0f) - 1.0f,
-            (((pixel.Y + 0.5f) / size.Y) * 2.0f) - 1.0f);
+            1.0f - (((pixel.Y + 0.5f) / size.Y) * 2.0f));
 
         var near = UnprojectDepth(camera, ndc, -1.0f);
         var far = UnprojectDepth(camera, ndc, 1.0f);

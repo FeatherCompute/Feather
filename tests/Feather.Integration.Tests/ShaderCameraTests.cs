@@ -106,6 +106,72 @@ public class ShaderCameraTests
         Assert.Equal(0.0f, up.Z, 5);
     }
 
+    /// <summary>
+    /// A camera at the origin looking down -Z with a 90 degree vertical field of view, as the inverse
+    /// a kernel actually receives. An identity matrix cannot stand in here: unprojecting through it
+    /// leaves the near and far points differing only in Z, so every ray comes out as (0, 0, +-1) and
+    /// an orientation assertion would read zero regardless of which way the frame is wound.
+    /// </summary>
+    private static float4x4 SquarePerspectiveInverse()
+    {
+        const float Near = 0.1f;
+        const float Far = 100.0f;
+        var depthScale = (Far + Near) / (Near - Far);
+        var depthOffset = (2.0f * Far * Near) / (Near - Far);
+
+        // Column-major, so each group of four arguments is one column.
+        var projection = new float4x4(
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, depthScale, -1.0f,
+            0.0f, 0.0f, depthOffset, 0.0f);
+        return projection.Inverse();
+    }
+
+    [Fact]
+    public void TheTopRowOfAFrameLooksUpward()
+    {
+        // A kernel's row zero is the top of the frame, and the frame header agrees (FrameFileWriter
+        // declares a top-left origin). Clip space climbs the other way, so RayDirection has to flip Y.
+        // Without this test the mistake is invisible to every structural check an example makes -- the
+        // frame still has a smooth band and a detailed band, just swapped -- and surfaces only as an
+        // upside-down render.
+        var camera = FeatherCamera.FromUniforms(SquarePerspectiveInverse(), float3.Zero);
+        var size = new float2(64.0f, 64.0f);
+
+        var top = FeatherCamera.RayDirection(camera, new float2(32.0f, 0.0f), size);
+        var bottom = FeatherCamera.RayDirection(camera, new float2(32.0f, 63.0f), size);
+
+        Assert.True(top.Y > 0.0f, $"top row aimed at Y={top.Y}");
+        Assert.True(bottom.Y < 0.0f, $"bottom row aimed at Y={bottom.Y}");
+    }
+
+    [Fact]
+    public void PixelXRunsLeftToRight()
+    {
+        // Pinned alongside the vertical flip because a horizontal mirror survives every tonal
+        // assertion the examples make: rows keep their brightness when a frame is mirrored sideways.
+        var camera = FeatherCamera.FromUniforms(SquarePerspectiveInverse(), float3.Zero);
+        var size = new float2(64.0f, 64.0f);
+
+        var left = FeatherCamera.RayDirection(camera, new float2(0.0f, 32.0f), size);
+        var right = FeatherCamera.RayDirection(camera, new float2(63.0f, 32.0f), size);
+
+        Assert.True(left.X < 0.0f, $"left column aimed at X={left.X}");
+        Assert.True(right.X > 0.0f, $"right column aimed at X={right.X}");
+    }
+
+    [Fact]
+    public void RaysAimAwayFromTheCamera()
+    {
+        // The unprojection subtracts the near point from the far one, and getting that order backwards
+        // marches every ray behind the eye -- which reads as an empty frame rather than as a flip.
+        var camera = FeatherCamera.FromUniforms(SquarePerspectiveInverse(), float3.Zero);
+        var centre = FeatherCamera.RayDirection(camera, new float2(32.0f, 32.0f), new float2(64.0f, 64.0f));
+
+        Assert.True(centre.Z < 0.0f, $"centre ray aimed at Z={centre.Z}");
+    }
+
     [Fact]
     public void ConversionIsItsOwnInverse()
     {

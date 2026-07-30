@@ -82,6 +82,49 @@ public readonly record struct RenderCamera(
         : this(viewProjection, viewProjection.Inverse(), new float3(0.0f, 0.0f, 0.0f))
     {
     }
+
+    /// <summary>
+    /// Returns this camera with the Y and Z world axes exchanged.
+    /// </summary>
+    /// <remarks>
+    /// Converts between a Z-up world and a Y-up one. Which of those a camera arrives in is a property
+    /// of the host, so the decision to call this belongs to whoever knows that; the swap itself is
+    /// plain geometry and is its own inverse. Only <see cref="InverseViewProjection"/> and
+    /// <see cref="WorldPosition"/> move, because those are what a compute pass builds rays from --
+    /// <see cref="ViewProjection"/> is rasterizer-only and already documented as not their mutual
+    /// inverse.
+    /// </remarks>
+    public RenderCamera SwapUpAxis()
+        => new(
+            ViewProjection,
+            SwapYZ * InverseViewProjection,
+            new float3(WorldPosition.X, WorldPosition.Z, WorldPosition.Y));
+
+    /// <summary>
+    /// Exchanges the Y and Z axes. Columns, because <see cref="float4x4"/> is column-major.
+    /// </summary>
+    private static float4x4 SwapYZ { get; } = new(
+        new float4(1.0f, 0.0f, 0.0f, 0.0f),
+        new float4(0.0f, 0.0f, 1.0f, 0.0f),
+        new float4(0.0f, 1.0f, 0.0f, 0.0f),
+        new float4(0.0f, 0.0f, 0.0f, 1.0f));
+}
+
+/// <summary>
+/// Which world axis a consumer of a camera treats as up.
+/// </summary>
+/// <remarks>
+/// Exists so the choice can be made in a render graph rather than inside an effect. A procedural
+/// shader is conventionally written Y-up while several hosts model the world Z-up, and porting every
+/// shader is the wrong trade when the conversion is one matrix.
+/// </remarks>
+public enum CameraUpAxis
+{
+    /// <summary>Y is up, the convention procedural shaders are conventionally written in.</summary>
+    Y,
+
+    /// <summary>Z is up, matching Blender's world axes.</summary>
+    Z
 }
 
 /// <summary>

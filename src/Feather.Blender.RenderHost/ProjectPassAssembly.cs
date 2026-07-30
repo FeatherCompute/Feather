@@ -580,6 +580,10 @@ internal sealed class GraphResourceResolver
     private const ulong FirstTextureHandle = 1024;
     private const ulong FirstBufferHandle = 1UL << 32;
 
+    // Above the fixed scene handles, so a camera node's handle can never collide with the scene
+    // camera's and the backend can tell which one a pass was bound to.
+    private const ulong FirstCameraNodeHandle = 256;
+
     private readonly RenderGraphExecution graph;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
@@ -591,13 +595,30 @@ internal sealed class GraphResourceResolver
     private readonly Dictionary<string, GraphNode> textureNodes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextureHandle> historyReadHandles = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextureHandle> historyWriteSources = new(StringComparer.Ordinal);
+    private readonly Dictionary<ulong, CameraUpAxis> cameraNodeUpAxes = [];
+    private readonly Dictionary<string, CameraHandle> cameraNodeHandles = new(StringComparer.Ordinal);
     private ulong nextTextureHandle = FirstTextureHandle;
     private ulong nextBufferHandle = FirstBufferHandle;
+    private ulong nextCameraHandle = FirstCameraNodeHandle;
 
     public GraphResourceResolver(RenderGraphExecution graph, ProjectPassManifest manifest)
     {
         this.graph = graph;
         this.manifest = manifest;
+
+        // A View Camera node resolves to its own handle rather than the scene's, because the axis
+        // convention is a property of the node: two nodes in one graph can hand the same camera to
+        // two passes in two conventions, and the handle is what tells them apart at bind time.
+        foreach (var cameraNode in graph.Nodes.Where(node => node.Kind == "camera"))
+        {
+            var handle = new CameraHandle(nextCameraHandle++);
+            cameraNodeHandles.Add(cameraNode.NodeId, handle);
+            cameraNodeUpAxes.Add(
+                handle.Value,
+                string.Equals(cameraNode.UpAxis, "Z", StringComparison.Ordinal)
+                    ? CameraUpAxis.Z
+                    : CameraUpAxis.Y);
+        }
 
         // A Texture node is a graph-visible resource, so it gets its own handle: a pass can
         // sample it, and a pass linked into its Write socket renders into it.
@@ -779,6 +800,14 @@ internal sealed class GraphResourceResolver
     public TextureHandle TextureNodeHandle(string nodeId) => textureNodeHandles[nodeId];
 
     /// <summary>
+    /// The up axis each View Camera node's handle was resolved with, so the backend can hand a pass
+    /// the camera in the convention its graph asked for.
+    /// </summary>
+    public IReadOnlyDictionary<ulong, CameraUpAxis> CameraNodeUpAxes => cameraNodeUpAxes;
+
+    public CameraHandle CameraNodeHandle(string nodeId) => cameraNodeHandles[nodeId];
+
+    /// <summary>
     /// Reports the size and format a Texture node declares for the resource behind
     /// <paramref name="handle"/>. Width and height are zero when the node follows the render size.
     /// </summary>
@@ -850,6 +879,22 @@ internal sealed class GraphResourceResolver
                 string.IsNullOrEmpty(node.Format) ? "Unknown" : node.Format,
                 "Unknown",
                 textureNodeHandles[node.NodeId]);
+        }
+        if (node.Kind == "camera")
+        {
+            if (!string.Equals(
+                    socketGuid,
+                    RenderGraphDocument.CameraNodeSocketGuid,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"View Camera '{node.NodeId}' has no output socket {socketGuid}.");
+            }
+            return new ResolvedGraphResource(
+                "Camera",
+                "Unknown",
+                "Unknown",
+                cameraNodeHandles[node.NodeId]);
         }
         if (node.Kind != "pass")
         {
@@ -1452,10 +1497,27 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             ? geometry
             : throw new KeyNotFoundException($"Unknown scene geometry handle {handle.Value}.");
 
+    /// <summary>
+    /// Resolves a camera handle to the camera, in the axis convention its source asked for.
+    /// </summary>
+    /// <remarks>
+    /// The scene node's handle hands the camera over exactly as Blender supplied it, Z-up, because
+    /// that is what a pass reading the scene camera has always received. A View Camera node's handle
+    /// carries the node's chosen convention instead, which is what lets a raymarching pass ask for
+    /// Y-up in the graph rather than swizzling axes in shader code.
+    /// </remarks>
     public RenderCamera GetCamera(CameraHandle handle)
-        => handle.Value == PassMemberBinder.CameraHandleValue
-            ? camera
-            : throw new KeyNotFoundException($"Unknown camera handle {handle.Value}.");
+    {
+        if (handle.Value == PassMemberBinder.CameraHandleValue)
+        {
+            return camera;
+        }
+        if (resources.CameraNodeUpAxes.TryGetValue(handle.Value, out var upAxis))
+        {
+            return upAxis == CameraUpAxis.Y ? camera.SwapUpAxis() : camera;
+        }
+        throw new KeyNotFoundException($"Unknown camera handle {handle.Value}.");
+    }
 
     public SceneMaterialTable GetMaterials(MaterialTableHandle handle)
         => handle.Value == PassMemberBinder.MaterialsHandleValue

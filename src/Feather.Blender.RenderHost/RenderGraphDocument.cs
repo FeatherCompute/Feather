@@ -22,6 +22,7 @@ internal sealed class RenderGraphDocument
     public const string OutputColorSocketGuid = "082faef8-760d-5062-9766-2d627d8c42f8";
     public const string HistoryReadSocketGuid = "b85a7129-ad17-5d67-b06b-60e15ce071d0";
     public const string HistoryWriteSocketGuid = "8d513f8b-7212-557b-bcec-2f88ed212c21";
+    public const string CameraNodeSocketGuid = "e3b7c491-6a25-4d83-9f16-5c2b8e4a7d39";
     public const int MaximumScheduledSamples = 1_000_000_000;
 
     public int SchemaVersion { get; init; }
@@ -155,7 +156,7 @@ internal sealed class RenderGraphDocument
             RequireNonEmpty(node.NodeId, "nodes.nodeId");
             RequireNonEmpty(node.Kind, "nodes.kind");
             if (node.Kind is not ("scene" or "pass" or "output" or "history-read" or "history-write"
-                    or "texture"))
+                    or "texture" or "camera"))
             {
                 throw new InvalidDataException(
                     $"Render graph node '{node.NodeId}' has unsupported kind '{node.Kind}'.");
@@ -201,6 +202,16 @@ internal sealed class RenderGraphDocument
                 {
                     throw new InvalidDataException(
                         $"Render graph texture '{node.TextureKey}' has an invalid explicit size.");
+                }
+            }
+            else if (node.Kind == "camera")
+            {
+                // Rejected rather than defaulted: an unrecognised axis would silently render the
+                // world on its side, which is far harder to diagnose than a refused graph.
+                if (node.UpAxis is not ("Y" or "Z"))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph camera '{node.NodeId}' has unsupported upAxis '{node.UpAxis}'.");
                 }
             }
         }
@@ -330,6 +341,10 @@ internal sealed class RenderGraphDocument
         if (Links.Any(link => nodesById[link.ToNode].Kind == "scene"))
         {
             throw new InvalidDataException("Render graph scene nodes cannot have resource inputs.");
+        }
+        if (Links.Any(link => nodesById[link.ToNode].Kind == "camera"))
+        {
+            throw new InvalidDataException("Render graph camera nodes cannot have resource inputs.");
         }
 
         var historyReads = executionNodes.Where(node => node.Kind == "history-read").ToArray();
@@ -529,6 +544,11 @@ internal sealed class GraphNode
     public int Width { get; init; }
     public int Height { get; init; }
     public string ImageName { get; init; } = "";
+
+    // A camera node hands the view camera to a pass in the axis convention the pass expects, which
+    // is what keeps an axis swizzle out of shader code. Defaults to Y so a graph written before the
+    // node existed still resolves to the convention procedural shaders are written in.
+    public string UpAxis { get; init; } = "Y";
 }
 
 internal sealed class GraphLink
