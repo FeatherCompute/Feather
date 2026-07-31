@@ -9940,6 +9940,25 @@ FeResult validate_graphics_sampler_binding(const GraphicsPipelineState& pipeline
     return ok();
 }
 
+// Picks the buffer that feeds the rasterizer when no explicit vertex buffer was set. `buffers` is
+// unordered, so the lowest binding is chosen deliberately rather than relying on iteration order:
+// a shader may bind several buffers and the vertex stream is always the first one it declares.
+FeBufferHandle infer_graphics_vertex_buffer(const GraphicsPipelineState& pipeline) {
+    if (pipeline.vertex_buffer != 0) {
+        return pipeline.vertex_buffer;
+    }
+
+    FeBufferHandle lowest = 0;
+    uint32_t lowest_binding = 0;
+    for (const auto& [binding, buffer] : pipeline.buffers) {
+        if (lowest == 0 || binding < lowest_binding) {
+            lowest = buffer;
+            lowest_binding = binding;
+        }
+    }
+    return lowest;
+}
+
 FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     trace_graphics_step("draw begin");
     GPU::Backend::PrimitiveTopology topology;
@@ -10017,10 +10036,7 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
         depth = &depth_it->second;
     }
 
-    FeBufferHandle vertex_handle = pipeline.vertex_buffer;
-    if (vertex_handle == 0 && !pipeline.buffers.empty()) {
-        vertex_handle = pipeline.buffers.begin()->second;
-    }
+    const FeBufferHandle vertex_handle = infer_graphics_vertex_buffer(pipeline);
     auto vertex_it = g_buffers.find(vertex_handle);
     if (vertex_it == g_buffers.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw requires a bound vertex buffer.");
@@ -10367,10 +10383,7 @@ FeResult rasterize_graphics_pipeline(GraphicsPipelineState& pipeline, FeTextureH
         }
     }
 
-    FeBufferHandle vertex_handle = pipeline.vertex_buffer;
-    if (vertex_handle == 0 && !pipeline.buffers.empty()) {
-        vertex_handle = pipeline.buffers.begin()->second;
-    }
+    const FeBufferHandle vertex_handle = infer_graphics_vertex_buffer(pipeline);
     const auto vertex_it = g_buffers.find(vertex_handle);
     if (vertex_it == g_buffers.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw requires a bound vertex buffer.");

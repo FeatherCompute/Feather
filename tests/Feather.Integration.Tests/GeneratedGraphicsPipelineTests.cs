@@ -1561,6 +1561,67 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedFragmentShaderAccumulatesOverASecondStructuredBuffer()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        // Three records so the loop bound genuinely comes from the uniform rather than a constant,
+        // and so a wrong stride would misread the second and third entries.
+        using var records = GPU.CreateBuffer<GeneratedBufferLoopRecord>(
+        [
+            new GeneratedBufferLoopRecord { Tint = new float3(0.5f, 0.0f, 0.0f), Kind = 1, Weight = 1.0f },
+            new GeneratedBufferLoopRecord { Tint = new float3(0.0f, 0.25f, 0.0f), Kind = 2, Weight = 1.0f },
+            new GeneratedBufferLoopRecord { Tint = new float3(0.0f, 0.0f, 0.5f), Kind = 1, Weight = 0.5f }
+        ], BufferAccess.ReadOnly);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedBufferLoopFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedBufferLoop" });
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 64)]);
+
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedBufferLoopFragmentShader(new Uniform<int>(3), records.AsReadOnly()),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[64];
+        target.Read(readback);
+        // Kind 1 contributes Tint * Weight, kind 2 contributes Tint doubled:
+        // red 0.5, green 0.5, blue 0.25.
+        AssertColorNear(FirstDrawn(readback), new float4(0.5f, 0.5f, 0.25f, 1.0f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
+    public void GeneratedBufferLoopRecordMatchesStd430Stride()
+    {
+        // A float3 followed by scalars keeps the managed size equal to the std430 stride, which is
+        // what lets the same array be uploaded verbatim and indexed correctly on the GPU.
+        var layout = StructLayout<GeneratedBufferLoopRecord>();
+
+        Assert.Equal(GpuLayout.Std430, layout.Layout);
+        Assert.Equal(32, layout.SizeInBytes);
+        AssertLayoutField(layout, nameof(GeneratedBufferLoopRecord.Tint), 0, 12);
+        AssertLayoutField(layout, nameof(GeneratedBufferLoopRecord.Kind), 12, 4);
+        AssertLayoutField(layout, nameof(GeneratedBufferLoopRecord.Weight), 16, 4);
+    }
+
+    private static GpuStructLayout StructLayout<T>()
+        where T : unmanaged, IGpuStruct<T>
+        => T.Layout;
+
+    private static void AssertLayoutField(GpuStructLayout layout, string name, int offset, int size)
+    {
+        var field = layout.Fields.Single(field => field.Name == name);
+        Assert.Equal(offset, field.Offset);
+        Assert.Equal(size, field.SizeInBytes);
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineLowersCallablesStructParametersAndFullFragmentBody()
     {
         using var vertices = GPU.CreateBuffer<float4>(
@@ -1647,6 +1708,34 @@ public readonly partial struct GeneratedFragmentShader(SamplerState sampler) : I
     public float4 Execute(float4 input)
     {
         return input;
+    }
+}
+
+[GpuStruct]
+public partial struct GeneratedBufferLoopRecord
+{
+    public float3 Tint;
+    public int Kind;
+    public float Weight;
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedBufferLoopFragmentShader(
+    Uniform<int> recordCount,
+    // Declared after the uniform so the buffer takes a binding above the vertex stream's.
+    ReadOnlyBuffer<GeneratedBufferLoopRecord> records) : IFragmentShader<float4>
+{
+    public float4 Execute(float4 input)
+    {
+        var total = new float3(0.0f, 0.0f, 0.0f);
+        for (var index = 0; index < recordCount.Value; index++)
+        {
+            var record = records[index];
+            var scale = record.Kind == 2 ? 2.0f : record.Weight;
+            total += record.Tint * scale;
+        }
+
+        return new float4(total, 1.0f);
     }
 }
 

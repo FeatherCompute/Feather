@@ -97,7 +97,9 @@ public sealed class MinimalRasterPass : IRasterPass
         var draws = geometry.Submeshes.IsEmpty
             ? [new SceneSubmesh(0, geometry.Indices.Length, materials.DefaultMaterialIndex)]
             : geometry.Submeshes.ToArray();
+        var shaderLights = BuildLights(lights);
         using var vertices = GPU.CreateBuffer(shaderVertices, BufferAccess.ReadOnly);
+        using var lightBuffer = GPU.CreateBuffer(shaderLights, BufferAccess.ReadOnly);
         using var depth = GPU.CreateDepthTexture2D(context.Width, context.Height);
         using var sampler = GPU.CreateSampler(SamplerDesc.LinearRepeat);
         using var whiteTexture = CreateWhiteTexture();
@@ -121,8 +123,6 @@ public sealed class MinimalRasterPass : IRasterPass
         var gpuTextures = new GpuTexture2D<Rgba8, float4>?[textures.Textures.Length];
         try
         {
-            ResolveLight(lights, out var lightType, out var lightPosition, out var lightDirection,
-                out var lightColor, out var lightEnergy);
             IGpuTexture2D[] targets = [color];
             var firstDraw = true;
             foreach (var draw in draws)
@@ -158,13 +158,10 @@ public sealed class MinimalRasterPass : IRasterPass
                         new Uniform<float>(metallic),
                         new Uniform<float>(roughness),
                         new Uniform<float4>(emission),
-                        new Uniform<int>(lightType),
-                        new Uniform<float3>(lightPosition),
-                        new Uniform<float3>(lightDirection),
-                        new Uniform<float3>(lightColor),
-                        new Uniform<float>(lightEnergy),
                         new Uniform<float>(Exposure),
-                        new Uniform<int>(ViewMode)),
+                        new Uniform<int>(ViewMode),
+                        new Uniform<int>(shaderLights.Length),
+                        lightBuffer.AsReadOnly()),
                     targets,
                     depth,
                     indices,
@@ -216,49 +213,92 @@ public sealed class MinimalRasterPass : IRasterPass
         return texture;
     }
 
-    private static void ResolveLight(
-        SceneLightTable lights,
-        out int lightType,
-        out float3 position,
-        out float3 direction,
-        out float3 color,
-        out float energy)
+    // Every light in the scene reaches the shader; the fragment stage accumulates them in a loop.
+    // An empty light table still uploads one entry so the buffer binding always has valid storage,
+    // and that entry carries the historical fallback sun so unlit scenes stay readable.
+    private static MinimalRasterLight[] BuildLights(SceneLightTable lights)
     {
-        SceneLight? selected = null;
-        foreach (var light in lights.Lights.Span)
+        if (lights.Lights.IsEmpty)
         {
-            if (light.Type == SceneLightType.Directional)
-            {
-                selected = light;
-                break;
-            }
-            if (selected is null && light.Type == SceneLightType.Point)
-            {
-                selected = light;
-            }
-        }
-
-        if (selected is null)
-        {
-            lightType = 0;
-            position = float3.Zero;
             var fallback = new float3(0.35f, -0.45f, 0.82f);
             var fallbackLength = MathF.Sqrt(
                 (fallback.X * fallback.X) +
                 (fallback.Y * fallback.Y) +
                 (fallback.Z * fallback.Z));
-            direction = fallback / fallbackLength;
-            color = new float3(1.0f, 1.0f, 1.0f);
-            energy = 1.0f;
-            return;
+            return
+            [
+                new MinimalRasterLight
+                {
+                    Position = float3.Zero,
+                    Kind = DirectionalLightKind,
+                    Direction = fallback / fallbackLength,
+                    Energy = 1.0f,
+                    Color = new float3(1.0f, 1.0f, 1.0f),
+                    ConeOuter = 0.0f,
+                    ConeInner = 0.0f
+                }
+            ];
         }
 
-        lightType = selected.Type == SceneLightType.Point ? 1 : 2;
-        position = selected.Position;
-        direction = -selected.Direction;
-        color = selected.Color;
-        energy = selected.Energy;
+        var shaderLights = new MinimalRasterLight[lights.Lights.Length];
+        for (var index = 0; index < shaderLights.Length; index++)
+        {
+            var light = lights.Lights.Span[index];
+            shaderLights[index] = new MinimalRasterLight
+            {
+                Position = light.Position,
+                Kind = MapLightKind(light.Type),
+                // Blender aims a light down its local -Z; the shader wants the surface-to-light
+                // direction, so the stored vector is flipped once here instead of per fragment.
+                Direction = -light.Direction,
+                Energy = light.Energy,
+                Color = light.Color,
+                ConeOuter = MathF.Cos(MathF.Min(light.SpotSize, MathF.PI) * 0.5f),
+                ConeInner = SpotConeInner(light)
+            };
+        }
+
+        return shaderLights;
     }
+
+    private static int MapLightKind(SceneLightType type) => type switch
+    {
+        SceneLightType.Point => PointLightKind,
+        SceneLightType.Directional => DirectionalLightKind,
+        SceneLightType.Spot => SpotLightKind,
+        SceneLightType.Area => AreaLightKind,
+        _ => DirectionalLightKind
+    };
+
+    // Blender's spot blend runs 0 (hard edge) to 1 (fully soft), measured inward from the cone
+    // edge. Converting it to a second cosine lets the shader fade between the two with one
+    // Smoothstep instead of computing angles on the GPU.
+    private static float SpotConeInner(SceneLight light)
+    {
+        var half = MathF.Min(light.SpotSize, MathF.PI) * 0.5f;
+        var blend = System.Math.Clamp(light.SpotBlend, 0.0f, 1.0f);
+        return MathF.Cos(half * (1.0f - blend));
+    }
+
+    private const int PointLightKind = 1;
+    private const int DirectionalLightKind = 2;
+    private const int SpotLightKind = 3;
+    private const int AreaLightKind = 4;
+}
+
+// Laid out as float3/scalar pairs so the scalar occupies the vec3 padding slot and the managed
+// size matches the std430 stride exactly. Declared beside the pass rather than in the SDK because
+// generated projects compile this source against the published package.
+[GpuStruct]
+public partial struct MinimalRasterLight
+{
+    public float3 Position;
+    public int Kind;
+    public float3 Direction;
+    public float Energy;
+    public float3 Color;
+    public float ConeOuter;
+    public float ConeInner;
 }
 
 [GpuStruct]
@@ -305,13 +345,12 @@ public readonly partial struct MinimalRasterFragmentShader(
     Uniform<float> metallic,
     Uniform<float> roughness,
     Uniform<float4> emission,
-    Uniform<int> lightType,
-    Uniform<float3> lightPosition,
-    Uniform<float3> lightDirection,
-    Uniform<float3> lightColor,
-    Uniform<float> lightEnergy,
     Uniform<float> exposure,
-    Uniform<int> viewMode) : IFragmentShader<MinimalRasterVaryings>
+    Uniform<int> viewMode,
+    Uniform<int> lightCount,
+    // The light buffer is declared last so it lands on a high binding: the native bridge infers the
+    // vertex stream from the lowest bound buffer and dedupes cross-stage buffers by source binding.
+    ReadOnlyBuffer<MinimalRasterLight> lights) : IFragmentShader<MinimalRasterVaryings>
 {
     public float4 Execute(MinimalRasterVaryings input)
     {
@@ -326,24 +365,47 @@ public readonly partial struct MinimalRasterFragmentShader(
             sampled.R * baseColor.Value.R,
             sampled.G * baseColor.Value.G,
             sampled.B * baseColor.Value.B);
-        var toLight = lightDirection.Value;
-        var illumination = ShaderMath.Min(lightEnergy.Value, 4.0f);
-        if (lightType.Value == 1)
+        var dielectric = 1.0f - metallic.Value;
+        var specularFactor = (0.04f * dielectric + metallic.Value) * (1.0f - roughness.Value * 0.75f);
+
+        var direct = new float3(0.0f, 0.0f, 0.0f);
+        var specular = new float3(0.0f, 0.0f, 0.0f);
+        for (var index = 0; index < lightCount.Value; index++)
         {
-            var delta = lightPosition.Value - input.WorldPosition;
-            var distanceSquared = ShaderMath.Max(ShaderMath.Dot(delta, delta), 0.01f);
-            toLight = ShaderMath.Normalize(delta);
-            illumination = ShaderMath.Min(lightEnergy.Value / (12.56637f * distanceSquared), 4.0f);
+            var light = lights[index];
+            var toLight = light.Direction;
+            var illumination = ShaderMath.Min(light.Energy, 4.0f);
+
+            // Point, spot and area lights all fall off with distance; only a sun keeps the stored
+            // direction and its raw energy.
+            if (light.Kind != 2)
+            {
+                var delta = light.Position - input.WorldPosition;
+                var distanceSquared = ShaderMath.Max(ShaderMath.Dot(delta, delta), 0.01f);
+                toLight = ShaderMath.Normalize(delta);
+                illumination = ShaderMath.Min(light.Energy / (12.56637f * distanceSquared), 4.0f);
+            }
+
+            // A spot cone fades between the blend-derived inner cosine and the cone edge.
+            if (light.Kind == 3)
+            {
+                var alignment = ShaderMath.Dot(light.Direction, -toLight);
+                illumination *= ShaderMath.Smoothstep(light.ConeOuter, light.ConeInner, alignment);
+            }
+
+            // An area light emits from a face rather than a point, so it only lights the side it
+            // faces and spreads its energy over that face.
+            if (light.Kind == 4)
+            {
+                illumination *= ShaderMath.Max(ShaderMath.Dot(light.Direction, -toLight), 0.0f);
+            }
+
+            var diffuse = ShaderMath.Max(ShaderMath.Dot(normal, toLight), 0.0f);
+            direct += surface * (dielectric * diffuse * illumination);
+            specular += light.Color * (specularFactor * diffuse * illumination);
         }
 
-        var diffuse = ShaderMath.Max(ShaderMath.Dot(normal, toLight), 0.0f);
-        var dielectric = 1.0f - metallic.Value;
-        var diffuseStrength = dielectric * diffuse;
-        var specularStrength =
-            (0.04f * dielectric + metallic.Value) * (1.0f - roughness.Value * 0.75f) * diffuse;
-        var direct = surface * (diffuseStrength * illumination);
         var ambient = surface * (0.12f + roughness.Value * 0.08f);
-        var specular = lightColor.Value * (specularStrength * illumination);
         var emitted = new float3(emission.Value.R, emission.Value.G, emission.Value.B);
         var result = (ambient + direct + specular + emitted) * exposure.Value;
         return new float4(result, 1.0f);
