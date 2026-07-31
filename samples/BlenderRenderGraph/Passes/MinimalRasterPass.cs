@@ -401,8 +401,12 @@ public readonly partial struct MinimalRasterFragmentShader(
             }
 
             var diffuse = ShaderMath.Max(ShaderMath.Dot(normal, toLight), 0.0f);
-            direct += surface * (dielectric * diffuse * illumination);
-            specular += light.Color * (specularFactor * diffuse * illumination);
+            // A light's colour tints everything it lights, not just the highlight. Leaving it out of
+            // the diffuse term made a red lamp read as white on every matte surface, which is most
+            // of them, so changing the colour in Blender looked like it did nothing.
+            var incident = light.Color * (diffuse * illumination);
+            direct += surface * (incident * dielectric);
+            specular += incident * specularFactor;
         }
 
         var ambient = surface * (0.12f + roughness.Value * 0.08f);
