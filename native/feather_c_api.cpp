@@ -2773,6 +2773,19 @@ size_t push_constant_type_size(const ParsedIr& ir, const IrResource& resource) {
         return float_vector_components * sizeof(float);
     }
 
+    // The integer vectors, which the managed layout has always packed the same way as their float
+    // counterparts (GpuValueLayout pairs int2 with float2, int3 with float3, int4 with float4).
+    // Omitting them here meant push_constant_type_size returned zero, is_easygpu_push_constant_resource
+    // rejected the binding, and a kernel taking a Uniform<int3> failed the dispatch gate with
+    // "does not support push constant binding" -- despite the generator, the shader model validator
+    // and the GLSL lowering all accepting it. A grid size is the natural int3 uniform, so this was
+    // reachable by any 3D kernel that needed to know its own extent.
+    for (size_t components = 2; components <= 4; ++components) {
+        if (is_int_vector_type_name(*type, components) || is_uint_vector_type_name(*type, components)) {
+            return components * sizeof(int32_t);
+        }
+    }
+
     return 0;
 }
 
@@ -2811,6 +2824,19 @@ size_t push_constant_type_alignment(const ParsedIr& ir, const IrResource& resour
 
     if (float_vector_components == 3 || float_vector_components == 4) {
         return 16;
+    }
+
+    // Integer vectors align like their float counterparts, for the reason given in
+    // push_constant_type_size: the managed layout treats the two as the same shape, so a three
+    // component vector occupies twelve bytes on a sixteen byte boundary either way.
+    if (is_int_vector_type_name(*type, 2) || is_uint_vector_type_name(*type, 2)) {
+        return 8;
+    }
+
+    for (size_t components = 3; components <= 4; ++components) {
+        if (is_int_vector_type_name(*type, components) || is_uint_vector_type_name(*type, components)) {
+            return 16;
+        }
     }
 
     return 0;

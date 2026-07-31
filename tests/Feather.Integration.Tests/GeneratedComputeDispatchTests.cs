@@ -116,6 +116,34 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    [Trait("Coverage", "NativeReferenceFallback")]
+    public void DispatchBindsIntegerVectorUniformPushConstants()
+    {
+        // Integer vector uniforms reached the dispatch gate and were refused there, with
+        // "does not support push constant binding ... of type 'Feather.Math.int3'", even though the
+        // generator, the shader model validator and the GLSL lowering all accepted them: the native
+        // size and alignment tables handled float vectors only and returned zero for these, which the
+        // binding check reads as unsupported. A grid extent is the obvious int3 uniform, so this was
+        // reachable by any 3D kernel that needed to know how large its own domain was.
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
+
+        // All three widths in one dispatch, because they are three separate table entries and each one
+        // also has to be laid out at the right offset: a wrong alignment for the int3 would corrupt the
+        // int4 that follows it rather than fail outright.
+        GPU.Dispatch(
+            new IntVectorUniformKernel(
+                input.AsReadOnly(),
+                output.AsReadWrite(),
+                new Uniform<int2>(new int2(1, 2)),
+                new Uniform<int3>(new int3(3, 4, 5)),
+                new Uniform<int4>(new int4(6, 7, 8, 9))),
+            4);
+
+        Assert.Equal([45, 90, 135, 180], output.ToArray());
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsCopyKernelFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -3992,6 +4020,25 @@ public readonly partial struct BoolUniformKernel(ReadOnlyBuffer<float> input, Re
     {
         int i = ThreadIds.X;
         output[i] = enabled.Value ? input[i] * 2.0f : input[i];
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct IntVectorUniformKernel(
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output,
+    Uniform<int2> pair,
+    Uniform<int3> triple,
+    Uniform<int4> quad) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        var sum = pair.Value.X + pair.Value.Y
+            + triple.Value.X + triple.Value.Y + triple.Value.Z
+            + quad.Value.X + quad.Value.Y + quad.Value.Z + quad.Value.W;
+        output[i] = input[i] * sum;
     }
 }
 
