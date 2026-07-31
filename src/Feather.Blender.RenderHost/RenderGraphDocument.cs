@@ -33,7 +33,16 @@ internal sealed class RenderGraphDocument
     public string ViewId { get; init; } = "";
     public string ViewKind { get; init; } = "";
     public string ExecutionMode { get; init; } = "";
+
+    // Accepted and ignored. The add-on applies the scale before writing the request, so the width and
+    // height that arrive are already the scaled ones and there is nothing left here for the host to
+    // do. The field stays so an older add-on's graph still deserialises.
+    //
+    // It used to be validated against a 0.1-2.0 range and read nowhere, which quietly made this the
+    // real ceiling on the add-on's scale slider: raising the slider without deleting that check would
+    // have had the host reject the whole graph over a resolution it renders perfectly well.
     public float ResolutionScale { get; init; }
+
     public int SampleCount { get; init; }
     public int TargetSamples { get; init; }
     public int SamplesPerIteration { get; init; }
@@ -109,10 +118,6 @@ internal sealed class RenderGraphDocument
         if (executionMode is null)
         {
             throw new InvalidDataException($"Unsupported graph executionMode: '{ExecutionMode}'.");
-        }
-        if (ResolutionScale is < 0.1f or > 2.0f || !float.IsFinite(ResolutionScale))
-        {
-            throw new InvalidDataException("Render graph resolutionScale must be between 0.1 and 2.0.");
         }
         if (SampleCount is not (1 or 2 or 4 or 8 or 16))
         {

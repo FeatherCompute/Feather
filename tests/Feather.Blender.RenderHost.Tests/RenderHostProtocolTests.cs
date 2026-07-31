@@ -242,6 +242,28 @@ public sealed class RenderHostProtocolTests
     }
 
     [Fact]
+    public void SupersamplingResolutionScaleIsNotRejectedByTheGraph()
+    {
+        // resolutionScale was validated against 0.1-2.0 and then read nowhere, so the dead check was
+        // the real ceiling on the add-on's scale slider: the add-on applies the scale itself before
+        // writing the request, and the host would still have thrown out the whole graph over a number
+        // it never used. Request width and height are what actually bound a render.
+        using var fixture = new ProtocolFixture();
+        fixture.WriteScene();
+        fixture.WriteGraph();
+        var graph = JsonNode.Parse(File.ReadAllText(fixture.GraphPath))!.AsObject();
+        graph["resolutionScale"] = 4.0f;
+        File.WriteAllText(fixture.GraphPath, graph.ToJsonString());
+        fixture.WriteRequest();
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+
+        Assert.Equal(64, result.Width);
+        Assert.Equal(64, result.Height);
+    }
+
+    [Fact]
     public void UnknownRequestPurposeIsRejectedRatherThanTreatedAsAPreview()
     {
         // Defaulting an unrecognised purpose would mean a future host silently rendering a saved
