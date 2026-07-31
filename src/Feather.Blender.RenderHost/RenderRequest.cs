@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Feather.Math;
+using Feather.RenderGraph;
 
 namespace Feather.Blender.RenderHost;
 
@@ -26,6 +27,15 @@ internal sealed class RenderRequest
     // Optional camera eye in world space. Added without a schema bump: older hosts ignore the extra
     // field, and this host defaults the eye when it is absent, so old and new add-ons interoperate.
     public float[]? CameraPosition { get; init; }
+
+    // Why this frame is wanted, so a pass can spend less on a viewport preview than on a saved
+    // render. It rides on the request rather than the graph because both kinds of render read the
+    // same graph document: the difference is which code path in the add-on asked, not how the View
+    // is configured.
+    //
+    // Also added without a schema bump, and absent means interactive -- an add-on old enough to omit
+    // it drove the viewport through a host with no separate final path to distinguish.
+    public string? Purpose { get; init; }
 
     public static ResolvedRenderRequest Load(string path)
     {
@@ -60,8 +70,22 @@ internal sealed class RenderRequest
             request.Height,
             MatrixProtocol.ConvertViewProjection(request.ViewProjection, request.ClipSpace),
             MatrixProtocol.FromRowMajor(request.ViewProjection).Inverse(),
-            MatrixProtocol.ResolveCameraPosition(request.CameraPosition, request.ViewProjection));
+            MatrixProtocol.ResolveCameraPosition(request.CameraPosition, request.ViewProjection),
+            ResolvePurpose(request.Purpose));
     }
+
+    /// <summary>
+    /// Maps the request's purpose to the value passes read. An absent field is interactive; an
+    /// unrecognised one is rejected rather than defaulted, because silently treating a future
+    /// purpose as interactive would quietly render a saved frame at preview quality.
+    /// </summary>
+    private static RenderPurpose ResolvePurpose(string? purpose) => purpose switch
+    {
+        null or "" => RenderPurpose.Interactive,
+        "INTERACTIVE" => RenderPurpose.Interactive,
+        "FINAL" => RenderPurpose.Final,
+        _ => throw new InvalidDataException($"Unsupported render request purpose: '{purpose}'.")
+    };
 
     private void Validate()
     {
@@ -138,7 +162,8 @@ internal sealed record ResolvedRenderRequest(
     int Height,
     float4x4 ViewProjection,
     float4x4 InverseViewProjection,
-    float3 CameraPosition);
+    float3 CameraPosition,
+    RenderPurpose Purpose);
 
 internal static class MatrixProtocol
 {

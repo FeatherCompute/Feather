@@ -1,3 +1,5 @@
+using Feather.RenderGraph;
+
 namespace Feather.Blender.RenderHost;
 
 internal sealed class RenderHostRunner : IDisposable
@@ -61,6 +63,7 @@ internal sealed class RenderHostRunner : IDisposable
                 request.ViewProjection,
                 request.InverseViewProjection,
                 request.CameraPosition,
+                request.Purpose,
                 viewState);
             frame = execution.Frame;
             buildId = execution.BuildId;
@@ -108,6 +111,7 @@ internal sealed class RenderHostRunner : IDisposable
             passCount,
             passReloaded,
             graph.ExecutionModeName,
+            request.Purpose == RenderPurpose.Final ? "FINAL" : "INTERACTIVE",
             graph.SelectedAov,
             graph.TargetSamples,
             iteration.Iteration,
@@ -146,6 +150,7 @@ internal sealed record RenderHostResult(
     int PassCount,
     bool PassReloaded,
     string ExecutionMode,
+    string Purpose,
     string Aov,
     int TargetSamples,
     long Iteration,

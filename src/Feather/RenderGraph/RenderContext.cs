@@ -184,6 +184,38 @@ public enum CameraUpAxis
 public readonly partial record struct Rgba8(byte R, byte G, byte B, byte A);
 
 /// <summary>
+/// Why the host is asking for this frame.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A pass usually wants to do less work for an interactive frame than for the one that gets saved:
+/// fewer samples, fewer march steps, a coarser simulation. Without this it cannot tell the two apart,
+/// so every author has to pick one quality level and live with it being either too slow to navigate
+/// or too rough to keep.
+/// </para>
+/// <para>
+/// Deliberately coarse. The values name the situation, not the settings that produced it, so a pass
+/// that branches on <see cref="Interactive"/> keeps working when the host gains new execution modes.
+/// Read the concrete budgets from <see cref="RenderContext.SampleCount"/> and the pass's own
+/// parameters.
+/// </para>
+/// </remarks>
+public enum RenderPurpose
+{
+    /// <summary>
+    /// A frame drawn into the viewport while the user is working. Latency matters more than quality:
+    /// another one is coming as soon as the camera moves.
+    /// </summary>
+    Interactive = 0,
+
+    /// <summary>
+    /// The frame the user asked for and will keep, from F12 or from a render job. Quality matters
+    /// more than latency, and nothing is going to supersede it.
+    /// </summary>
+    Final = 1
+}
+
+/// <summary>
 /// Host-independent services used by <see cref="RenderContext"/>. Render-host authors implement
 /// this interface; project passes normally consume it only through <see cref="RenderContext"/>.
 /// </summary>
@@ -194,6 +226,14 @@ public interface IRenderContextBackend
     int Height { get; }
 
     SampleCount SampleCount { get; }
+
+    /// <summary>
+    /// Why this frame is being rendered. Defaults to <see cref="RenderPurpose.Interactive"/> so that
+    /// a host predating this member keeps compiling, and so that a pass which trims work for
+    /// interactive frames stays responsive against one rather than silently rendering at full
+    /// quality on every viewport redraw.
+    /// </summary>
+    RenderPurpose Purpose => RenderPurpose.Interactive;
 
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
 
@@ -313,6 +353,18 @@ public sealed class RenderContext
     public int Height => Backend.Height;
 
     public SampleCount SampleCount => Backend.SampleCount;
+
+    /// <summary>
+    /// Why the host wants this frame. Branch on this to spend less on a frame the user is navigating
+    /// through than on the one they are going to keep.
+    /// </summary>
+    public RenderPurpose Purpose => Backend.Purpose;
+
+    /// <summary>
+    /// Whether this frame is a viewport preview. Shorthand for
+    /// <c>Purpose == RenderPurpose.Interactive</c>, which is the test nearly every pass wants.
+    /// </summary>
+    public bool IsInteractive => Backend.Purpose == RenderPurpose.Interactive;
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
         => Backend.GetSceneGeometry(handle);

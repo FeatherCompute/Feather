@@ -359,7 +359,8 @@ internal sealed class ProtocolFixture : IDisposable
         string? manifestPath = null,
         ulong requestId = 42,
         float[]? viewProjection = null,
-        float[]? cameraPosition = null)
+        float[]? cameraPosition = null,
+        string? purpose = null)
     {
         viewProjection ??=
         [
@@ -388,6 +389,12 @@ internal sealed class ProtocolFixture : IDisposable
         if (cameraPosition is not null)
         {
             request["cameraPosition"] = cameraPosition;
+        }
+        // Likewise for purpose: omitting it is what an add-on predating the field does, and the
+        // default that produces is part of the contract.
+        if (purpose is not null)
+        {
+            request["purpose"] = purpose;
         }
         File.WriteAllText(RequestPath, JsonSerializer.Serialize(request));
     }

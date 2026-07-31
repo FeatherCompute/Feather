@@ -215,6 +215,49 @@ public sealed class RenderHostProtocolTests
         Assert.False(File.Exists(fixture.OutputPath));
     }
 
+    [Theory]
+    [InlineData(null, 100)]
+    [InlineData("INTERACTIVE", 100)]
+    [InlineData("FINAL", 200)]
+    public void RequestPurposeReachesThePassAndTheHostResult(string? purpose, byte expected)
+    {
+        // A pass could not tell a viewport preview from the frame the user keeps, so any pass wanting
+        // to trade quality for latency had to pick one and be wrong half the time. The purpose rides
+        // on the request rather than the graph because one View serves both paths.
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "pass-manifest.json");
+        fixture.WriteScene();
+        fixture.WriteGraph(typeName: typeof(PurposeProbeCpuPass).FullName!);
+        WritePassManifest(manifestPath, typeof(PurposeProbeCpuPass));
+        fixture.WriteRequest(manifestPath: manifestPath, purpose: purpose);
+        using var host = new RenderHostRunner();
+
+        var result = host.RenderOnce(fixture.RequestPath);
+        var frame = File.ReadAllBytes(fixture.OutputPath);
+
+        // Red carries Purpose and green carries IsInteractive; equal bytes mean the two agree.
+        Assert.Equal(expected, frame[40]);
+        Assert.Equal(expected, frame[41]);
+        Assert.Equal(expected == 200 ? "FINAL" : "INTERACTIVE", result.Purpose);
+    }
+
+    [Fact]
+    public void UnknownRequestPurposeIsRejectedRatherThanTreatedAsAPreview()
+    {
+        // Defaulting an unrecognised purpose would mean a future host silently rendering a saved
+        // frame at preview quality, which is the failure this whole field exists to prevent.
+        using var fixture = new ProtocolFixture();
+        fixture.WriteScene();
+        fixture.WriteGraph();
+        fixture.WriteRequest(purpose: "BATCH");
+        using var host = new RenderHostRunner();
+
+        var exception = Assert.Throws<InvalidDataException>(() => host.RenderOnce(fixture.RequestPath));
+
+        Assert.Contains("Unsupported render request purpose", exception.Message);
+        Assert.False(File.Exists(fixture.OutputPath));
+    }
+
     [Fact]
     public void ProjectPassAssemblyLoadsReloadsAndUnloadsWithoutGpuWork()
     {
@@ -774,6 +817,37 @@ public sealed class RenderHostProtocolTests
     public sealed class BlueCpuPass : CpuPassBase
     {
         protected override Rgba8 Color => new(20, 30, 240, 255);
+    }
+
+    /// <summary>
+    /// Paints the render purpose into the frame, which is how a pass would branch on it for real:
+    /// cheap work for a frame the user is navigating through, expensive work for the one they keep.
+    /// </summary>
+    [FeatherPass(RenderGraphDocument.MinimalRasterPassGuid)]
+    public sealed class PurposeProbeCpuPass : IRasterPass
+    {
+        [Input(RenderGraphDocument.GeometryInputSocketGuid)]
+        public SceneGeometryHandle Geometry { get; init; }
+
+        [Input(RenderGraphDocument.MaterialsInputSocketGuid)]
+        public MaterialTableHandle Materials { get; init; }
+
+        [Input(RenderGraphDocument.CameraInputSocketGuid)]
+        public CameraHandle Camera { get; init; }
+
+        [Output(RenderGraphDocument.ColorOutputSocketGuid, Format = TextureFormat.Rgba8)]
+        public TextureHandle Output { get; init; }
+
+        public void Execute(RenderContext context)
+        {
+            // Both the enum and the shorthand, because IsInteractive is the form nearly every pass
+            // will actually write and a wrong inversion in it would otherwise go unnoticed.
+            var purpose = (byte)(context.Purpose == RenderPurpose.Final ? 200 : 100);
+            var shorthand = (byte)(context.IsInteractive ? 100 : 200);
+            var pixels = new Rgba8[checked(context.Width * context.Height)];
+            Array.Fill(pixels, new Rgba8(purpose, shorthand, 0, 255));
+            context.SetColorOutput(Output, pixels);
+        }
     }
 
     [FeatherPass(ProtocolFixture.PostProcessPassGuid)]

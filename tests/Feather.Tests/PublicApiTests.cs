@@ -132,6 +132,8 @@ public class PublicApiTests
         Assert.Equal(320, context.Width);
         Assert.Equal(180, context.Height);
         Assert.Equal(SampleCount.X4, context.SampleCount);
+        Assert.Equal(RenderPurpose.Final, context.Purpose);
+        Assert.False(context.IsInteractive);
         Assert.Same(geometry, context.GetSceneGeometry(new SceneGeometryHandle(1)));
         Assert.Equal(camera, context.GetCamera(new CameraHandle(2)));
         Assert.Equal(new float2(0.25f, 0.75f), geometry.Vertices.Span[0].UV);
@@ -150,6 +152,18 @@ public class PublicApiTests
         Assert.Throws<ArgumentException>(() => new SceneGeometry(
             Array.Empty<SceneVertex>(),
             new uint[] { 0, 1 }));
+    }
+
+    [Fact]
+    public void ExistingRenderContextBackendsReportInteractiveWhenTheyOmitRenderPurpose()
+    {
+        // A host predating RenderPurpose still compiles, and the default it gets is the safe one:
+        // a pass that trims work for interactive frames stays responsive against such a host rather
+        // than treating every viewport redraw as the frame the user keeps.
+        var context = new RenderContext(new LegacyRenderContextBackend());
+
+        Assert.Equal(RenderPurpose.Interactive, context.Purpose);
+        Assert.True(context.IsInteractive);
     }
 
     [Fact]
@@ -381,6 +395,10 @@ public class PublicApiTests
         public int Width => 320;
         public int Height => 180;
         public SampleCount SampleCount => SampleCount.X4;
+
+        // Final rather than the default, so the context is shown to pass the backend's answer
+        // through instead of reporting the interface default whatever the host says.
+        public RenderPurpose Purpose => RenderPurpose.Final;
 
         public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
             => handle.Value == 1 ? geometry : throw new KeyNotFoundException();

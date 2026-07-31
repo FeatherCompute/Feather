@@ -131,7 +131,8 @@ public sealed class RenderSchedulingTests
             2,
             float4x4.Identity,
             float4x4.Identity,
-            new float3(0.0f, 0.0f, 0.0f));
+            new float3(0.0f, 0.0f, 0.0f),
+            RenderPurpose.Interactive);
 
     private static RenderGraphExecution Graph(
         RenderExecutionMode mode,

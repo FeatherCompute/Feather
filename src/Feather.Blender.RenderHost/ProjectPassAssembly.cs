@@ -26,6 +26,7 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         float4x4 viewProjection,
         float4x4 inverseViewProjection,
         float3 cameraPosition,
+        RenderPurpose purpose,
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -49,7 +50,8 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         viewState.PreparePassBuild(manifest.BuildId, graph);
 
         return current!.Execute(
-            graph, scene, width, height, viewProjection, inverseViewProjection, cameraPosition, reloaded, viewState);
+            graph, scene, width, height, viewProjection, inverseViewProjection, cameraPosition, purpose,
+            reloaded, viewState);
     }
 
     public void Dispose()
@@ -179,6 +181,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         float4x4 viewProjection,
         float4x4 inverseViewProjection,
         float3 cameraPosition,
+        RenderPurpose purpose,
         bool reloaded,
         RenderViewState viewState)
     {
@@ -195,6 +198,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             viewProjection,
             inverseViewProjection,
             cameraPosition,
+            purpose,
             resources,
             viewState.History,
             texturePool);
@@ -1471,6 +1475,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         float4x4 viewProjection,
         float4x4 inverseViewProjection,
         float3 cameraPosition,
+        RenderPurpose purpose,
         GraphResourceResolver resources,
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool)
@@ -1487,6 +1492,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         Width = width;
         Height = height;
         SampleCount = sampleCount;
+        Purpose = purpose;
 
         foreach (var (key, handle) in resources.HistoryReadHandles)
         {
@@ -1531,6 +1537,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public int Width { get; }
     public int Height { get; }
     public SampleCount SampleCount { get; }
+    public RenderPurpose Purpose { get; }
     public double GpuReadbackMilliseconds { get; private set; }
 
     public void ReportGpuReadback(TimeSpan elapsed)
