@@ -91,6 +91,31 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void ShaderInspectionLowersBoolUniformThroughEasyGpuPushConstants()
+    {
+        // A bool uniform is sized and aligned like a 32-bit value everywhere else in the pipeline,
+        // but the typed dispatch gate used to have no GPU type for it and refused the binding
+        // outright, so a switch could be declared and then never reach a shader.
+        var glsl = ShaderInspection.GetGLSL<BoolUniformKernel>();
+
+        Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
+        Assert.Contains("bool u0;", glsl, StringComparison.Ordinal);
+        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Coverage", "NativeReferenceFallback")]
+    public void DispatchBindsBoolUniformPushConstant()
+    {
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
+
+        GPU.Dispatch(new BoolUniformKernel(input.AsReadOnly(), output.AsReadWrite(), new Uniform<bool>(true)), 4);
+
+        Assert.Equal([2, 4, 6, 8], output.ToArray());
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsCopyKernelFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -3956,6 +3981,17 @@ public readonly partial struct UniformExpressionKernel(ReadOnlyBuffer<float> inp
     {
         int i = ThreadIds.X;
         output[i] = input[i] * scale.Value;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct BoolUniformKernel(ReadOnlyBuffer<float> input, ReadWriteBuffer<float> output, Uniform<bool> enabled) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = enabled.Value ? input[i] * 2.0f : input[i];
     }
 }
 

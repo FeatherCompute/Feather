@@ -2440,12 +2440,37 @@ GPU::IR::Type easygpu_module_type(const std::string& type_name) {
         return GPU::IR::Type::Float();
     }
 
+    // A bool uniform is 32 bits wide on the GPU, which is what push_constant_type_size and
+    // push_constant_type_alignment already report for it and what the managed layout packs into.
+    // Without this mapping the dispatch gate rejected the binding outright, even though GLSL
+    // accepts a bool member of a push constant block and lowers it to a 32-bit integer.
+    if (type_name == "System.Boolean" || type_name == "bool") {
+        return GPU::IR::Type::Bool();
+    }
+
     if (type_name == "System.Int32" || type_name == "int") {
         return GPU::IR::Type::Int();
     }
 
     if (type_name == "System.UInt32" || type_name == "uint") {
         return GPU::IR::Type::UInt();
+    }
+
+    // The bool vectors are mapped for the same reason as the scalar: their sizes and alignments are
+    // already known here, so leaving them out only made the dispatch gate refuse them.
+    if (type_name == "Feather.Math.bool2" || type_name == "global::Feather.Math.bool2" ||
+        type_name == "bool2") {
+        return GPU::IR::Type::Bool2();
+    }
+
+    if (type_name == "Feather.Math.bool3" || type_name == "global::Feather.Math.bool3" ||
+        type_name == "bool3") {
+        return GPU::IR::Type::Bool3();
+    }
+
+    if (type_name == "Feather.Math.bool4" || type_name == "global::Feather.Math.bool4" ||
+        type_name == "bool4") {
+        return GPU::IR::Type::Bool4();
     }
 
     if (type_name == "Feather.Math.int2" || type_name == "global::Feather.Math.int2" || type_name == "int2") {
