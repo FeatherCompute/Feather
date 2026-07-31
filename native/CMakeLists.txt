@@ -4,6 +4,17 @@ project(FeatherNative LANGUAGES CXX)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Single-config generators leave CMAKE_BUILD_TYPE empty unless it is passed explicitly, and an empty
+# build type means no -O flag at all. That is easy to miss: the library builds, links, and runs
+# correctly, just several times slower -- a viewport frame measured 71ms unoptimized against 20ms at
+# -O3, with the difference landing in per-pixel host-side work. Default to Release so a bare
+# `cmake -S native -B native/build` cannot quietly produce a build nobody would want to profile.
+get_property(_feather_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _feather_multi_config AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type for single-config generators" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE was unset; defaulting to Release.")
+endif()
+
 set(EASYGPU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(EASYGPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 option(FEATHER_BUILD_WINDOW "Build Feather native window and texture presentation support" ON)

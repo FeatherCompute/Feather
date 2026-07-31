@@ -9619,7 +9619,18 @@ void trace_graphics_step(const char* step) {
         return;
     }
 
-    std::cerr << "[feather graphics] " << step << "\n";
+    // Each step reports how long the work since the previous step took. A bare sequence of step
+    // names says which stages run but not which one costs the frame, and per-frame shader
+    // compilation looks identical to a cache hit without the elapsed time next to it.
+    static thread_local std::chrono::steady_clock::time_point previous_step{};
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = previous_step.time_since_epoch().count() == 0
+                             ? std::chrono::steady_clock::duration::zero()
+                             : now - previous_step;
+    previous_step = now;
+    std::cerr << "[feather graphics] " << step << " +"
+              << std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / 1000.0
+              << "ms\n";
 }
 
 std::string generic_graphics_vertex_glsl() {
@@ -11420,6 +11431,7 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
         if (desc == nullptr || out_texture == nullptr || desc->width == 0 || desc->height == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Texture descriptor and output handle are required.");
         }
+        trace_graphics_step("create texture2d");
         TextureState state;
         state.width = desc->width;
         state.height = desc->height;
@@ -11507,6 +11519,7 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
+        trace_graphics_step("upload texture2d");
         const auto pixel = pixel_size(it->second.pixel_format);
         if (it->second.depth != 1 || x + width > it->second.width || y + height > it->second.height) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Texture upload range exceeds texture dimensions.");
