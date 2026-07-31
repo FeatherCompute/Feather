@@ -48,6 +48,12 @@ public sealed class MinimalRasterPass : IRasterPass
         Max = 2.0)]
     public int ViewMode { get; set; }
 
+    // The same colour the draw clears to, in the render target's 8-bit encoding. Kept next to that
+    // clear so the two cannot drift apart.
+    private static readonly Rgba8 BackgroundColor = new(9, 12, 15, 255);
+
+    private static readonly float4 ClearColor = new(0.035f, 0.047f, 0.059f, 1.0f);
+
     public void Execute(RenderContext context)
     {
         var geometry = context.GetSceneGeometry(Geometry);
@@ -61,12 +67,19 @@ public sealed class MinimalRasterPass : IRasterPass
             context.Width,
             context.Height,
             PixelFormat.Rgba8);
-        var background = new Rgba8[checked(context.Width * context.Height)];
-        Array.Fill(background, new Rgba8(9, 12, 15, 255));
-        color.Upload(background);
 
         var dispatchPath = DispatchPath.None;
-        if (!geometry.Indices.IsEmpty)
+        if (geometry.Indices.IsEmpty)
+        {
+            // Nothing will be drawn, so no render pass runs to clear the target. Paint the
+            // background by hand here instead. When there is geometry the draw clears to the same
+            // colour, so doing this unconditionally allocated and uploaded a full-resolution image
+            // per frame only to overwrite it.
+            var background = new Rgba8[checked(context.Width * context.Height)];
+            Array.Fill(background, BackgroundColor);
+            color.Upload(background);
+        }
+        else
         {
             dispatchPath = DrawScene(context, geometry, materials, textures, camera, lights, color);
         }
@@ -170,9 +183,7 @@ public sealed class MinimalRasterPass : IRasterPass
                         ColorLoadOp = firstDraw
                             ? GraphicsColorLoadOp.Clear
                             : GraphicsColorLoadOp.Load,
-                        ClearColor = firstDraw
-                            ? new float4(0.035f, 0.047f, 0.059f, 1.0f)
-                            : null,
+                        ClearColor = firstDraw ? ClearColor : null,
                         DepthLoadOp = firstDraw
                             ? GraphicsDepthLoadOp.Clear
                             : GraphicsDepthLoadOp.Load,
