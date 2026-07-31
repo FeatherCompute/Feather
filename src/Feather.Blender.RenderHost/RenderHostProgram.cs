@@ -68,6 +68,17 @@ internal static class RenderHostProgram
         }
     }
 
+    /// <summary>
+    /// How long after the last render the loop keeps checking for a new request at
+    /// <see cref="ActivePollInterval"/> before falling back to the configured interval.
+    /// </summary>
+    private static readonly TimeSpan ActivePollWindow = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The poll interval used while requests are still arriving.
+    /// </summary>
+    private static readonly TimeSpan ActivePollInterval = TimeSpan.FromMilliseconds(2);
+
     private static async Task<int> WatchAsync(
         RenderHostRunner host,
         RenderHostOptions options,
@@ -76,15 +87,19 @@ internal static class RenderHostProgram
         RenderInputSignature? previous = null;
         RenderInputSignature? failed = null;
         RenderInputSignature? pending = null;
+        RenderInputSignature? lastRead = null;
         var failureCount = 0;
         var retryAfter = DateTimeOffset.MinValue;
+        var lastRender = DateTimeOffset.MinValue;
         WriteEvent("ready", new { requestPath = Path.GetFullPath(options.RequestPath!) });
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var current = RenderInputSignature.TryRead(options.RequestPath!);
+            var current = RenderInputSignature.TryRead(options.RequestPath!, lastRead);
+            lastRead = current;
             var retryIsDue = current != failed || DateTimeOffset.UtcNow >= retryAfter;
             var continuesPendingRender = current is not null && current == pending;
+            var rendered = false;
             if (current is not null && (current != previous || continuesPendingRender) && retryIsDue)
             {
                 try
@@ -94,6 +109,8 @@ internal static class RenderHostProgram
                     pending = result.NeedsMoreWork ? current : null;
                     failed = null;
                     failureCount = 0;
+                    rendered = true;
+                    lastRender = DateTimeOffset.UtcNow;
                     WriteRenderResult(result);
                 }
                 catch (InvalidDataException exception)
@@ -118,7 +135,20 @@ internal static class RenderHostProgram
                 }
             }
 
-            await Task.Delay(options.PollInterval, cancellationToken);
+            if (!rendered)
+            {
+                // Poll tightly for a short window after each render. While the viewport is being
+                // dragged the next request lands at an arbitrary point inside the interval, so a
+                // flat wait adds an average of half an interval -- and a full one whenever the
+                // request arrives just after a check -- to a frame the host could already be
+                // working on. That delay dominated the observed latency: a 21ms frame took 55ms to
+                // reach the viewport at a 33ms interval. Once requests stop arriving the loop
+                // relaxes back to the configured interval so an idle host stays cheap.
+                var interval = DateTimeOffset.UtcNow - lastRender < ActivePollWindow
+                    ? ActivePollInterval
+                    : options.PollInterval;
+                await Task.Delay(interval, cancellationToken);
+            }
         }
 
         return 0;
@@ -156,12 +186,30 @@ internal static class RenderHostProgram
         string? ManifestPath,
         FileSignature? Manifest)
     {
-        public static RenderInputSignature? TryRead(string requestPath)
+        /// <param name="previous">
+        /// The signature from the last poll, if any. When the request file itself is unchanged its
+        /// resolved manifest path is too, so the parse can be skipped and only the manifest
+        /// restatted. That keeps a tight poll loop from deserializing the request document several
+        /// hundred times a second while nothing is happening.
+        /// </param>
+        public static RenderInputSignature? TryRead(
+            string requestPath,
+            RenderInputSignature? previous = null)
         {
             var request = FileSignature.TryRead(requestPath);
             if (request is null)
             {
                 return null;
+            }
+
+            if (previous is not null && previous.Request == request)
+            {
+                var manifest = previous.ManifestPath is null
+                    ? null
+                    : FileSignature.TryRead(previous.ManifestPath);
+                return manifest == previous.Manifest
+                    ? previous
+                    : new RenderInputSignature(request, previous.ManifestPath, manifest);
             }
 
             try
