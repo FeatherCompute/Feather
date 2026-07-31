@@ -56,6 +56,56 @@ public sealed class SceneGeometry
 }
 
 /// <summary>
+/// One named scene object: its placement in the world and the geometry belonging to it alone.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="Geometry"/> carries world-space positions, matching <see cref="SceneGeometry"/> from the
+/// scene as a whole, so a pass can draw an object without applying anything first.
+/// <see cref="ModelMatrix"/> is supplied on top of that for the passes that need the placement itself
+/// -- a simulation whose domain is the object's local box, or an effect that wants object space back
+/// out of world space. Handing over both is deliberate: one is derivable from the other, but that is
+/// exactly the matrix bookkeeping a pass author should not be repeating.
+/// </para>
+/// <para>
+/// A host asked for an object the scene does not contain reports it through <see cref="Exists"/>
+/// rather than throwing. A named object legitimately disappears while a graph is being edited --
+/// renamed, hidden, deleted -- and refusing the whole frame would break the graph at exactly the
+/// moment the user is changing it.
+/// </para>
+/// </remarks>
+public sealed class SceneObject
+{
+    public SceneObject(string name, float4x4 modelMatrix, SceneGeometry geometry, bool exists = true)
+    {
+        Name = name ?? throw new ArgumentNullException(nameof(name));
+        ModelMatrix = modelMatrix;
+        Geometry = geometry ?? throw new ArgumentNullException(nameof(geometry));
+        Exists = exists;
+    }
+
+    /// <summary>The host-side name this object was selected by.</summary>
+    public string Name { get; }
+
+    /// <summary>Whether the scene actually contains an object with that name.</summary>
+    public bool Exists { get; }
+
+    /// <summary>The object-to-world transform, column-major.</summary>
+    public float4x4 ModelMatrix { get; }
+
+    /// <summary>
+    /// This object's geometry alone, in world space. Empty when <see cref="Exists"/> is false.
+    /// </summary>
+    /// <remarks>
+    /// Narrowed through the indices, not the vertices: <see cref="SceneGeometry.Indices"/> covers only
+    /// this object's triangles while <see cref="SceneGeometry.Vertices"/> may remain the whole scene's
+    /// buffer, which is what lets a host hand over an object without copying anything. Walk the object
+    /// through its indices; treating the vertex span as this object's own would read its neighbours.
+    /// </remarks>
+    public SceneGeometry Geometry { get; }
+}
+
+/// <summary>
 /// Camera data resolved by a render host for the current render request.
 /// </summary>
 /// <param name="ViewProjection">
@@ -160,6 +210,9 @@ public interface IRenderContextBackend
 
     RenderTime GetTime(TimeHandle handle)
         => throw new NotSupportedException("This render host does not expose render time.");
+
+    SceneObject GetSceneObject(SceneObjectHandle handle)
+        => throw new NotSupportedException("This render host does not expose individual scene objects.");
 
     ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle);
 
@@ -278,6 +331,12 @@ public sealed class RenderContext
 
     public RenderTime GetTime(TimeHandle handle)
         => Backend.GetTime(handle);
+
+    /// <summary>
+    /// Resolves one scene object the graph selected by name.
+    /// </summary>
+    public SceneObject GetSceneObject(SceneObjectHandle handle)
+        => Backend.GetSceneObject(handle);
 
     /// <summary>
     /// Resolves an RGBA8 texture produced by an upstream graph pass.

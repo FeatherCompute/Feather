@@ -213,6 +213,7 @@ internal static class PassModelFactory
             "global::Feather.RenderGraph.LightTableHandle" => "LightTable",
             "global::Feather.RenderGraph.MaterialTableHandle" => "MaterialTable",
             "global::Feather.RenderGraph.SceneGeometryHandle" => "SceneGeometry",
+            "global::Feather.RenderGraph.SceneObjectHandle" => "SceneObject",
             "global::Feather.RenderGraph.TextureHandle" => "Texture2D",
             "global::Feather.RenderGraph.TextureTableHandle" => "TextureTable",
             "global::Feather.RenderGraph.TimeHandle" => "Time",

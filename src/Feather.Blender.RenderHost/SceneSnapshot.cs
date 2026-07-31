@@ -293,10 +293,33 @@ internal sealed class SceneLightMetadata
     public float AreaSizeY { get; init; }
 }
 
+/// <summary>
+/// Where one scene instance's triangles live inside the flattened geometry, and the transform that
+/// put them there.
+/// </summary>
+/// <remarks>
+/// Recorded while flattening rather than rebuilt afterwards: the flattening bakes world positions
+/// into a single vertex buffer, so once it is done nothing remains to say which range came from which
+/// object. An Object node needs exactly that, and a range costs nothing next to a second copy of the
+/// mesh.
+/// </remarks>
+internal sealed record RenderObjectRange(
+    string Name,
+    float4x4 ModelMatrix,
+    int FirstIndex,
+    int IndexCount);
+
 internal sealed record RenderGeometry(
     SceneVertex[] Vertices,
     uint[] Indices,
-    SceneSubmesh[] Submeshes);
+    SceneSubmesh[] Submeshes,
+    RenderObjectRange[] Objects)
+{
+    public RenderGeometry(SceneVertex[] vertices, uint[] indices, SceneSubmesh[] submeshes)
+        : this(vertices, indices, submeshes, [])
+    {
+    }
+}
 
 internal static class SceneGeometryBuilder
 {
@@ -325,6 +348,7 @@ internal static class SceneGeometryBuilder
         var vertices = new List<SceneVertex>();
         var indices = new List<uint>();
         var submeshes = new List<SceneSubmesh>();
+        var objects = new List<RenderObjectRange>();
         foreach (var instance in snapshot.Metadata.Instances ??
                  throw new InvalidDataException("Scene metadata instances are missing."))
         {
@@ -393,6 +417,7 @@ internal static class SceneGeometryBuilder
                 });
             }
 
+            var objectFirstIndex = indices.Count;
             for (var triangle = 0; triangle < mesh.TriangleCount; triangle++)
             {
                 var firstIndex = indices.Count;
@@ -411,9 +436,22 @@ internal static class SceneGeometryBuilder
                     firstIndex,
                     ResolveMaterialIndex(mesh, triangle, materialIndices, defaultMaterialIndex));
             }
+
+            // Named by the instance's Blender name, which is what an Object node selects by. Duplicates
+            // are kept rather than merged: Blender allows one name per object, so a repeat means
+            // linked-duplicate instancing, and the first entry is the one the graph asked for.
+            objects.Add(new RenderObjectRange(
+                instance.Name,
+                model,
+                objectFirstIndex,
+                indices.Count - objectFirstIndex));
         }
 
-        return new RenderGeometry(vertices.ToArray(), indices.ToArray(), submeshes.ToArray());
+        return new RenderGeometry(
+            vertices.ToArray(),
+            indices.ToArray(),
+            submeshes.ToArray(),
+            objects.ToArray());
     }
 
     private static ParsedMesh ParseMesh(SceneSnapshot snapshot, SceneMesh mesh)

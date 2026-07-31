@@ -584,6 +584,10 @@ internal sealed class GraphResourceResolver
     // camera's and the backend can tell which one a pass was bound to.
     private const ulong FirstCameraNodeHandle = 256;
 
+    // Its own range for the same reason, and clear of the camera nodes' so the two cannot be confused
+    // when a handle value shows up in a diagnostic.
+    private const ulong FirstObjectNodeHandle = 512;
+
     private readonly RenderGraphExecution graph;
     private readonly ProjectPassManifest manifest;
     private readonly Dictionary<(string NodeId, string SocketGuid), TextureHandle> textureHandles = new();
@@ -597,9 +601,12 @@ internal sealed class GraphResourceResolver
     private readonly Dictionary<string, TextureHandle> historyWriteSources = new(StringComparer.Ordinal);
     private readonly Dictionary<ulong, CameraUpAxis> cameraNodeUpAxes = [];
     private readonly Dictionary<string, CameraHandle> cameraNodeHandles = new(StringComparer.Ordinal);
+    private readonly Dictionary<ulong, string> objectNodeNames = [];
+    private readonly Dictionary<string, SceneObjectHandle> objectNodeHandles = new(StringComparer.Ordinal);
     private ulong nextTextureHandle = FirstTextureHandle;
     private ulong nextBufferHandle = FirstBufferHandle;
     private ulong nextCameraHandle = FirstCameraNodeHandle;
+    private ulong nextObjectHandle = FirstObjectNodeHandle;
 
     public GraphResourceResolver(RenderGraphExecution graph, ProjectPassManifest manifest)
     {
@@ -618,6 +625,16 @@ internal sealed class GraphResourceResolver
                 string.Equals(cameraNode.UpAxis, "Z", StringComparison.Ordinal)
                     ? CameraUpAxis.Z
                     : CameraUpAxis.Y);
+        }
+
+        // An Object node resolves to a handle carrying the name it selects by. The name rides on the
+        // handle rather than being looked up here because the scene is not available at resolve time,
+        // and because two nodes naming the same object must still be two distinct graph resources.
+        foreach (var objectNode in graph.Nodes.Where(node => node.Kind == "object"))
+        {
+            var handle = new SceneObjectHandle(nextObjectHandle++);
+            objectNodeHandles.Add(objectNode.NodeId, handle);
+            objectNodeNames.Add(handle.Value, objectNode.ObjectName);
         }
 
         // A Texture node is a graph-visible resource, so it gets its own handle: a pass can
@@ -808,6 +825,14 @@ internal sealed class GraphResourceResolver
     public CameraHandle CameraNodeHandle(string nodeId) => cameraNodeHandles[nodeId];
 
     /// <summary>
+    /// The scene object name behind each Object node's handle, so the backend can find the object in
+    /// the snapshot the graph never sees.
+    /// </summary>
+    public IReadOnlyDictionary<ulong, string> ObjectNodeNames => objectNodeNames;
+
+    public SceneObjectHandle ObjectNodeHandle(string nodeId) => objectNodeHandles[nodeId];
+
+    /// <summary>
     /// Reports the size and format a Texture node declares for the resource behind
     /// <paramref name="handle"/>. Width and height are zero when the node follows the render size.
     /// </summary>
@@ -895,6 +920,22 @@ internal sealed class GraphResourceResolver
                 "Unknown",
                 "Unknown",
                 cameraNodeHandles[node.NodeId]);
+        }
+        if (node.Kind == "object")
+        {
+            if (!string.Equals(
+                    socketGuid,
+                    RenderGraphDocument.ObjectNodeSocketGuid,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Object '{node.ObjectName}' has no output socket {socketGuid}.");
+            }
+            return new ResolvedGraphResource(
+                "SceneObject",
+                "Unknown",
+                "Unknown",
+                objectNodeHandles[node.NodeId]);
         }
         if (node.Kind != "pass")
         {
@@ -1405,12 +1446,14 @@ internal static class PassMemberBinder
 internal sealed class ProjectRenderContextBackend : IRenderContextBackend
 {
     private readonly SceneGeometry geometry;
+    private readonly RenderObjectRange[] objectRanges;
     private readonly SceneMaterialTable materials;
     private readonly SceneTextureTable textures;
     private readonly RenderCamera camera;
     private readonly SceneLightTable lights;
     private readonly RenderTime time;
     private readonly GraphResourceResolver resources;
+    private readonly Dictionary<ulong, SceneObject> sceneObjects = [];
     private readonly Dictionary<ulong, RenderedFrame> frames = new();
 
     // GPU-resident outputs live alongside the CPU frames rather than replacing them, so software
@@ -1434,6 +1477,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     {
         this.texturePool = texturePool;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
+        objectRanges = scene.Geometry.Objects;
         materials = scene.Materials;
         textures = scene.Textures;
         camera = new RenderCamera(viewProjection, inverseViewProjection, cameraPosition);
@@ -1538,6 +1582,74 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         => handle.Value == PassMemberBinder.TimeHandleValue
             ? time
             : throw new KeyNotFoundException($"Unknown time handle {handle.Value}.");
+
+    /// <summary>
+    /// Resolves one Object node's handle to the object it names.
+    /// </summary>
+    /// <remarks>
+    /// The geometry is a subrange of the scene's single flattened index buffer, not a copy: the vertex
+    /// buffer is shared and only the triangle range narrows, which is why selecting an object costs
+    /// nothing per frame. Submeshes are narrowed to the same range and rebased so a pass reading
+    /// <c>Submeshes</c> gets offsets into the geometry it was handed.
+    ///
+    /// An unknown name yields an empty object with <c>Exists</c> false rather than an exception,
+    /// because the name is typed by hand in the graph and will be wrong or stale part of the time.
+    /// </remarks>
+    public SceneObject GetSceneObject(SceneObjectHandle handle)
+    {
+        if (sceneObjects.TryGetValue(handle.Value, out var cached))
+        {
+            return cached;
+        }
+        if (!resources.ObjectNodeNames.TryGetValue(handle.Value, out var name))
+        {
+            throw new KeyNotFoundException($"Unknown scene object handle {handle.Value}.");
+        }
+
+        var range = Array.Find(
+            objectRanges,
+            candidate => string.Equals(candidate.Name, name, StringComparison.Ordinal));
+        var resolved = range is null
+            ? new SceneObject(
+                name,
+                float4x4.Identity,
+                new SceneGeometry(ReadOnlyMemory<SceneVertex>.Empty, ReadOnlyMemory<uint>.Empty),
+                exists: false)
+            : new SceneObject(
+                name,
+                range.ModelMatrix,
+                new SceneGeometry(
+                    geometry.Vertices,
+                    geometry.Indices.Slice(range.FirstIndex, range.IndexCount),
+                    SubmeshesWithin(range)));
+        sceneObjects.Add(handle.Value, resolved);
+        return resolved;
+    }
+
+    /// <summary>
+    /// Clips the scene's submeshes to one object's index range and rebases them onto it.
+    /// </summary>
+    /// <remarks>
+    /// Intersected rather than filtered: the flattener merges neighbouring triangle runs that share a
+    /// material, and two adjacent instances with the same material produce one submesh spanning both.
+    /// Taking such a submesh whole would hand this object triangles belonging to the next one.
+    /// </remarks>
+    private ReadOnlyMemory<SceneSubmesh> SubmeshesWithin(RenderObjectRange range)
+    {
+        var end = range.FirstIndex + range.IndexCount;
+        var within = new List<SceneSubmesh>();
+        foreach (var submesh in geometry.Submeshes.Span)
+        {
+            var first = System.Math.Max(submesh.FirstIndex, range.FirstIndex);
+            var last = System.Math.Min(submesh.FirstIndex + submesh.IndexCount, end);
+            if (last <= first)
+            {
+                continue;
+            }
+            within.Add(new SceneSubmesh(first - range.FirstIndex, last - first, submesh.MaterialIndex));
+        }
+        return within.ToArray();
+    }
 
     public ReadOnlyMemory<Rgba8> GetColorInput(TextureHandle handle)
     {

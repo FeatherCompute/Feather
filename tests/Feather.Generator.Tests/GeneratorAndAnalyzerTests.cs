@@ -6688,6 +6688,60 @@ public class GeneratorAndAnalyzerTests
         }
     }
 
+    /// <summary>
+    /// A single scene object is its own resource kind, distinct from the scene it came out of.
+    /// </summary>
+    /// <remarks>
+    /// The manifest kind is what a host matches an Object node's socket against, and an unrecognised
+    /// handle type falls through to "Value" rather than failing, which would leave the node linkable in
+    /// the editor and unresolvable at render time.
+    /// </remarks>
+    [Fact]
+    public void GeneratorDistinguishesASceneObjectFromTheWholeScene()
+    {
+        var compilation = CreateCompilation(
+            """
+            using Feather.RenderGraph;
+
+            [FeatherPass("1d7a4c85-6b39-42e7-9f14-8c5d2b7a3e69")]
+            public sealed class SceneObjectPass : IComputePass
+            {
+                [Input("4e8b1f36-7d52-49a3-b681-2f9c5a4d8e17")]
+                public SceneGeometryHandle Scene { get; init; }
+
+                [Input("9c3d5a72-4f18-4b96-8e27-1a6b3d9f5c84")]
+                public SceneObjectHandle Surface { get; init; }
+
+                [Output("b5f2e847-3a96-4c15-9d73-6e8a1c4b2f59")]
+                public TextureHandle Color { get; init; }
+
+                public void Execute(RenderContext context)
+                {
+                }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var generated = GetGeneratedTree(outputCompilation, diagnostics, "Feather.PassManifest.g.cs");
+        var jsonVariable = generated.GetRoot()
+            .DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(variable => variable.Identifier.ValueText == "Json");
+        var jsonField = Assert.IsAssignableFrom<IFieldSymbol>(
+            outputCompilation.GetSemanticModel(generated).GetDeclaredSymbol(jsonVariable));
+
+        using var manifest = JsonDocument.Parse(Assert.IsType<string>(jsonField.ConstantValue));
+        var pass = Assert.Single(manifest.RootElement.GetProperty("passes").EnumerateArray());
+        var inputs = pass.GetProperty("inputs").EnumerateArray()
+            .ToDictionary(socket => socket.GetProperty("name").GetString()!);
+
+        Assert.Equal("SceneGeometry", inputs["Scene"].GetProperty("resourceKind").GetString());
+        Assert.Equal("SceneObject", inputs["Surface"].GetProperty("resourceKind").GetString());
+    }
+
     [Fact]
     public void GeneratorReportsInvalidRenderGraphGuid()
     {

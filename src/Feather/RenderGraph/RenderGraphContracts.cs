@@ -135,3 +135,14 @@ public readonly record struct CameraHandle(ulong Value);
 public readonly record struct LightTableHandle(ulong Value);
 
 public readonly record struct TimeHandle(ulong Value);
+
+/// <summary>
+/// Identifies one scene object a render graph selected by name, as distinct from the whole scene.
+/// </summary>
+/// <remarks>
+/// A host normally hands a pass the entire scene, which is what a rasterizer wants and what an
+/// effect aimed at a single object cannot use: an ocean surface, a cloth patch or a fluid domain each
+/// need one object's mesh and placement, and picking it inside the pass would mean naming a Blender
+/// object in C#. This handle is what lets the graph make that choice instead.
+/// </remarks>
+public readonly record struct SceneObjectHandle(ulong Value);

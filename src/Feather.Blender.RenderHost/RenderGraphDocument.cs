@@ -23,7 +23,9 @@ internal sealed class RenderGraphDocument
     public const string HistoryReadSocketGuid = "b85a7129-ad17-5d67-b06b-60e15ce071d0";
     public const string HistoryWriteSocketGuid = "8d513f8b-7212-557b-bcec-2f88ed212c21";
     public const string CameraNodeSocketGuid = "e3b7c491-6a25-4d83-9f16-5c2b8e4a7d39";
+    public const string ObjectNodeSocketGuid = "7d4f8a26-3c91-4e57-b8a3-6f2d5c1e9b47";
     public const int MaximumScheduledSamples = 1_000_000_000;
+    public const int MaximumObjectNameLength = 256;
 
     public int SchemaVersion { get; init; }
     public string GenerationId { get; init; } = "";
@@ -156,7 +158,7 @@ internal sealed class RenderGraphDocument
             RequireNonEmpty(node.NodeId, "nodes.nodeId");
             RequireNonEmpty(node.Kind, "nodes.kind");
             if (node.Kind is not ("scene" or "pass" or "output" or "history-read" or "history-write"
-                    or "texture" or "camera"))
+                    or "texture" or "camera" or "object"))
             {
                 throw new InvalidDataException(
                     $"Render graph node '{node.NodeId}' has unsupported kind '{node.Kind}'.");
@@ -212,6 +214,18 @@ internal sealed class RenderGraphDocument
                 {
                     throw new InvalidDataException(
                         $"Render graph camera '{node.NodeId}' has unsupported upAxis '{node.UpAxis}'.");
+                }
+            }
+            else if (node.Kind == "object")
+            {
+                // The name must be present and sane, but an object that is merely absent from the
+                // scene is not an error here: the pass is told so through SceneObject.Exists, because
+                // a renamed or hidden object should not stop the frame the user is mid-edit on.
+                RequireNonEmpty(node.ObjectName, "nodes.objectName");
+                if (node.ObjectName.Length > MaximumObjectNameLength || node.ObjectName.Any(char.IsControl))
+                {
+                    throw new InvalidDataException(
+                        $"Render graph object name '{node.ObjectName}' is invalid.");
                 }
             }
         }
@@ -345,6 +359,10 @@ internal sealed class RenderGraphDocument
         if (Links.Any(link => nodesById[link.ToNode].Kind == "camera"))
         {
             throw new InvalidDataException("Render graph camera nodes cannot have resource inputs.");
+        }
+        if (Links.Any(link => nodesById[link.ToNode].Kind == "object"))
+        {
+            throw new InvalidDataException("Render graph object nodes cannot have resource inputs.");
         }
 
         var historyReads = executionNodes.Where(node => node.Kind == "history-read").ToArray();
@@ -549,6 +567,11 @@ internal sealed class GraphNode
     // is what keeps an axis swizzle out of shader code. Defaults to Y so a graph written before the
     // node existed still resolves to the convention procedural shaders are written in.
     public string UpAxis { get; init; } = "Y";
+
+    // An object node names one scene object, so a pass aimed at a single surface gets that surface's
+    // mesh and placement instead of the whole scene -- and the name lives in the graph rather than in
+    // the effect's source.
+    public string ObjectName { get; init; } = "";
 }
 
 internal sealed class GraphLink
