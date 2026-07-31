@@ -1597,6 +1597,36 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void GeneratedShadersShareOneStructuredBufferAcrossBothStages()
+    {
+        // The same buffer read by the vertex and the fragment stage. A descriptor set layout that
+        // named only one of those stages is invalid Vulkan, and drivers disagree about whether it
+        // faults, so this pins the shared case rather than leaving it to whichever backend runs.
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedSharedBufferVertexShader, GeneratedSharedBufferFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "GeneratedSharedBuffer" });
+        target.Upload([.. Enumerable.Repeat(float4.Zero, 64)]);
+
+        pipeline.Draw(
+            new GeneratedSharedBufferVertexShader(vertices.AsReadOnly()),
+            new GeneratedSharedBufferFragmentShader(vertices.AsReadOnly()),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[64];
+        target.Read(readback);
+        // The fragment stage reads vertex 1, whose X is 3 and Y is -1, and halves the pair.
+        AssertColorNear(FirstDrawn(readback), new float4(1.5f, -0.5f, 0.0f, 1.0f));
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+
+    [Fact]
     public void GeneratedBufferLoopRecordMatchesStd430Stride()
     {
         // A float3 followed by scalars keeps the managed size equal to the std430 stride, which is
@@ -1717,6 +1747,27 @@ public partial struct GeneratedBufferLoopRecord
     public float3 Tint;
     public int Kind;
     public float Weight;
+}
+
+[VertexShader]
+public readonly partial struct GeneratedSharedBufferVertexShader(ReadOnlyBuffer<float4> vertices) : IVertexShader<float4>
+{
+    public float4 Execute()
+    {
+        return vertices[VertexIds.Index];
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedSharedBufferFragmentShader(ReadOnlyBuffer<float4> vertices) : IFragmentShader<float4>
+{
+    public float4 Execute(float4 input)
+    {
+        // A fixed index, so the value is the same for every fragment and the assertion does not
+        // depend on which pixel the rasterizer happens to cover.
+        var vertex = vertices[1];
+        return new float4(vertex.X * 0.5f, vertex.Y * 0.5f, 0.0f, 1.0f);
+    }
 }
 
 [FragmentShader]

@@ -221,6 +221,10 @@ struct GraphicsResourceBindingEntry {
     uint8_t kind = 0;
     uint8_t access = 0;
     uint32_t sampler_binding = UINT32_MAX;
+    // Which stages read this resource, as a mask of GPU::Backend::ResourceStage* bits. A descriptor
+    // set layout that omits the stage doing the reading is invalid Vulkan; drivers that route
+    // descriptors through argument buffers tolerate it, but a conformant one need not.
+    uint32_t stage_flags = 0;
 };
 
 struct GraphicsResourceLayout {
@@ -7524,7 +7528,8 @@ const IrResource* find_graphics_sampler_for_texture_sample(const ParsedIr& ir, c
     return nullptr;
 }
 
-bool append_graphics_resource_layout_from_ir(const ParsedIr& ir, GraphicsResourceLayout* layout) {
+bool append_graphics_resource_layout_from_ir(const ParsedIr& ir, GraphicsResourceLayout* layout,
+                                            uint32_t stage_flags) {
     if (layout == nullptr) {
         return false;
     }
@@ -7542,10 +7547,12 @@ bool append_graphics_resource_layout_from_ir(const ParsedIr& ir, GraphicsResourc
             return false;
         }
 
-        const auto duplicate = std::any_of(layout->entries.begin(), layout->entries.end(), [&](const auto& entry) {
+        const auto duplicate = std::find_if(layout->entries.begin(), layout->entries.end(), [&](const auto& entry) {
             return entry.kind == resource.kind && entry.source_binding == resource.binding;
         });
-        if (duplicate) {
+        if (duplicate != layout->entries.end()) {
+            // Both stages read the same resource, so the descriptor has to be visible to both.
+            duplicate->stage_flags |= stage_flags;
             continue;
         }
 
@@ -7570,7 +7577,8 @@ bool append_graphics_resource_layout_from_ir(const ParsedIr& ir, GraphicsResourc
             backend_binding,
             resource.kind,
             resource.access,
-            sampler_binding});
+            sampler_binding,
+            stage_flags});
         used_bindings.insert(backend_binding);
     }
 
@@ -7584,8 +7592,8 @@ bool build_graphics_resource_layout(const ParsedIr& vertex_ir, const ParsedIr& f
     }
 
     layout->entries.clear();
-    return append_graphics_resource_layout_from_ir(vertex_ir, layout) &&
-           append_graphics_resource_layout_from_ir(fragment_ir, layout);
+    return append_graphics_resource_layout_from_ir(vertex_ir, layout, GPU::Backend::ResourceStageVertex) &&
+           append_graphics_resource_layout_from_ir(fragment_ir, layout, GPU::Backend::ResourceStageFragment);
 }
 
 bool graphics_find_type_by_name(const Feather::TypedIR::Module& module, const std::string& type_name,
@@ -9658,7 +9666,10 @@ std::string graphics_resource_layout_key(const GraphicsResourceLayout& layout,
             << ":s" << resource.source_binding
             << ":k" << static_cast<uint32_t>(resource.kind)
             << ":a" << static_cast<uint32_t>(resource.access)
-            << ":sam" << resource.sampler_binding;
+            << ":sam" << resource.sampler_binding
+            // Stage visibility is part of the descriptor set layout, so it has to be part of the key
+            // that decides whether a cached pipeline can be reused.
+            << ":st" << resource.stage_flags;
         if (resource.kind == kIrResourceKindTexture2D && resource.backend_binding < sampled_texture_formats.size()) {
             key << ":fmt" << static_cast<uint32_t>(sampled_texture_formats[resource.backend_binding]);
         }
@@ -9852,7 +9863,9 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
             entry.type = GPU::Backend::BindingType::Buffer;
             entry.format = GPU::Backend::PixelFormat::RGBA8;
             entry.readOnly = true;
-            entry.stageFlags = GPU::Backend::ResourceStageVertex;
+            // The stage that declared the buffer, not a fixed guess: a vertex stream is read by the
+            // vertex shader, but a structured buffer the fragment shader loops over is read there.
+            entry.stageFlags = resource.stage_flags;
             pipeline_desc.resources.push_back(entry);
             continue;
         }
@@ -9863,7 +9876,7 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
             entry.type = GPU::Backend::BindingType::Sampler;
             entry.format = sampled_texture_formats[resource.backend_binding];
             entry.readOnly = true;
-            entry.stageFlags = GPU::Backend::ResourceStageFragment;
+            entry.stageFlags = resource.stage_flags;
             pipeline_desc.resources.push_back(entry);
         }
     }
