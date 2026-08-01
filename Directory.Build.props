@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.2.0</VersionPrefix>
-    <VersionSuffix>preview.5</VersionSuffix>
+    <VersionSuffix>preview.6</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -19,7 +19,7 @@
     <FeatherPackRepositoryDocs Condition="'$(FeatherPackRepositoryDocs)' == ''">true</FeatherPackRepositoryDocs>
     <PackageReadmeFile Condition="'$(FeatherPackRepositoryDocs)' == 'true'">README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds the public Blender RenderGraph and scene-resource APIs, the version-matched Feather Blender RenderHost tool, and updated graphics pipeline support.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Extends SceneMaterial with Ior, DiffuseRoughness and TransmissionWeight, so a pass can shade the full Principled model rather than base colour and roughness alone; adds RenderContext.IsInteractive, letting one pass pick sample and bounce budgets for the viewport and for a final frame; pools rasterizer render targets across frames; and fixes integer-vector uniforms, bool uniforms, descriptor stages and a range check that capped render resolution.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true' and '$(FeatherPackRepositoryDocs)' == 'true'">
