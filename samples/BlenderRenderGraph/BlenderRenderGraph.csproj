@@ -3,7 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <DefineConstants>$(DefineConstants);FEATHER_POOLED_RASTER_TARGETS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

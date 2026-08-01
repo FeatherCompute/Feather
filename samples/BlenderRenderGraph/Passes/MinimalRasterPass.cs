@@ -63,14 +63,7 @@ public sealed class MinimalRasterPass : IRasterPass
         var lights = context.GetLights(Lights);
         _ = context.GetTime(Time);
 
-#if FEATHER_POOLED_RASTER_TARGETS
         var color = context.GetOrCreateRenderTarget<Rgba8, Rgba8>(Color, PixelFormat.Rgba8);
-#else
-        using var color = GPU.CreateRenderTexture2D<Rgba8, Rgba8>(
-            context.Width,
-            context.Height,
-            PixelFormat.Rgba8);
-#endif
 
         var dispatchPath = DispatchPath.None;
         if (geometry.Indices.IsEmpty)
@@ -117,11 +110,7 @@ public sealed class MinimalRasterPass : IRasterPass
         var shaderLights = BuildLights(lights);
         using var vertices = GPU.CreateBuffer(shaderVertices, BufferAccess.ReadOnly);
         using var lightBuffer = GPU.CreateBuffer(shaderLights, BufferAccess.ReadOnly);
-#if FEATHER_POOLED_RASTER_TARGETS
         var depth = context.GetOrCreateDepthTarget(Color);
-#else
-        using var depth = GPU.CreateDepthTexture2D(context.Width, context.Height);
-#endif
         using var sampler = GPU.CreateSampler(SamplerDesc.LinearRepeat);
         using var whiteTexture = CreateWhiteTexture();
         using var pipeline = GPU.CreateGraphicsPipeline<
@@ -167,19 +156,9 @@ public sealed class MinimalRasterPass : IRasterPass
                 // Only the material preview shades the real material. The white-model and normal
                 // views deliberately pin these so geometry reads clearly, which means an IOR of 1.5
                 // (the F0 = 0.04 dielectric) and no diffuse roughness or transmission.
-#if FEATHER_MATERIAL_TRANSMISSION
                 var ior = ViewMode == 2 ? material.Ior : SceneMaterial.DefaultIor;
                 var diffuseRoughness = ViewMode == 2 ? material.DiffuseRoughness : 0.0f;
                 var transmissionWeight = ViewMode == 2 ? material.TransmissionWeight : 0.0f;
-#else
-                // SceneMaterial does not carry these before FeatherCompute 0.2.0-preview.6, so a
-                // package build shades every surface as the n = 1.5 dielectric the old hardcoded
-                // F0 = 0.04 assumed. The shading model below is unchanged either way; only where the
-                // three numbers come from is. Remove once the published package carries them.
-                var ior = 1.5f;
-                var diffuseRoughness = 0.0f;
-                var transmissionWeight = 0.0f;
-#endif
                 var emission = ViewMode == 2
                     ? material.EmissionColor
                     : new float4(0.0f, 0.0f, 0.0f, 1.0f);
