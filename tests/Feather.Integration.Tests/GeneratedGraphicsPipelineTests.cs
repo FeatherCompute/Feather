@@ -1723,6 +1723,80 @@ public class GeneratedGraphicsPipelineTests
     private readonly record struct Rgba32(byte R, byte G, byte B, byte A);
 }
 
+/// <summary>
+/// Two textures read through two different samplers in one fragment shader.
+/// </summary>
+/// <remarks>
+/// Split into its own class because the interesting part is the pair, not the drawing: every other
+/// texture test here binds exactly one sampler, which is the case the bridge can resolve by
+/// elimination even when it has not worked out which sampler belongs to which texture.
+/// </remarks>
+public sealed class GeneratedGraphicsMultiSamplerTests
+{
+    [Fact]
+    public void GeneratedGraphicsPipelineSamplesTwoTexturesThroughTheirOwnSamplersThroughEasyGpu()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1)
+        ]);
+
+        // Two texels wide so a filter mode is observable: sampled at the seam, nearest returns one of
+        // them and linear returns the average. A 1x1 texture would read the same either way, and the
+        // test would pass with the samplers swapped.
+        using var smooth = GPU.CreateTexture2D<float4, float4>(2, 1, PixelFormat.Rgba32Float, TextureAccess.Sampled);
+        using var sharp = GPU.CreateTexture2D<float4, float4>(2, 1, PixelFormat.Rgba32Float, TextureAccess.Sampled);
+        smooth.Upload([new float4(0.0f, 0.0f, 0.0f, 1.0f), new float4(1.0f, 0.0f, 0.0f, 1.0f)]);
+        sharp.Upload([new float4(0.0f, 0.0f, 0.0f, 1.0f), new float4(0.0f, 1.0f, 0.0f, 1.0f)]);
+
+        using var linear = GPU.CreateSampler(SamplerDesc.LinearClamp);
+        using var nearest = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(8, 8, PixelFormat.Rgba32Float);
+        target.Upload([.. Enumerable.Repeat(new float4(0, 0, 0, 0), 64)]);
+
+        using var pipeline =
+            GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedTwoSamplerFragmentShader, float4>();
+
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedTwoSamplerFragmentShader(smooth.AsSampled(), linear, sharp.AsSampled(), nearest),
+            target,
+            vertexCount: 3);
+
+        var readback = new float4[64];
+        target.Read(readback);
+        var pixel = readback.First(candidate => candidate.W > 0.5f);
+
+        // Both textures are sampled at the seam between their two texels. Red comes through the linear
+        // sampler, so it lands mid-way; green comes through the nearest one, so it snaps to a texel and
+        // is either fully on or fully off. Asserting on red alone would pass if both textures were read
+        // through the linear sampler, and on green alone if both were read through the nearest one.
+        Assert.InRange(pixel.X, 0.3f, 0.7f);
+        Assert.True(pixel.Y < 0.05f || pixel.Y > 0.95f, $"expected an unfiltered green, got {pixel.Y}.");
+        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+    }
+}
+
+[FragmentShader]
+public readonly partial struct GeneratedTwoSamplerFragmentShader(
+    SampledTexture2D<float4> smooth,
+    SamplerState linear,
+    SampledTexture2D<float4> sharp,
+    SamplerState nearest) : IFragmentShader<float4>
+{
+    public float4 Execute(float4 input)
+    {
+        // Exactly on the boundary between the two texels, which is where the two filter modes differ
+        // most: linear returns their average and nearest returns one of them whole.
+        var seam = new float2(0.5f, 0.5f);
+        var filtered = smooth.Sample(linear, seam);
+        var unfiltered = sharp.Sample(nearest, seam);
+        return new float4(filtered.X, unfiltered.Y, 0.0f, 1.0f);
+    }
+}
+
 [VertexShader]
 public readonly partial struct GeneratedVertexShader(ReadOnlyBuffer<float4> vertices) : IVertexShader<float4>
 {

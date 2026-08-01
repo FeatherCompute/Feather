@@ -7532,7 +7532,67 @@ std::optional<uint32_t> graphics_backend_binding(const GraphicsResourceLayout& l
     return std::nullopt;
 }
 
+// The name a typed-IR expression refers to, for the expression kinds a resource reference can take:
+// a local (2), a parameter (3), or a field of the shader struct (4). A captured resource lowers to a
+// global local reference by name, so all three resolve the same way.
+const std::string* typed_ir_reference_name(const Feather::TypedIR::Module& module, uint32_t expr_id) {
+    if (expr_id >= module.expressions.size()) {
+        return nullptr;
+    }
+
+    const auto& expression = module.expressions[expr_id];
+    if (expression.kind != 2 && expression.kind != 3 && expression.kind != 4) {
+        return nullptr;
+    }
+    if (expression.name_id >= module.strings.size()) {
+        return nullptr;
+    }
+
+    return &module.strings[expression.name_id];
+}
+
 const IrResource* find_graphics_sampler_for_texture_sample(const ParsedIr& ir, const IrResource& texture_resource) {
+    // Section 7 first. A shader lowered from C# carries its body only there, so the legacy walk below
+    // finds nothing for one and every texture would fall through to the single-sampler guess. That guess
+    // is right whenever a shader binds one sampler, which is why this was invisible until a pass sampled
+    // an albedo map through a repeating sampler and a shadow map through a clamped one in the same
+    // fragment stage: the two are not interchangeable and the bridge refused the draw rather than
+    // picking wrongly.
+    if (ir.has_section7) {
+        const auto& module = ir.typed_module;
+        // Every expression in the module rather than the entry function's alone: a [Callable] helper
+        // that samples a captured texture puts its sample expression in the same table, and the shadow
+        // test in the raster Cornell example is exactly that.
+        for (const auto& expression : module.expressions) {
+            if (expression.kind != kTypedExpressionTextureSample || expression.argument_count < 3 ||
+                expression.first_argument == UINT32_MAX ||
+                expression.first_argument > module.arguments.size() ||
+                expression.argument_count > module.arguments.size() - expression.first_argument) {
+                continue;
+            }
+
+            const auto* sampled_name = typed_ir_reference_name(module, module.arguments[expression.first_argument]);
+            if (sampled_name == nullptr) {
+                continue;
+            }
+
+            const auto* sampled_resource = find_resource_by_name(ir, *sampled_name);
+            if (sampled_resource == nullptr || sampled_resource->binding != texture_resource.binding) {
+                continue;
+            }
+
+            const auto* sampler_name = typed_ir_reference_name(module, module.arguments[expression.first_argument + 1]);
+            if (sampler_name == nullptr) {
+                continue;
+            }
+
+            const auto* sampler_resource = find_resource_by_name(ir, *sampler_name);
+            if (sampler_resource != nullptr && sampler_resource->kind == kIrResourceKindSampler) {
+                return sampler_resource;
+            }
+        }
+    }
+
     for (const auto& node : ir.expression_nodes) {
         if ((node.kind != kIrExpressionNodeKindTextureSample &&
              node.kind != kIrExpressionNodeKindTextureSampleLevel) ||
