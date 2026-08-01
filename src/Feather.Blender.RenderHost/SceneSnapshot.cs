@@ -246,6 +246,9 @@ internal sealed class SceneMaterialMetadata
     public float[] DiffuseColor { get; init; } = [];
     public float? Metallic { get; init; }
     public float? Roughness { get; init; }
+    public float? Ior { get; init; }
+    public float? DiffuseRoughness { get; init; }
+    public float? TransmissionWeight { get; init; }
     public float[] EmissionColor { get; init; } = [];
     public float? EmissionStrength { get; init; }
     public float? Alpha { get; init; }

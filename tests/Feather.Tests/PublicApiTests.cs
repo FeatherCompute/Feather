@@ -96,7 +96,10 @@ public class PublicApiTests
             0.5f,
             new float4(0.0f, 0.0f, 0.0f, 1.0f),
             1.0f,
-            emissionStrength: 2.0f);
+            emissionStrength: 2.0f,
+            ior: 1.33f,
+            diffuseRoughness: 0.25f,
+            transmissionWeight: 0.75f);
         var materials = new SceneMaterialTable(new[] { material }, 0);
         var texture = new SceneTexture(
             "texture-0",
@@ -143,6 +146,9 @@ public class PublicApiTests
         Assert.Same(lights, context.GetLights(new LightTableHandle(6)));
         Assert.Equal(time, context.GetTime(new TimeHandle(7)));
         Assert.Equal(2.0f, material.EmissionStrength);
+        Assert.Equal(1.33f, material.Ior);
+        Assert.Equal(0.25f, material.DiffuseRoughness);
+        Assert.Equal(0.75f, material.TransmissionWeight);
         Assert.Equal(new Rgba8(1, 2, 3, 255), texture.Pixels.Span[0]);
         Assert.Equal(new float3(0.0f, 0.0f, -1.0f), light.Direction);
         Assert.Equal(
@@ -153,6 +159,46 @@ public class PublicApiTests
             Array.Empty<SceneVertex>(),
             new uint[] { 0, 1 }));
     }
+
+    [Theory]
+    [MemberData(nameof(InvalidPrincipledMaterialValues))]
+    public void SceneMaterialRejectsInvalidPrincipledValues(
+        float ior,
+        float diffuseRoughness,
+        float transmissionWeight,
+        string parameterName)
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => new SceneMaterial(
+            "material-0",
+            "Material",
+            new float4(0.1f, 0.2f, 0.3f, 1.0f),
+            0.0f,
+            0.5f,
+            new float4(0.0f, 0.0f, 0.0f, 1.0f),
+            1.0f,
+            ior: ior,
+            diffuseRoughness: diffuseRoughness,
+            transmissionWeight: transmissionWeight));
+
+        Assert.Equal(parameterName, exception.ParamName);
+    }
+
+    public static TheoryData<float, float, float, string> InvalidPrincipledMaterialValues
+        => new()
+        {
+            { 0.999f, 0.0f, 0.0f, "ior" },
+            { 1000.001f, 0.0f, 0.0f, "ior" },
+            { float.NaN, 0.0f, 0.0f, "ior" },
+            { float.PositiveInfinity, 0.0f, 0.0f, "ior" },
+            { 1.5f, -0.001f, 0.0f, "diffuseRoughness" },
+            { 1.5f, 1.001f, 0.0f, "diffuseRoughness" },
+            { 1.5f, float.NaN, 0.0f, "diffuseRoughness" },
+            { 1.5f, float.NegativeInfinity, 0.0f, "diffuseRoughness" },
+            { 1.5f, 0.0f, -0.001f, "transmissionWeight" },
+            { 1.5f, 0.0f, 1.001f, "transmissionWeight" },
+            { 1.5f, 0.0f, float.NaN, "transmissionWeight" },
+            { 1.5f, 0.0f, float.PositiveInfinity, "transmissionWeight" }
+        };
 
     [Fact]
     public void ExistingRenderContextBackendsReportInteractiveWhenTheyOmitRenderPurpose()

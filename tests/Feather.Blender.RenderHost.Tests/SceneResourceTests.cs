@@ -24,6 +24,9 @@ public sealed class SceneResourceTests
         Assert.Equal(new float4(0.2f, 0.3f, 0.4f, 0.8f), material.BaseColor);
         Assert.Equal(0.35f, material.Metallic);
         Assert.Equal(0.6f, material.Roughness);
+        Assert.Equal(1.45f, material.Ior);
+        Assert.Equal(0.2f, material.DiffuseRoughness);
+        Assert.Equal(0.65f, material.TransmissionWeight);
         Assert.Equal(new float4(0.25f, 0.5f, 0.75f, 1.0f), material.EmissionColor);
         Assert.Equal(2.5f, material.EmissionStrength);
         Assert.Equal(0, material.BaseColorTextureIndex);
@@ -57,6 +60,9 @@ public sealed class SceneResourceTests
         Assert.Equal(SceneMaterialStatus.Fallback, material.Status);
         Assert.Equal(SceneMaterial.FallbackBaseColor, material.BaseColor);
         Assert.Equal(SceneMaterial.NoTexture, material.BaseColorTextureIndex);
+        Assert.Equal(SceneMaterial.DefaultIor, material.Ior);
+        Assert.Equal(SceneMaterial.DefaultDiffuseRoughness, material.DiffuseRoughness);
+        Assert.Equal(SceneMaterial.DefaultTransmissionWeight, material.TransmissionWeight);
         Assert.Equal("UNSUPPORTED_SURFACE_NODE: Diffuse", material.Diagnostic);
     }
 
@@ -73,8 +79,113 @@ public sealed class SceneResourceTests
         Assert.Equal(new float4(0.6f, 0.5f, 0.4f, 1.0f), material.BaseColor);
         Assert.Equal(0.2f, material.Metallic);
         Assert.Equal(0.7f, material.Roughness);
+        Assert.Equal(SceneMaterial.DefaultIor, material.Ior);
+        Assert.Equal(SceneMaterial.DefaultDiffuseRoughness, material.DiffuseRoughness);
+        Assert.Equal(SceneMaterial.DefaultTransmissionWeight, material.TransmissionWeight);
         Assert.Empty(resources.Textures.Textures.ToArray());
         Assert.Equal(new SceneSubmesh(0, 3, 0), Assert.Single(resources.Geometry.Submeshes));
+    }
+
+    [Fact]
+    public void BlenderSceneV2WithoutExtendedPrincipledValuesUsesCompatibleDefaults()
+    {
+        using var fixture = new SceneV2Fixture();
+        fixture.Write(includeExtendedPrincipledValues: false);
+
+        var resources = SceneResourceBuilder.Build(SceneSnapshot.Load(fixture.Path));
+        var material = resources.Materials.Materials.Span[0];
+
+        Assert.Equal(SceneMaterialStatus.Supported, material.Status);
+        Assert.Equal(SceneMaterial.DefaultIor, material.Ior);
+        Assert.Equal(SceneMaterial.DefaultDiffuseRoughness, material.DiffuseRoughness);
+        Assert.Equal(SceneMaterial.DefaultTransmissionWeight, material.TransmissionWeight);
+    }
+
+    [Theory]
+    [InlineData(1.0f, 0.0f, 0.0f)]
+    [InlineData(1000.0f, 1.0f, 1.0f)]
+    public void PrincipledMaterialBoundaryValuesAreAccepted(
+        float ior,
+        float diffuseRoughness,
+        float transmissionWeight)
+    {
+        using var fixture = new SceneV2Fixture();
+        fixture.Write(
+            ior: ior,
+            diffuseRoughness: diffuseRoughness,
+            transmissionWeight: transmissionWeight);
+
+        var material = SceneResourceBuilder.Build(SceneSnapshot.Load(fixture.Path))
+            .Materials.Materials.Span[0];
+
+        Assert.Equal(ior, material.Ior);
+        Assert.Equal(diffuseRoughness, material.DiffuseRoughness);
+        Assert.Equal(transmissionWeight, material.TransmissionWeight);
+        Assert.Equal(SceneMaterialStatus.Supported, material.Status);
+    }
+
+    [Theory]
+    [InlineData("ior", 0.999f)]
+    [InlineData("ior", 1000.001f)]
+    [InlineData("diffuseRoughness", -0.001f)]
+    [InlineData("diffuseRoughness", 1.001f)]
+    [InlineData("transmissionWeight", -0.001f)]
+    [InlineData("transmissionWeight", 1.001f)]
+    public void PrincipledMaterialValuesOutsideBlenderRangesAreRejected(
+        string property,
+        float value)
+    {
+        using var fixture = new SceneV2Fixture();
+        fixture.Write(
+            ior: property == "ior" ? value : SceneMaterial.DefaultIor,
+            diffuseRoughness: property == "diffuseRoughness" ? value : 0.5f,
+            transmissionWeight: property == "transmissionWeight" ? value : 0.5f);
+
+        var snapshot = SceneSnapshot.Load(fixture.Path);
+        var exception = Assert.Throws<InvalidDataException>(() => SceneResourceBuilder.Build(snapshot));
+
+        Assert.Contains($"invalid {property}", exception.Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(NonFinitePrincipledValues))]
+    public void NonFinitePrincipledMaterialValuesAreRejected(string property, float value)
+    {
+        using var fixture = new SceneV2Fixture();
+        var snapshot = fixture.LoadWithPrincipledValue(property, value);
+
+        var exception = Assert.Throws<InvalidDataException>(() => SceneResourceBuilder.Build(snapshot));
+
+        Assert.Contains($"invalid {property}", exception.Message);
+        Assert.Contains("finite value", exception.Message);
+    }
+
+    public static TheoryData<string, float> NonFinitePrincipledValues
+        => new()
+        {
+            { "ior", float.NaN },
+            { "ior", float.NegativeInfinity },
+            { "ior", float.PositiveInfinity },
+            { "diffuseRoughness", float.NaN },
+            { "diffuseRoughness", float.NegativeInfinity },
+            { "diffuseRoughness", float.PositiveInfinity },
+            { "transmissionWeight", float.NaN },
+            { "transmissionWeight", float.NegativeInfinity },
+            { "transmissionWeight", float.PositiveInfinity }
+        };
+
+    [Fact]
+    public void FallbackMaterialCannotHideInvalidPrincipledValues()
+    {
+        using var fixture = new SceneV2Fixture();
+        var snapshot = fixture.LoadWithPrincipledValue(
+            "transmissionWeight",
+            float.NaN,
+            graphStatus: "fallback");
+
+        var exception = Assert.Throws<InvalidDataException>(() => SceneResourceBuilder.Build(snapshot));
+
+        Assert.Contains("invalid transmissionWeight", exception.Message);
     }
 
     [Fact]
@@ -105,7 +216,11 @@ public sealed class SceneResourceTests
         public void Write(
             string graphStatus = "supported",
             string diagnostic = "",
-            bool invalidTextureOffset = false)
+            bool invalidTextureOffset = false,
+            float ior = 1.45f,
+            float diffuseRoughness = 0.2f,
+            float transmissionWeight = 0.65f,
+            bool includeExtendedPrincipledValues = true)
         {
             using var payload = new MemoryStream();
             var positions = WriteFloatArray(
@@ -124,6 +239,30 @@ public sealed class SceneResourceTests
             if (invalidTextureOffset)
             {
                 pixels["offset"] = payload.Length + 1;
+            }
+
+            var material = new Dictionary<string, object?>
+            {
+                ["materialId"] = "material-0",
+                ["name"] = "Paint",
+                ["diffuseColor"] = new[] { 0.2f, 0.3f, 0.4f, 0.8f },
+                ["baseColor"] = new[] { 0.2f, 0.3f, 0.4f, 0.8f },
+                ["metallic"] = 0.35f,
+                ["roughness"] = 0.6f,
+                ["emissionColor"] = new[] { 0.25f, 0.5f, 0.75f, 1.0f },
+                ["emissionStrength"] = 2.5f,
+                ["alpha"] = 0.8f,
+                ["baseColorTextureId"] = "texture-0",
+                ["graphStatus"] = graphStatus,
+                ["diagnostic"] = diagnostic,
+                ["useNodes"] = true,
+                ["nodeTree"] = "Paint Nodes"
+            };
+            if (includeExtendedPrincipledValues)
+            {
+                material["ior"] = ior;
+                material["diffuseRoughness"] = diffuseRoughness;
+                material["transmissionWeight"] = transmissionWeight;
             }
 
             var metadata = new
@@ -166,26 +305,7 @@ public sealed class SceneResourceTests
                         isInstance = false
                     }
                 },
-                materials = new[]
-                {
-                    new
-                    {
-                        materialId = "material-0",
-                        name = "Paint",
-                        diffuseColor = new[] { 0.2f, 0.3f, 0.4f, 0.8f },
-                        baseColor = new[] { 0.2f, 0.3f, 0.4f, 0.8f },
-                        metallic = 0.35f,
-                        roughness = 0.6f,
-                        emissionColor = new[] { 0.25f, 0.5f, 0.75f, 1.0f },
-                        emissionStrength = 2.5f,
-                        alpha = 0.8f,
-                        baseColorTextureId = "texture-0",
-                        graphStatus,
-                        diagnostic,
-                        useNodes = true,
-                        nodeTree = "Paint Nodes"
-                    }
-                },
+                materials = new[] { material },
                 textures = new[]
                 {
                     new
@@ -237,6 +357,39 @@ public sealed class SceneResourceTests
             };
 
             WriteFile(metadata, payload.ToArray(), 2);
+        }
+
+        public SceneSnapshot LoadWithPrincipledValue(
+            string property,
+            float value,
+            string graphStatus = "supported")
+        {
+            Write(graphStatus: graphStatus);
+            var snapshot = SceneSnapshot.Load(Path);
+            var source = snapshot.Metadata.Materials[0];
+            snapshot.Metadata.Materials[0] = new SceneMaterialMetadata
+            {
+                MaterialId = source.MaterialId,
+                Name = source.Name,
+                BaseColor = source.BaseColor,
+                DiffuseColor = source.DiffuseColor,
+                Metallic = source.Metallic,
+                Roughness = source.Roughness,
+                Ior = property == "ior" ? value : source.Ior,
+                DiffuseRoughness = property == "diffuseRoughness" ? value : source.DiffuseRoughness,
+                TransmissionWeight = property == "transmissionWeight"
+                    ? value
+                    : source.TransmissionWeight,
+                EmissionColor = source.EmissionColor,
+                EmissionStrength = source.EmissionStrength,
+                Alpha = source.Alpha,
+                BaseColorTextureId = source.BaseColorTextureId,
+                GraphStatus = source.GraphStatus,
+                Diagnostic = source.Diagnostic,
+                UseNodes = source.UseNodes,
+                NodeTree = source.NodeTree
+            };
+            return snapshot;
         }
 
         public void WriteLegacyV1()

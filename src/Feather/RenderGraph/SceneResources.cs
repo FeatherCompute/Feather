@@ -22,6 +22,9 @@ public enum SceneMaterialStatus
 public sealed class SceneMaterial
 {
     public const int NoTexture = -1;
+    public const float DefaultIor = 1.5f;
+    public const float DefaultDiffuseRoughness = 0.0f;
+    public const float DefaultTransmissionWeight = 0.0f;
 
     public static float4 FallbackBaseColor => new(1.0f, 0.0f, 1.0f, 1.0f);
 
@@ -33,6 +36,39 @@ public sealed class SceneMaterial
         float roughness,
         float4 emissionColor,
         float alpha,
+        int baseColorTextureIndex = NoTexture,
+        SceneMaterialStatus status = SceneMaterialStatus.Supported,
+        string? diagnostic = null,
+        float emissionStrength = 0.0f)
+        : this(
+            id,
+            name,
+            baseColor,
+            metallic,
+            roughness,
+            emissionColor,
+            alpha,
+            DefaultIor,
+            DefaultDiffuseRoughness,
+            DefaultTransmissionWeight,
+            baseColorTextureIndex,
+            status,
+            diagnostic,
+            emissionStrength)
+    {
+    }
+
+    public SceneMaterial(
+        string id,
+        string name,
+        float4 baseColor,
+        float metallic,
+        float roughness,
+        float4 emissionColor,
+        float alpha,
+        float ior,
+        float diffuseRoughness,
+        float transmissionWeight,
         int baseColorTextureIndex = NoTexture,
         SceneMaterialStatus status = SceneMaterialStatus.Supported,
         string? diagnostic = null,
@@ -49,6 +85,22 @@ public sealed class SceneMaterial
         if (!float.IsFinite(roughness) || roughness is < 0.0f or > 1.0f)
         {
             throw new ArgumentOutOfRangeException(nameof(roughness), "Roughness must be between zero and one.");
+        }
+        if (!float.IsFinite(ior) || ior is < 1.0f or > 1000.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ior), "IOR must be between one and 1000.");
+        }
+        if (!float.IsFinite(diffuseRoughness) || diffuseRoughness is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(diffuseRoughness),
+                "Diffuse roughness must be between zero and one.");
+        }
+        if (!float.IsFinite(transmissionWeight) || transmissionWeight is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(transmissionWeight),
+                "Transmission weight must be between zero and one.");
         }
         if (!float.IsFinite(alpha) || alpha is < 0.0f or > 1.0f)
         {
@@ -76,6 +128,9 @@ public sealed class SceneMaterial
         BaseColor = baseColor;
         Metallic = metallic;
         Roughness = roughness;
+        Ior = ior;
+        DiffuseRoughness = diffuseRoughness;
+        TransmissionWeight = transmissionWeight;
         EmissionColor = emissionColor;
         EmissionStrength = emissionStrength;
         Alpha = alpha;
@@ -93,6 +148,12 @@ public sealed class SceneMaterial
     public float Metallic { get; }
 
     public float Roughness { get; }
+
+    public float Ior { get; }
+
+    public float DiffuseRoughness { get; }
+
+    public float TransmissionWeight { get; }
 
     public float4 EmissionColor { get; }
 

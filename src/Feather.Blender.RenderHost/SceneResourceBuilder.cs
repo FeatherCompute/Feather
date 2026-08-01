@@ -181,8 +181,24 @@ internal static class SceneResourceBuilder
 
             var metallic = item.Metallic ?? 0.0f;
             var roughness = item.Roughness ?? 0.5f;
+            var ior = item.Ior ?? SceneMaterial.DefaultIor;
+            var diffuseRoughness = item.DiffuseRoughness ?? SceneMaterial.DefaultDiffuseRoughness;
+            var transmissionWeight = item.TransmissionWeight ?? SceneMaterial.DefaultTransmissionWeight;
             var alpha = item.Alpha ?? baseColor.W;
             var emissionStrength = item.EmissionStrength ?? 0.0f;
+            ValidatePrincipledRange(item.MaterialId, "ior", ior, 1.0f, 1000.0f);
+            ValidatePrincipledRange(
+                item.MaterialId,
+                "diffuseRoughness",
+                diffuseRoughness,
+                0.0f,
+                1.0f);
+            ValidatePrincipledRange(
+                item.MaterialId,
+                "transmissionWeight",
+                transmissionWeight,
+                0.0f,
+                1.0f);
             if (status == SceneMaterialStatus.Fallback)
             {
                 diagnostic = string.IsNullOrWhiteSpace(diagnostic)
@@ -191,6 +207,9 @@ internal static class SceneResourceBuilder
                 baseColor = SceneMaterial.FallbackBaseColor;
                 metallic = 0.0f;
                 roughness = 1.0f;
+                ior = SceneMaterial.DefaultIor;
+                diffuseRoughness = SceneMaterial.DefaultDiffuseRoughness;
+                transmissionWeight = SceneMaterial.DefaultTransmissionWeight;
                 emissionColor = new float4(0.0f, 0.0f, 0.0f, 1.0f);
                 emissionStrength = 0.0f;
                 alpha = 1.0f;
@@ -207,6 +226,9 @@ internal static class SceneResourceBuilder
                     roughness,
                     emissionColor,
                     alpha,
+                    ior,
+                    diffuseRoughness,
+                    transmissionWeight,
                     textureIndex,
                     status,
                     diagnostic,
@@ -230,6 +252,21 @@ internal static class SceneResourceBuilder
             new float4(0.0f, 0.0f, 0.0f, 1.0f),
             1.0f));
         return (new SceneMaterialTable(materials.ToArray(), defaultMaterialIndex), indices);
+    }
+
+    private static void ValidatePrincipledRange(
+        string materialId,
+        string property,
+        float value,
+        float minimum,
+        float maximum)
+    {
+        if (!float.IsFinite(value) || value < minimum || value > maximum)
+        {
+            throw new InvalidDataException(
+                $"Scene material '{materialId}' has invalid {property}: expected a finite value " +
+                $"between {minimum} and {maximum}.");
+        }
     }
 
     private static SceneLightTable BuildLights(SceneLightMetadata[]? metadata)
