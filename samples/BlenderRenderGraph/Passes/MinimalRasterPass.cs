@@ -268,9 +268,13 @@ public sealed class MinimalRasterPass : IRasterPass
             {
                 Position = light.Position,
                 Kind = MapLightKind(light.Type),
-                // Blender aims a light down its local -Z; the shader wants the surface-to-light
-                // direction, so the stored vector is flipped once here instead of per fragment.
-                Direction = -light.Direction,
+                // A sun needs the direction back toward its source, while a spot and an area lamp need
+                // the direction they actually emit along: the cone test and the one-sided facing term
+                // both negate this field themselves. The exporter already stores local -Z, so flipping
+                // every kind aimed a ceiling area light away from the room and zeroed its light.
+                Direction = light.Type is SceneLightType.Area or SceneLightType.Spot
+                    ? light.Direction
+                    : -light.Direction,
                 Energy = light.Energy,
                 Color = light.Color,
                 ConeOuter = MathF.Cos(MathF.Min(light.SpotSize, MathF.PI) * 0.5f),
