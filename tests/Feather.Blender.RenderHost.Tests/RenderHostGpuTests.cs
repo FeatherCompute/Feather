@@ -89,6 +89,8 @@ public sealed class RenderHostGpuTests
         Assert.NotNull(host.LastUnloadedPassContextForTesting);
         AssertEventuallyUnloaded(host.LastUnloadedPassContextForTesting!);
 
+        // The generated pass remembers both host-owned targets and throws if this second execution
+        // of the same assembly generation receives different instances.
         var third = host.RenderOnce(fixture.RequestPath);
         Assert.False(third.PassReloaded);
         Assert.Equal(second.BuildId, third.BuildId);

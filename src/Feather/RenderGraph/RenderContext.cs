@@ -275,6 +275,29 @@ public interface IRenderContextBackend
         => throw new NotSupportedException("This render host does not expose GPU-resident graph textures.");
 
     /// <summary>
+    /// Resolves a host-owned render target associated with a graph texture output. The host owns
+    /// the returned target so a raster pass must not dispose it.
+    /// </summary>
+    GpuTexture2D<TPixel, TValue> GetOrCreateGraphRenderTarget<TPixel, TValue>(
+        TextureHandle handle,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => throw new NotSupportedException("This render host does not expose reusable render targets.");
+
+    /// <summary>
+    /// Resolves the host-owned depth target associated with a graph texture output. The host owns
+    /// the returned target so a raster pass must not dispose it.
+    /// </summary>
+    GpuTexture2D<float, float> GetOrCreateGraphDepthTarget(
+        TextureHandle handle,
+        int width,
+        int height)
+        => throw new NotSupportedException("This render host does not expose reusable depth targets.");
+
+    /// <summary>
     /// Resolves a GPU-resident texture published by an upstream graph pass.
     /// </summary>
     IGpuTexture2D GetTextureInput(TextureHandle handle)
@@ -506,6 +529,25 @@ public sealed class RenderContext
         where TPixel : unmanaged
         where TValue : unmanaged
         => Backend.GetOrCreateGraphTexture<TPixel, TValue>(handle, Width, Height, format);
+
+    /// <summary>
+    /// Resolves a host-owned render target associated with <paramref name="handle" />, allocating
+    /// it on first use. The target follows the render size and must not be disposed by the pass.
+    /// </summary>
+    public GpuTexture2D<TPixel, TValue> GetOrCreateRenderTarget<TPixel, TValue>(
+        TextureHandle handle,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => Backend.GetOrCreateGraphRenderTarget<TPixel, TValue>(handle, Width, Height, format);
+
+    /// <summary>
+    /// Resolves the host-owned 32-bit depth target associated with <paramref name="handle" />,
+    /// allocating it on first use. The target follows the render size and must not be disposed by
+    /// the pass.
+    /// </summary>
+    public GpuTexture2D<float, float> GetOrCreateDepthTarget(TextureHandle handle)
+        => Backend.GetOrCreateGraphDepthTarget(handle, Width, Height);
 
     /// <summary>
     /// Resolves a GPU-resident texture published by an upstream graph pass, keeping the data on

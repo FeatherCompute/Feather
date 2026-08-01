@@ -89,6 +89,10 @@ internal sealed class PassAssemblyGeneration : IDisposable
     // Owned here rather than by the per-execution backend so GPU-resident history survives across
     // frames instead of being reallocated and cleared every render.
     private readonly GraphTexturePool texturePool = new();
+
+    // Raster targets have the same generation lifetime: a frame may reuse them, while a pass
+    // assembly reload must release every target created for the old shader generation.
+    private readonly RasterTargetPool rasterTargetPool = new();
     private bool disposed;
 
     private PassAssemblyGeneration(
@@ -190,6 +194,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         // Socket identities are only comparable within one topology, so a changed graph has to
         // start from an empty pool.
         texturePool.PrepareForGraph(graph.GraphFingerprint);
+        rasterTargetPool.PrepareForGraph(graph.GraphFingerprint);
         var backend = new ProjectRenderContextBackend(
             scene,
             width,
@@ -201,7 +206,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
             purpose,
             resources,
             viewState.History,
-            texturePool);
+            texturePool,
+            rasterTargetPool);
         var executedTypes = new List<string>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
         {
@@ -249,6 +255,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             return;
         }
 
+        rasterTargetPool.Dispose();
         texturePool.Dispose();
         passTypes.Clear();
         loadContext.Unload();
@@ -1466,6 +1473,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly Dictionary<ulong, DispatchPath> gpuDispatchPaths = new();
     private readonly Dictionary<ulong, GraphBufferData> buffers = new();
     private readonly GraphTexturePool texturePool;
+    private readonly RasterTargetPool rasterTargetPool;
 
     public ProjectRenderContextBackend(
         RenderSceneResources scene,
@@ -1478,9 +1486,11 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         RenderPurpose purpose,
         GraphResourceResolver resources,
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
-        GraphTexturePool texturePool)
+        GraphTexturePool texturePool,
+        RasterTargetPool rasterTargetPool)
     {
         this.texturePool = texturePool;
+        this.rasterTargetPool = rasterTargetPool;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         objectRanges = scene.Geometry.Objects;
         materials = scene.Materials;
@@ -1696,6 +1706,53 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
             width,
             height,
             format);
+    }
+
+    public GpuTexture2D<TPixel, TValue> GetOrCreateGraphRenderTarget<TPixel, TValue>(
+        TextureHandle handle,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+    {
+        if (!resources.IsWritable(handle))
+        {
+            throw new KeyNotFoundException(
+                $"Texture handle {handle.Value} is not a graph output and cannot own a render target.");
+        }
+        if (resources.TryGetTextureNodeAllocation(handle, out var declared))
+        {
+            width = declared.Width > 0 ? declared.Width : width;
+            height = declared.Height > 0 ? declared.Height : height;
+            format = declared.Format;
+        }
+        return rasterTargetPool.GetOrCreateRenderTarget<TPixel, TValue>(
+            resources.TextureIdentity(handle),
+            width,
+            height,
+            format);
+    }
+
+    public GpuTexture2D<float, float> GetOrCreateGraphDepthTarget(
+        TextureHandle handle,
+        int width,
+        int height)
+    {
+        if (!resources.IsWritable(handle))
+        {
+            throw new KeyNotFoundException(
+                $"Texture handle {handle.Value} is not a graph output and cannot own a depth target.");
+        }
+        if (resources.TryGetTextureNodeAllocation(handle, out var declared))
+        {
+            width = declared.Width > 0 ? declared.Width : width;
+            height = declared.Height > 0 ? declared.Height : height;
+        }
+        return rasterTargetPool.GetOrCreateDepthTarget(
+            resources.TextureIdentity(handle),
+            width,
+            height);
     }
 
     public IGpuTexture2D GetTextureInput(TextureHandle handle)

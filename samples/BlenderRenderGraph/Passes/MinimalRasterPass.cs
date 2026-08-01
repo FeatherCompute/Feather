@@ -63,10 +63,7 @@ public sealed class MinimalRasterPass : IRasterPass
         var lights = context.GetLights(Lights);
         _ = context.GetTime(Time);
 
-        using var color = GPU.CreateRenderTexture2D<Rgba8, Rgba8>(
-            context.Width,
-            context.Height,
-            PixelFormat.Rgba8);
+        var color = context.GetOrCreateRenderTarget<Rgba8, Rgba8>(Color, PixelFormat.Rgba8);
 
         var dispatchPath = DispatchPath.None;
         if (geometry.Indices.IsEmpty)
@@ -113,7 +110,7 @@ public sealed class MinimalRasterPass : IRasterPass
         var shaderLights = BuildLights(lights);
         using var vertices = GPU.CreateBuffer(shaderVertices, BufferAccess.ReadOnly);
         using var lightBuffer = GPU.CreateBuffer(shaderLights, BufferAccess.ReadOnly);
-        using var depth = GPU.CreateDepthTexture2D(context.Width, context.Height);
+        var depth = context.GetOrCreateDepthTarget(Color);
         using var sampler = GPU.CreateSampler(SamplerDesc.LinearRepeat);
         using var whiteTexture = CreateWhiteTexture();
         using var pipeline = GPU.CreateGraphicsPipeline<

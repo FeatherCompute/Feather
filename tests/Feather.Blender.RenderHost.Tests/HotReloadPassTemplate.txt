@@ -12,6 +12,9 @@ namespace HotReloadProject.Passes;
     Category = "Tests")]
 public sealed class MinimalRasterPass : IRasterPass
 {
+    private static GpuTexture2D<Rgba8, Rgba8>? previousColor;
+    private static GpuTexture2D<float, float>? previousDepth;
+
     [Input("6d6eb2d5-bb7a-55a4-a85a-c58e36715c53")]
     public SceneGeometryHandle Geometry { get; init; }
 
@@ -41,16 +44,20 @@ public sealed class MinimalRasterPass : IRasterPass
             };
         }
 
-        using var color = GPU.CreateRenderTexture2D<Rgba8, Rgba8>(
-            context.Width,
-            context.Height,
-            PixelFormat.Rgba8);
+        var color = context.GetOrCreateRenderTarget<Rgba8, Rgba8>(Color, PixelFormat.Rgba8);
         var background = new Rgba8[checked(context.Width * context.Height)];
         Array.Fill(background, new Rgba8(3, 5, 8, 255));
         color.Upload(background);
         using var vertices = GPU.CreateBuffer<RasterVertex>(shaderVertices, BufferAccess.ReadOnly);
         using var indices = GPU.CreateIndexBuffer(geometry.Indices.Span);
-        using var depth = GPU.CreateDepthTexture2D(context.Width, context.Height);
+        var depth = context.GetOrCreateDepthTarget(Color);
+        if (previousColor is not null &&
+            (!ReferenceEquals(previousColor, color) || !ReferenceEquals(previousDepth, depth)))
+        {
+            throw new InvalidOperationException("The host replaced same-sized raster targets between frames.");
+        }
+        previousColor = color;
+        previousDepth = depth;
         using var pipeline = GPU.CreateGraphicsPipeline<RasterVertexShader, RasterFragmentShader, RasterVaryings>(
             new GraphicsPipelineDesc
             {
