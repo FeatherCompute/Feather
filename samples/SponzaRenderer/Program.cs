@@ -842,15 +842,10 @@ file static class MatrixMath
             new float4(0.0f, 0.0f, 1.0f, 0.0f),
             new float4(offset, 1.0f));
 
+    // Degrees in, because this sample's own field-of-view constant is written in degrees; the radians
+    // conversion is the only thing left here now that CameraMatrix owns the projection itself.
     public static float4x4 PerspectiveVk(float fovDegrees, float aspect, float near, float far)
-    {
-        var tanHalfFov = MathF.Tan(fovDegrees * 0.5f * MathF.PI / 180.0f);
-        return new float4x4(
-            new float4(1.0f / (aspect * tanHalfFov), 0.0f, 0.0f, 0.0f),
-            new float4(0.0f, -1.0f / tanHalfFov, 0.0f, 0.0f),
-            new float4(0.0f, 0.0f, far / (near - far), -1.0f),
-            new float4(0.0f, 0.0f, (near * far) / (near - far), 0.0f));
-    }
+        => CameraMatrix.Perspective(fovDegrees * MathF.PI / 180.0f, aspect, near, far);
 
     public static float4x4 CameraView(float3 position, float yaw, float pitch)
     {
@@ -858,16 +853,10 @@ file static class MatrixMath
         var sinYaw = MathF.Sin(yaw);
         var cosPitch = MathF.Cos(pitch);
         var sinPitch = MathF.Sin(pitch);
-        var forward = CpuMath.Normalize(new float3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch));
-        var right = CpuMath.Normalize(CpuMath.Cross(forward, new float3(0.0f, 1.0f, 0.0f)));
-        var up = CpuMath.Cross(right, forward);
-
-        return new float4x4(
-            new float4(right.X, up.X, -forward.X, 0.0f),
-            new float4(right.Y, up.Y, -forward.Y, 0.0f),
-            new float4(right.Z, up.Z, -forward.Z, 0.0f),
-            new float4(-CpuMath.Dot(right, position), -CpuMath.Dot(up, position), CpuMath.Dot(forward, position),
-                1.0f));
+        var forward = new float3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch);
+        // Y-up, unlike Blender's world: this sample walks a glTF scene, and that is the convention the
+        // asset arrives in. The axis is the caller's to pick, which is why CameraMatrix takes it.
+        return CameraMatrix.LookTowards(position, forward, new float3(0.0f, 1.0f, 0.0f));
     }
 }
 
