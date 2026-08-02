@@ -16,6 +16,151 @@ public enum SceneMaterialStatus
     Fallback = 1
 }
 
+/// <summary>Operations understood by the raster material-expression evaluator.</summary>
+public enum SceneMaterialExpressionOp
+{
+    Constant = 0,
+    Uv = 1,
+    ImageColor = 2,
+    ImageAlpha = 3,
+    Noise = 4,
+    Voronoi = 5,
+    Gradient = 6,
+    Checker = 7,
+    Mix = 8,
+    ColorRamp = 9,
+    RgbCurves = 10,
+    Math = 11,
+    VectorMath = 12,
+    MapRange = 13,
+    MixRgb = 14,
+    HueSaturationValue = 15,
+    Mapping = 16,
+    NormalMap = 17,
+    SeparateXyz = 18,
+    CombineXyz = 19,
+    Fresnel = 20,
+    LayerWeight = 21,
+    MixShader = 22,
+    AddShader = 23
+}
+
+/// <summary>A host-lowered instruction copied into a generated pass's shader-local layout.</summary>
+public partial struct SceneMaterialExpressionInstruction
+{
+    public float4 Value;
+    public float4 Parameters;
+    public int Op;
+    public int A;
+    public int B;
+    public int C;
+    public int D;
+    public int E;
+    public int F;
+    public int G;
+    public int H;
+    public int ParameterOffset;
+    public int ParameterCount;
+    public int Reserved;
+}
+
+/// <summary>Register indices for the material channels carried by <see cref="SceneMaterial"/>.</summary>
+public partial struct SceneMaterialExpressionOutputs
+{
+    public SceneMaterialExpressionOutputs(
+        int baseColor,
+        int metallic,
+        int roughness,
+        int ior,
+        int diffuseRoughness,
+        int transmissionWeight,
+        int sheenWeight,
+        int sheenColor,
+        int clearcoatWeight,
+        int clearcoatRoughness,
+        int emissionColor,
+        int emissionStrength,
+        int alpha,
+        int normal)
+    {
+        BaseColor = baseColor;
+        Metallic = metallic;
+        Roughness = roughness;
+        Ior = ior;
+        DiffuseRoughness = diffuseRoughness;
+        TransmissionWeight = transmissionWeight;
+        SheenWeight = sheenWeight;
+        SheenColor = sheenColor;
+        ClearcoatWeight = clearcoatWeight;
+        ClearcoatRoughness = clearcoatRoughness;
+        EmissionColor = emissionColor;
+        EmissionStrength = emissionStrength;
+        Alpha = alpha;
+        Normal = normal;
+    }
+
+    public int BaseColor;
+    public int Metallic;
+    public int Roughness;
+    public int Ior;
+    public int DiffuseRoughness;
+    public int TransmissionWeight;
+    public int SheenWeight;
+    public int SheenColor;
+    public int ClearcoatWeight;
+    public int ClearcoatRoughness;
+    public int EmissionColor;
+    public int EmissionStrength;
+    public int Alpha;
+    public int Normal;
+}
+
+/// <summary>
+/// A bounded material-expression program lowered from the scene snapshot IR by the render host.
+/// </summary>
+public sealed class SceneMaterialExpression
+{
+    public const int MaxInstructions = 64;
+
+    public SceneMaterialExpression(
+        string hash,
+        ReadOnlyMemory<SceneMaterialExpressionInstruction> instructions,
+        ReadOnlyMemory<float4> parameters,
+        SceneMaterialExpressionOutputs outputs,
+        int textureIndex = SceneMaterial.NoTexture)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hash);
+        if (instructions.IsEmpty || instructions.Length > MaxInstructions)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(instructions),
+                $"Material expressions must contain between 1 and {MaxInstructions} instructions.");
+        }
+        if (textureIndex < SceneMaterial.NoTexture)
+        {
+            throw new ArgumentOutOfRangeException(nameof(textureIndex));
+        }
+
+        Hash = hash;
+        Instructions = instructions;
+        Parameters = parameters;
+        Outputs = outputs;
+        TextureIndex = textureIndex;
+    }
+
+    public string Hash { get; }
+
+    public ReadOnlyMemory<SceneMaterialExpressionInstruction> Instructions { get; }
+
+    public ReadOnlyMemory<float4> Parameters { get; }
+
+    public SceneMaterialExpressionOutputs Outputs { get; }
+
+    public int TextureIndex { get; }
+
+    public bool HasTexture => TextureIndex != SceneMaterial.NoTexture;
+}
+
 /// <summary>
 /// Renderer-independent material values extracted from an evaluated scene.
 /// </summary>
@@ -84,7 +229,8 @@ public sealed class SceneMaterial
         float sheenWeight = DefaultSheenWeight,
         float4? sheenColor = null,
         float clearcoatWeight = DefaultClearcoatWeight,
-        float clearcoatRoughness = DefaultClearcoatRoughness)
+        float clearcoatRoughness = DefaultClearcoatRoughness,
+        SceneMaterialExpression? expression = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(name);
@@ -167,6 +313,7 @@ public sealed class SceneMaterial
         BaseColorTextureIndex = baseColorTextureIndex;
         Status = status;
         Diagnostic = diagnostic;
+        Expression = expression;
     }
 
     public string Id { get; }
@@ -209,7 +356,12 @@ public sealed class SceneMaterial
 
     public string? Diagnostic { get; }
 
+    /// <summary>The per-pixel expression program, or null for the classic flattened material path.</summary>
+    public SceneMaterialExpression? Expression { get; }
+
     public bool HasBaseColorTexture => BaseColorTextureIndex != NoTexture;
+
+    public bool HasExpression => Expression is not null;
 
     private static void ValidateFinite(float4 value, string name)
     {

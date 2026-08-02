@@ -179,6 +179,27 @@ internal static class SceneResourceBuilder
                     $"Material '{item.MaterialId}' resolved an invalid texture table index.");
             }
 
+            SceneMaterialExpression? expression = null;
+            if (status == SceneMaterialStatus.Supported)
+            {
+                try
+                {
+                    expression = MaterialExpressionCompiler.Compile(
+                        item.MaterialExpression,
+                        textureIndices);
+                    if (expression is not null && expression.TextureIndex >= textureCount)
+                    {
+                        throw new InvalidDataException(
+                            "MATERIAL_EXPRESSION_UNSUPPORTED: resolved texture index is invalid");
+                    }
+                }
+                catch (InvalidDataException exception)
+                {
+                    status = SceneMaterialStatus.Fallback;
+                    diagnostic = MergeDiagnostic(diagnostic, exception.Message);
+                }
+            }
+
             var metallic = item.Metallic ?? 0.0f;
             var roughness = item.Roughness ?? 0.5f;
             var ior = item.Ior ?? SceneMaterial.DefaultIor;
@@ -227,6 +248,7 @@ internal static class SceneResourceBuilder
                 emissionStrength = 0.0f;
                 alpha = 1.0f;
                 textureIndex = SceneMaterial.NoTexture;
+                expression = null;
             }
 
             try
@@ -249,7 +271,8 @@ internal static class SceneResourceBuilder
                     sheenWeight,
                     sheenColor,
                     clearcoatWeight,
-                    clearcoatRoughness));
+                    clearcoatRoughness,
+                    expression));
             }
             catch (ArgumentException exception)
             {
