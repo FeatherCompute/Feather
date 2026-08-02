@@ -1,4 +1,5 @@
 using Feather.Math;
+using Feather.NN;
 using Feather.Resources;
 
 namespace Feather.RenderGraph;
@@ -235,6 +236,14 @@ public interface IRenderContextBackend
     /// </summary>
     RenderPurpose Purpose => RenderPurpose.Interactive;
 
+    /// <summary>The absolute root of the project currently being rendered.</summary>
+    string ProjectRoot
+        => throw new NotSupportedException("This render host does not expose a project root.");
+
+    /// <summary>Returns host-cached inference weights for a project-relative checkpoint.</summary>
+    InferenceWeights GetOrLoadWeights(string projectRelativePath)
+        => throw new NotSupportedException("This render host does not expose inference weights.");
+
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
 
     RenderCamera GetCamera(CameraHandle handle);
@@ -388,6 +397,19 @@ public sealed class RenderContext
     /// <c>Purpose == RenderPurpose.Interactive</c>, which is the test nearly every pass wants.
     /// </summary>
     public bool IsInteractive => Backend.Purpose == RenderPurpose.Interactive;
+
+    /// <summary>Gets the absolute root of the project currently being rendered.</summary>
+    public string ProjectRoot => Backend.ProjectRoot;
+
+    /// <summary>
+    /// Resolves a project-relative checkpoint through the host-owned inference cache. The host owns
+    /// the returned weights; a pass must not dispose them.
+    /// </summary>
+    public InferenceWeights GetOrLoadWeights(string checkpointPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
+        return Backend.GetOrLoadWeights(checkpointPath);
+    }
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
         => Backend.GetSceneGeometry(handle);

@@ -49,6 +49,7 @@ try
             Path.IsPathRooted(feirPath) ? feirPath : Path.Combine(projectRoot, feirPath));
         pass["feirPath"] = File.Exists(resolvedFeirPath) ? feirPath : string.Empty;
     }
+    manifest["trainers"] = DiscoverTrainers(assembly);
 
     var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
     manifest["buildId"] = string.Empty;
@@ -123,3 +124,102 @@ static void WriteIfChanged(string path, string content)
         File.Delete(temporaryPath);
     }
 }
+
+static JsonArray DiscoverTrainers(Assembly assembly)
+{
+    const string trainerAttributeName = "Feather.NN.FeatherTrainerAttribute";
+    const string trainingJobInterfaceName = "Feather.NN.ITrainingJob";
+    const string parameterAttributeName = "Feather.RenderGraph.ParameterAttribute";
+    var trainers = new JsonArray();
+    foreach (var type in assembly.GetTypes().OrderBy(type => type.FullName, StringComparer.Ordinal))
+    {
+        var attribute = type.CustomAttributes.SingleOrDefault(item =>
+            item.AttributeType.FullName == trainerAttributeName);
+        if (attribute is null)
+        {
+            continue;
+        }
+
+        var guid = attribute.ConstructorArguments.FirstOrDefault().Value as string ?? string.Empty;
+        var name = NamedAttributeValue(attribute, "Name") as string ?? type.Name;
+        var category = NamedAttributeValue(attribute, "Category") as string ?? "Training";
+        var version = NamedAttributeValue(attribute, "Version") is int declaredVersion ? declaredVersion : 1;
+        var parameters = new JsonArray();
+        foreach (var member in type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                     .Where(member => member is FieldInfo or PropertyInfo)
+                     .OrderBy(member => member.MetadataToken))
+        {
+            var parameter = member.CustomAttributes.SingleOrDefault(item =>
+                item.AttributeType.FullName == parameterAttributeName);
+            if (parameter is null)
+            {
+                continue;
+            }
+
+            var memberType = member is FieldInfo field ? field.FieldType : ((PropertyInfo)member).PropertyType;
+            var defaultValue = NamedAttributeValue(parameter, "DefaultValue");
+            var minimum = NamedAttributeValue(parameter, "Min");
+            var maximum = NamedAttributeValue(parameter, "Max");
+            var item = new JsonObject
+            {
+                ["parameterGuid"] = parameter.ConstructorArguments.FirstOrDefault().Value as string ?? string.Empty,
+                ["name"] = NamedAttributeValue(parameter, "Name") as string ?? member.Name,
+                ["type"] = ManifestTypeName(memberType),
+                ["defaultValue"] = AttributeJsonValue(defaultValue),
+            };
+            if (minimum is double min && double.IsFinite(min)) item["min"] = min;
+            if (maximum is double max && double.IsFinite(max)) item["max"] = max;
+            parameters.Add(item);
+        }
+
+        trainers.Add(new JsonObject
+        {
+            ["trainerGuid"] = guid,
+            ["typeName"] = type.FullName ?? type.Name,
+            ["displayName"] = name,
+            ["category"] = category,
+            ["version"] = version,
+            ["implementsTrainingJob"] = type.GetInterfaces().Any(item => item.FullName == trainingJobInterfaceName),
+            ["parameters"] = parameters,
+        });
+    }
+    return trainers;
+}
+
+static object? NamedAttributeValue(CustomAttributeData attribute, string name)
+{
+    foreach (var argument in attribute.NamedArguments)
+    {
+        if (argument.MemberName == name)
+        {
+            return argument.TypedValue.Value;
+        }
+    }
+    return default;
+}
+
+static string ManifestTypeName(Type type)
+    => Type.GetTypeCode(type) switch
+    {
+        TypeCode.Boolean => "bool",
+        TypeCode.Int32 => "int",
+        TypeCode.Single => "float",
+        TypeCode.Double => "double",
+        TypeCode.String => "string",
+        _ => type.FullName ?? type.Name,
+    };
+
+static JsonNode? AttributeJsonValue(object? value)
+    => value switch
+    {
+        null => null,
+        bool item => JsonValue.Create(item),
+        byte item => JsonValue.Create(item),
+        short item => JsonValue.Create(item),
+        int item => JsonValue.Create(item),
+        long item => JsonValue.Create(item),
+        float item => JsonValue.Create(item),
+        double item => JsonValue.Create(item),
+        string item => JsonValue.Create(item),
+        _ => JsonValue.Create(value.ToString()),
+    };

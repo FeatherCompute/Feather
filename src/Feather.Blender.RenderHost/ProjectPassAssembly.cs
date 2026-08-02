@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Feather.Math;
+using Feather.NN;
 using Feather.RenderGraph;
 using Feather.Resources;
 
@@ -175,6 +176,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
     // Raster targets have the same generation lifetime: a frame may reuse them, while a pass
     // assembly reload must release every target created for the old shader generation.
     private readonly RasterTargetPool rasterTargetPool = new();
+    private readonly InferenceWeightsCache inferenceWeights;
     private bool disposed;
 
     private PassAssemblyGeneration(
@@ -187,6 +189,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         this.assembly = assembly;
         this.manifest = manifest;
         this.passTypes = passTypes;
+        inferenceWeights = new InferenceWeightsCache(manifest.ProjectRoot);
         UnloadReference = new WeakReference(loadContext, trackResurrection: false);
     }
 
@@ -289,7 +292,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
             resources,
             viewState.History,
             texturePool,
-            rasterTargetPool);
+            rasterTargetPool,
+            inferenceWeights);
         var executedTypes = new List<string>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
         {
@@ -337,6 +341,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             return;
         }
 
+        inferenceWeights.Dispose();
         rasterTargetPool.Dispose();
         texturePool.Dispose();
         passTypes.Clear();
@@ -407,14 +412,18 @@ internal sealed class ProjectPassManifest
     private ProjectPassManifest(
         string path,
         string buildId,
+        string projectRoot,
         string assemblyPath,
         ProjectPassDefinition[] passes,
+        ProjectTrainerDefinition[] trainers,
         JsonObject hashDocument)
     {
         Path = path;
         BuildId = buildId;
+        ProjectRoot = projectRoot;
         AssemblyPath = assemblyPath;
         Passes = passes;
+        Trainers = trainers;
         HashDocument = hashDocument;
         ContentIdentity = Convert.ToHexString(SHA256.HashData(
             Encoding.UTF8.GetBytes(hashDocument.ToJsonString(IndentedJson))));
@@ -423,8 +432,10 @@ internal sealed class ProjectPassManifest
     public string Path { get; }
     public string BuildId { get; }
     public string ContentIdentity { get; }
+    public string ProjectRoot { get; }
     public string AssemblyPath { get; }
     public ProjectPassDefinition[] Passes { get; }
+    public ProjectTrainerDefinition[] Trainers { get; }
     private JsonObject HashDocument { get; }
 
     public static ProjectPassManifest Load(string path)
@@ -504,7 +515,32 @@ internal sealed class ProjectPassManifest
                 ReadSocketDefinitions(pass, "outputs")));
         }
 
-        return new ProjectPassManifest(path, buildId, assemblyPath, passes.ToArray(), root);
+        var trainers = new List<ProjectTrainerDefinition>();
+        var trainerGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (root["trainers"] is JsonArray trainerArray)
+        {
+            foreach (var node in trainerArray)
+            {
+                var trainer = node?.AsObject()
+                    ?? throw new InvalidDataException("Pass manifest trainer entries must be objects.");
+                var guidValue = RequiredString(trainer, "trainerGuid");
+                if (!Guid.TryParseExact(guidValue, "D", out var guid))
+                {
+                    throw new InvalidDataException($"Trainer manifest GUID '{guidValue}' is invalid.");
+                }
+                var normalizedGuid = guid.ToString("D");
+                if (!trainerGuids.Add(normalizedGuid))
+                {
+                    throw new InvalidDataException($"Pass manifest contains duplicate trainer GUID {normalizedGuid}.");
+                }
+                trainers.Add(new ProjectTrainerDefinition(
+                    normalizedGuid,
+                    RequiredString(trainer, "typeName")));
+            }
+        }
+
+        return new ProjectPassManifest(
+            path, buildId, projectRoot, assemblyPath, passes.ToArray(), trainers.ToArray(), root);
     }
 
     public void ValidateBuildId(ReadOnlySpan<byte> assemblyBytes)
@@ -661,6 +697,8 @@ internal sealed record ProjectPassDefinition(
             ?? throw new InvalidDataException(
                 $"Pass {TypeName} does not define output socket {socketGuid}.");
 }
+
+internal sealed record ProjectTrainerDefinition(string TrainerGuid, string TypeName);
 
 internal sealed record ProjectPassSocketDefinition(
     string SocketGuid,
@@ -1359,7 +1397,7 @@ internal static class PassMemberBinder
         }
     }
 
-    public static void BindParameters(IRenderPass pass, JsonElement parametersElement)
+    public static void BindParameters(object pass, JsonElement parametersElement)
     {
         var parameters = ReadParameterMap(parametersElement);
         foreach (var member in InstanceMembers(pass.GetType()))
@@ -1556,6 +1594,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly Dictionary<ulong, GraphBufferData> buffers = new();
     private readonly GraphTexturePool texturePool;
     private readonly RasterTargetPool rasterTargetPool;
+    private readonly InferenceWeightsCache inferenceWeights;
 
     public ProjectRenderContextBackend(
         RenderSceneResources scene,
@@ -1569,10 +1608,12 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         GraphResourceResolver resources,
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool,
-        RasterTargetPool rasterTargetPool)
+        RasterTargetPool rasterTargetPool,
+        InferenceWeightsCache inferenceWeights)
     {
         this.texturePool = texturePool;
         this.rasterTargetPool = rasterTargetPool;
+        this.inferenceWeights = inferenceWeights;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         objectRanges = scene.Geometry.Objects;
         materials = scene.Materials;
@@ -1630,7 +1671,11 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public int Height { get; }
     public SampleCount SampleCount { get; }
     public RenderPurpose Purpose { get; }
+    public string ProjectRoot => inferenceWeights.ProjectRoot;
     public double GpuReadbackMilliseconds { get; private set; }
+
+    public InferenceWeights GetOrLoadWeights(string projectRelativePath)
+        => inferenceWeights.GetOrLoad(projectRelativePath);
 
     public void ReportGpuReadback(TimeSpan elapsed)
         => GpuReadbackMilliseconds += elapsed.TotalMilliseconds;

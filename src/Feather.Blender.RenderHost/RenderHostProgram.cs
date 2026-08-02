@@ -34,6 +34,10 @@ internal static class RenderHostProgram
 
         try
         {
+            if (options.Train)
+            {
+                return TrainingRunner.Run(options.RequestPath!, cancellation.Token);
+            }
             using var host = new RenderHostRunner();
             if (!options.Watch)
             {
@@ -236,15 +240,17 @@ internal static class RenderHostProgram
 internal sealed record RenderHostOptions(
     string? RequestPath,
     bool Watch,
+    bool Train,
     TimeSpan PollInterval,
     bool ShowHelp)
 {
-    public const string Usage = "Usage: Feather.Blender.RenderHost --request <render-request.json> [--watch] [--poll-ms <10-5000>]";
+    public const string Usage = "Usage: Feather.Blender.RenderHost --request <request.json> [--watch] [--train] [--poll-ms <10-5000>]";
 
     public static RenderHostOptions Parse(string[] args)
     {
         string? requestPath = null;
         var watch = false;
+        var train = false;
         var pollMilliseconds = 33;
         var showHelp = false;
 
@@ -257,6 +263,9 @@ internal sealed record RenderHostOptions(
                     break;
                 case "--watch":
                     watch = true;
+                    break;
+                case "--train":
+                    train = true;
                     break;
                 case "--poll-ms":
                     var value = RequireValue(args, ref index, "--poll-ms");
@@ -277,8 +286,12 @@ internal sealed record RenderHostOptions(
         {
             throw new ArgumentException("--request is required.");
         }
+        if (watch && train)
+        {
+            throw new ArgumentException("--watch and --train cannot be used together.");
+        }
 
-        return new RenderHostOptions(requestPath, watch, TimeSpan.FromMilliseconds(pollMilliseconds), showHelp);
+        return new RenderHostOptions(requestPath, watch, train, TimeSpan.FromMilliseconds(pollMilliseconds), showHelp);
     }
 
     private static string RequireValue(string[] args, ref int index, string option)
