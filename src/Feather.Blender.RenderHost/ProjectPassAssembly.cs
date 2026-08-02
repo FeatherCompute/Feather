@@ -13,6 +13,7 @@ namespace Feather.Blender.RenderHost;
 internal sealed class ProjectPassAssemblyManager : IDisposable
 {
     private PassAssemblyGeneration? current;
+    private readonly ProjectPassManifestCache manifestCache = new();
     private bool disposed;
 
     internal WeakReference? LastUnloadedContextForTesting { get; private set; }
@@ -30,7 +31,7 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        var manifest = ProjectPassManifest.Load(manifestPath);
+        var manifest = manifestCache.Load(manifestPath);
         manifest.ValidateGraph(graph);
         var reloaded = current is null || !current.Matches(manifest);
         if (reloaded)
@@ -67,7 +68,88 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
             current.Dispose();
             current = null;
         }
+        manifestCache.Clear();
         disposed = true;
+    }
+}
+
+internal sealed class ProjectPassManifestCache
+{
+    private readonly Func<string, ProjectPassManifest> loadManifest;
+    private CachedManifest? cached;
+
+    public ProjectPassManifestCache(Func<string, ProjectPassManifest>? loadManifest = null)
+    {
+        this.loadManifest = loadManifest ?? ProjectPassManifest.Load;
+    }
+
+    public ProjectPassManifest Load(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        path = Path.GetFullPath(path);
+
+        ManifestFileIdentity identity;
+        try
+        {
+            identity = ManifestFileIdentity.Read(path);
+        }
+        catch (FileNotFoundException)
+        {
+            if (cached is { } entry && string.Equals(entry.Path, path, PathComparison))
+            {
+                cached = null;
+            }
+            throw;
+        }
+
+        if (cached is { } current && current.Matches(path, identity))
+        {
+            return current.Manifest;
+        }
+
+        while (true)
+        {
+            var manifest = loadManifest(path);
+            var refreshedIdentity = ManifestFileIdentity.Read(path);
+            if (identity == refreshedIdentity)
+            {
+                cached = new CachedManifest(path, identity, manifest);
+                return manifest;
+            }
+
+            // Do not associate a manifest read during an atomic replacement with its later stamp.
+            identity = refreshedIdentity;
+        }
+    }
+
+    public void Clear()
+    {
+        cached = null;
+    }
+
+    private static StringComparison PathComparison
+        => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private sealed record CachedManifest(
+        string Path,
+        ManifestFileIdentity Identity,
+        ProjectPassManifest Manifest)
+    {
+        public bool Matches(string path, ManifestFileIdentity identity)
+            => string.Equals(Path, path, PathComparison) && Identity == identity;
+    }
+
+    private readonly record struct ManifestFileIdentity(long Length, long LastWriteTicks)
+    {
+        public static ManifestFileIdentity Read(string path)
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists)
+            {
+                throw new FileNotFoundException("Pass manifest was not found.", path);
+            }
+            return new ManifestFileIdentity(info.Length, info.LastWriteTimeUtc.Ticks);
+        }
     }
 }
 
