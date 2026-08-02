@@ -36,6 +36,22 @@ public partial struct RasterMaterialRegisters
     public float4 R52; public float4 R53; public float4 R54; public float4 R55;
     public float4 R56; public float4 R57; public float4 R58; public float4 R59;
     public float4 R60; public float4 R61; public float4 R62; public float4 R63;
+    public float4 R64; public float4 R65; public float4 R66; public float4 R67;
+    public float4 R68; public float4 R69; public float4 R70; public float4 R71;
+    public float4 R72; public float4 R73; public float4 R74; public float4 R75;
+    public float4 R76; public float4 R77; public float4 R78; public float4 R79;
+    public float4 R80; public float4 R81; public float4 R82; public float4 R83;
+    public float4 R84; public float4 R85; public float4 R86; public float4 R87;
+    public float4 R88; public float4 R89; public float4 R90; public float4 R91;
+    public float4 R92; public float4 R93; public float4 R94; public float4 R95;
+    public float4 R96; public float4 R97; public float4 R98; public float4 R99;
+    public float4 R100; public float4 R101; public float4 R102; public float4 R103;
+    public float4 R104; public float4 R105; public float4 R106; public float4 R107;
+    public float4 R108; public float4 R109; public float4 R110; public float4 R111;
+    public float4 R112; public float4 R113; public float4 R114; public float4 R115;
+    public float4 R116; public float4 R117; public float4 R118; public float4 R119;
+    public float4 R120; public float4 R121; public float4 R122; public float4 R123;
+    public float4 R124; public float4 R125; public float4 R126; public float4 R127;
 }
 
 [ShaderLibrary]
@@ -196,6 +212,22 @@ public static class FeatherMaterialExpression
         else if(i==52)r.R52=v; else if(i==53)r.R53=v; else if(i==54)r.R54=v; else if(i==55)r.R55=v;
         else if(i==56)r.R56=v; else if(i==57)r.R57=v; else if(i==58)r.R58=v; else if(i==59)r.R59=v;
         else if(i==60)r.R60=v; else if(i==61)r.R61=v; else if(i==62)r.R62=v; else if(i==63)r.R63=v;
+        else if(i==64)r.R64=v; else if(i==65)r.R65=v; else if(i==66)r.R66=v; else if(i==67)r.R67=v;
+        else if(i==68)r.R68=v; else if(i==69)r.R69=v; else if(i==70)r.R70=v; else if(i==71)r.R71=v;
+        else if(i==72)r.R72=v; else if(i==73)r.R73=v; else if(i==74)r.R74=v; else if(i==75)r.R75=v;
+        else if(i==76)r.R76=v; else if(i==77)r.R77=v; else if(i==78)r.R78=v; else if(i==79)r.R79=v;
+        else if(i==80)r.R80=v; else if(i==81)r.R81=v; else if(i==82)r.R82=v; else if(i==83)r.R83=v;
+        else if(i==84)r.R84=v; else if(i==85)r.R85=v; else if(i==86)r.R86=v; else if(i==87)r.R87=v;
+        else if(i==88)r.R88=v; else if(i==89)r.R89=v; else if(i==90)r.R90=v; else if(i==91)r.R91=v;
+        else if(i==92)r.R92=v; else if(i==93)r.R93=v; else if(i==94)r.R94=v; else if(i==95)r.R95=v;
+        else if(i==96)r.R96=v; else if(i==97)r.R97=v; else if(i==98)r.R98=v; else if(i==99)r.R99=v;
+        else if(i==100)r.R100=v; else if(i==101)r.R101=v; else if(i==102)r.R102=v; else if(i==103)r.R103=v;
+        else if(i==104)r.R104=v; else if(i==105)r.R105=v; else if(i==106)r.R106=v; else if(i==107)r.R107=v;
+        else if(i==108)r.R108=v; else if(i==109)r.R109=v; else if(i==110)r.R110=v; else if(i==111)r.R111=v;
+        else if(i==112)r.R112=v; else if(i==113)r.R113=v; else if(i==114)r.R114=v; else if(i==115)r.R115=v;
+        else if(i==116)r.R116=v; else if(i==117)r.R117=v; else if(i==118)r.R118=v; else if(i==119)r.R119=v;
+        else if(i==120)r.R120=v; else if(i==121)r.R121=v; else if(i==122)r.R122=v; else if(i==123)r.R123=v;
+        else if(i==124)r.R124=v; else if(i==125)r.R125=v; else if(i==126)r.R126=v; else if(i==127)r.R127=v;
         return r;
     }
 
@@ -217,6 +249,22 @@ public static class FeatherMaterialExpression
         if(i==52)return r.R52;if(i==53)return r.R53;if(i==54)return r.R54;if(i==55)return r.R55;
         if(i==56)return r.R56;if(i==57)return r.R57;if(i==58)return r.R58;if(i==59)return r.R59;
         if(i==60)return r.R60;if(i==61)return r.R61;if(i==62)return r.R62;if(i==63)return r.R63;
+        if(i==64)return r.R64;if(i==65)return r.R65;if(i==66)return r.R66;if(i==67)return r.R67;
+        if(i==68)return r.R68;if(i==69)return r.R69;if(i==70)return r.R70;if(i==71)return r.R71;
+        if(i==72)return r.R72;if(i==73)return r.R73;if(i==74)return r.R74;if(i==75)return r.R75;
+        if(i==76)return r.R76;if(i==77)return r.R77;if(i==78)return r.R78;if(i==79)return r.R79;
+        if(i==80)return r.R80;if(i==81)return r.R81;if(i==82)return r.R82;if(i==83)return r.R83;
+        if(i==84)return r.R84;if(i==85)return r.R85;if(i==86)return r.R86;if(i==87)return r.R87;
+        if(i==88)return r.R88;if(i==89)return r.R89;if(i==90)return r.R90;if(i==91)return r.R91;
+        if(i==92)return r.R92;if(i==93)return r.R93;if(i==94)return r.R94;if(i==95)return r.R95;
+        if(i==96)return r.R96;if(i==97)return r.R97;if(i==98)return r.R98;if(i==99)return r.R99;
+        if(i==100)return r.R100;if(i==101)return r.R101;if(i==102)return r.R102;if(i==103)return r.R103;
+        if(i==104)return r.R104;if(i==105)return r.R105;if(i==106)return r.R106;if(i==107)return r.R107;
+        if(i==108)return r.R108;if(i==109)return r.R109;if(i==110)return r.R110;if(i==111)return r.R111;
+        if(i==112)return r.R112;if(i==113)return r.R113;if(i==114)return r.R114;if(i==115)return r.R115;
+        if(i==116)return r.R116;if(i==117)return r.R117;if(i==118)return r.R118;if(i==119)return r.R119;
+        if(i==120)return r.R120;if(i==121)return r.R121;if(i==122)return r.R122;if(i==123)return r.R123;
+        if(i==124)return r.R124;if(i==125)return r.R125;if(i==126)return r.R126;if(i==127)return r.R127;
         return float4.Zero;
     }
 

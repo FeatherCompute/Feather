@@ -120,7 +120,11 @@ public partial struct SceneMaterialExpressionOutputs
 /// </summary>
 public sealed class SceneMaterialExpression
 {
-    public const int MaxInstructions = 64;
+    /// <summary>
+    /// Maximum register/instruction count. 128 covers layered production-style Principled graphs
+    /// while keeping the generated shader register file statically bounded.
+    /// </summary>
+    public const int MaxInstructions = 128;
 
     public SceneMaterialExpression(
         string hash,
@@ -128,6 +132,21 @@ public sealed class SceneMaterialExpression
         ReadOnlyMemory<float4> parameters,
         SceneMaterialExpressionOutputs outputs,
         int textureIndex = SceneMaterial.NoTexture)
+        : this(
+            hash,
+            instructions,
+            parameters,
+            outputs,
+            textureIndex == SceneMaterial.NoTexture ? ReadOnlyMemory<int>.Empty : new[] { textureIndex })
+    {
+    }
+
+    public SceneMaterialExpression(
+        string hash,
+        ReadOnlyMemory<SceneMaterialExpressionInstruction> instructions,
+        ReadOnlyMemory<float4> parameters,
+        SceneMaterialExpressionOutputs outputs,
+        ReadOnlyMemory<int> textureIndices)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hash);
         if (instructions.IsEmpty || instructions.Length > MaxInstructions)
@@ -136,16 +155,19 @@ public sealed class SceneMaterialExpression
                 nameof(instructions),
                 $"Material expressions must contain between 1 and {MaxInstructions} instructions.");
         }
-        if (textureIndex < SceneMaterial.NoTexture)
+        foreach (var textureIndex in textureIndices.Span)
         {
-            throw new ArgumentOutOfRangeException(nameof(textureIndex));
+            if (textureIndex < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(textureIndices));
+            }
         }
 
         Hash = hash;
         Instructions = instructions;
         Parameters = parameters;
         Outputs = outputs;
-        TextureIndex = textureIndex;
+        TextureIndices = textureIndices;
     }
 
     public string Hash { get; }
@@ -156,9 +178,13 @@ public sealed class SceneMaterialExpression
 
     public SceneMaterialExpressionOutputs Outputs { get; }
 
-    public int TextureIndex { get; }
+    /// <summary>Scene texture bindings in the material-local table order declared by the IR.</summary>
+    public ReadOnlyMemory<int> TextureIndices { get; }
 
-    public bool HasTexture => TextureIndex != SceneMaterial.NoTexture;
+    /// <summary>Legacy alias for the first material texture binding.</summary>
+    public int TextureIndex => TextureIndices.IsEmpty ? SceneMaterial.NoTexture : TextureIndices.Span[0];
+
+    public bool HasTexture => !TextureIndices.IsEmpty;
 }
 
 /// <summary>

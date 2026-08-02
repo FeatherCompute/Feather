@@ -26,10 +26,31 @@ internal static class MaterialExpressionCompiler
         Require(nodes.GetArrayLength() is > 0 and <= SceneMaterialExpression.MaxInstructions,
             $"materialExpression must contain 1-{SceneMaterialExpression.MaxInstructions} nodes");
 
+        var expressionTextureIds = new List<string>();
+        var expressionTextureIndices = new List<int>();
+        if (root.TryGetProperty("textures", out var textureTable))
+        {
+            Require(textureTable.ValueKind == JsonValueKind.Array,
+                "materialExpression textures must be an array");
+            foreach (var texture in textureTable.EnumerateArray())
+            {
+                Require(texture.ValueKind == JsonValueKind.String,
+                    "materialExpression texture table entries must be strings");
+                var id = texture.GetString() ?? "";
+                Require(!string.IsNullOrWhiteSpace(id),
+                    "materialExpression texture table entries cannot be empty");
+                Require(!expressionTextureIds.Contains(id, StringComparer.Ordinal),
+                    $"materialExpression texture table contains duplicate texture '{id}'");
+                Require(textureIndices.TryGetValue(id, out var resolvedTexture),
+                    $"materialExpression references missing texture '{id}'");
+                expressionTextureIds.Add(id);
+                expressionTextureIndices.Add(resolvedTexture);
+            }
+        }
+
         var indices = new Dictionary<string, int>(nodes.GetArrayLength(), StringComparer.Ordinal);
         var instructions = new SceneMaterialExpressionInstruction[nodes.GetArrayLength()];
         var parameters = new List<float4>();
-        var textureIndex = SceneMaterial.NoTexture;
         var nodeIndex = 0;
         foreach (var node in nodes.EnumerateArray())
         {
@@ -41,7 +62,8 @@ internal static class MaterialExpressionCompiler
                 indices,
                 parameters,
                 textureIndices,
-                ref textureIndex);
+                expressionTextureIds,
+                expressionTextureIndices);
             nodeIndex++;
         }
 
@@ -67,7 +89,7 @@ internal static class MaterialExpressionCompiler
                 Output("emissionStrength"),
                 Output("alpha"),
                 Output("normal")),
-            textureIndex);
+            expressionTextureIndices.ToArray());
     }
 
     private static SceneMaterialExpressionInstruction CompileNode(
@@ -75,7 +97,8 @@ internal static class MaterialExpressionCompiler
         IReadOnlyDictionary<string, int> indices,
         List<float4> parameters,
         IReadOnlyDictionary<string, int> textureIndices,
-        ref int textureIndex)
+        List<string> expressionTextureIds,
+        List<int> expressionTextureIndices)
     {
         var opName = ReadString(node, "op");
         var instruction = EmptyInstruction();
@@ -127,9 +150,30 @@ internal static class MaterialExpressionCompiler
                 var id = ReadString(nodeParameters, "textureId");
                 Require(textureIndices.TryGetValue(id, out var resolvedTexture),
                     $"image_texture references missing texture '{id}'");
-                Require(textureIndex is SceneMaterial.NoTexture || textureIndex == resolvedTexture,
-                    "one raster material expression cannot bind more than one image texture yet");
-                textureIndex = resolvedTexture;
+                var localTextureIndex = expressionTextureIds.FindIndex(
+                    candidate => string.Equals(candidate, id, StringComparison.Ordinal));
+                if (nodeParameters.TryGetProperty("textureIndex", out var textureIndexValue))
+                {
+                    Require(textureIndexValue.ValueKind == JsonValueKind.Number &&
+                            textureIndexValue.TryGetInt32(out localTextureIndex),
+                        "image_texture textureIndex must be an integer");
+                    Require((uint)localTextureIndex < (uint)expressionTextureIds.Count,
+                        $"image_texture textureIndex {localTextureIndex} is outside the material texture table");
+                    Require(string.Equals(
+                            expressionTextureIds[localTextureIndex], id, StringComparison.Ordinal),
+                        $"image_texture textureIndex {localTextureIndex} does not reference texture '{id}'");
+                    resolvedTexture = expressionTextureIndices[localTextureIndex];
+                }
+                else if (localTextureIndex < 0)
+                {
+                    // Legacy version-1 expressions had only textureId on the node and no root table.
+                    localTextureIndex = expressionTextureIds.Count;
+                    expressionTextureIds.Add(id);
+                    expressionTextureIndices.Add(resolvedTexture);
+                }
+                // The IR index is material-local; the lowered instruction carries the scene texture
+                // binding used by both atlas-backed evaluators.
+                instruction.Reserved = resolvedTexture;
                 break;
             }
             case "noise_texture":

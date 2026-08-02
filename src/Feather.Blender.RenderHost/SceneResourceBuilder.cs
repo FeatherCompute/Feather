@@ -187,10 +187,16 @@ internal static class SceneResourceBuilder
                     expression = MaterialExpressionCompiler.Compile(
                         item.MaterialExpression,
                         textureIndices);
-                    if (expression is not null && expression.TextureIndex >= textures.Textures.Length)
+                    if (expression is not null)
                     {
-                        throw new InvalidDataException(
-                            "MATERIAL_EXPRESSION_UNSUPPORTED: resolved texture index is invalid");
+                        foreach (var textureBinding in expression.TextureIndices.Span)
+                        {
+                            if ((uint)textureBinding >= (uint)textures.Textures.Length)
+                            {
+                                throw new InvalidDataException(
+                                    "MATERIAL_EXPRESSION_UNSUPPORTED: resolved texture table index is invalid");
+                            }
+                        }
                     }
                 }
                 catch (InvalidDataException exception)
