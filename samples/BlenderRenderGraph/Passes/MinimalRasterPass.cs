@@ -741,7 +741,6 @@ public readonly partial struct MinimalRasterFragmentShader(
         return new float4(result, 1.0f);
     }
 
-    [Callable]
     private static float4 EvaluateInstruction(
         MaterialExpressionInstruction instruction,
         MaterialExpressionRegisters registers,
@@ -1062,7 +1061,6 @@ public readonly partial struct MinimalRasterFragmentShader(
         return value;
     }
 
-    [Callable]
     private static float EvaluateCurve(
         float value,
         int curve,
