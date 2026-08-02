@@ -195,6 +195,18 @@ public static class FeatherMaterialExpression
             var baseNormal = ShaderMath.Dot(d.XYZ, d.XYZ) > 1e-6f
                 ? ShaderMath.Normalize(d.XYZ)
                 : new float3(0.0f, 0.0f, 1.0f);
+            if (instruction.Parameters.Y > 0.5f)
+            {
+                var delta = 1.0f / 256.0f;
+                var bumpScale = (instruction.Parameters.X > 0.5f ? -1.0f : 1.0f)
+                    * f.Y * f.Z;
+                var derivativeX = (e.Y - e.X) / (2.0f * delta);
+                var derivativeY = (f.X - e.Z) / (2.0f * delta);
+                baseNormal = ShaderMath.Normalize(new float3(
+                    baseNormal.X - (derivativeX * bumpScale),
+                    baseNormal.Y - (derivativeY * bumpScale),
+                    baseNormal.Z));
+            }
             result = new float4(baseNormal, 0.0f);
         }
         return result;
@@ -202,38 +214,38 @@ public static class FeatherMaterialExpression
 
     [Callable] public static RasterMaterialRegisters Set(RasterMaterialRegisters r, int i, float4 v)
     {
-        if (i == 0) r.R0=v; else if(i==1)r.R1=v; else if(i==2)r.R2=v; else if(i==3)r.R3=v;
-        else if(i==4)r.R4=v; else if(i==5)r.R5=v; else if(i==6)r.R6=v; else if(i==7)r.R7=v;
-        else if(i==8)r.R8=v; else if(i==9)r.R9=v; else if(i==10)r.R10=v; else if(i==11)r.R11=v;
-        else if(i==12)r.R12=v; else if(i==13)r.R13=v; else if(i==14)r.R14=v; else if(i==15)r.R15=v;
-        else if(i==16)r.R16=v; else if(i==17)r.R17=v; else if(i==18)r.R18=v; else if(i==19)r.R19=v;
-        else if(i==20)r.R20=v; else if(i==21)r.R21=v; else if(i==22)r.R22=v; else if(i==23)r.R23=v;
-        else if(i==24)r.R24=v; else if(i==25)r.R25=v; else if(i==26)r.R26=v; else if(i==27)r.R27=v;
-        else if(i==28)r.R28=v; else if(i==29)r.R29=v; else if(i==30)r.R30=v; else if(i==31)r.R31=v;
-        else if(i==32)r.R32=v; else if(i==33)r.R33=v; else if(i==34)r.R34=v; else if(i==35)r.R35=v;
-        else if(i==36)r.R36=v; else if(i==37)r.R37=v; else if(i==38)r.R38=v; else if(i==39)r.R39=v;
-        else if(i==40)r.R40=v; else if(i==41)r.R41=v; else if(i==42)r.R42=v; else if(i==43)r.R43=v;
-        else if(i==44)r.R44=v; else if(i==45)r.R45=v; else if(i==46)r.R46=v; else if(i==47)r.R47=v;
-        else if(i==48)r.R48=v; else if(i==49)r.R49=v; else if(i==50)r.R50=v; else if(i==51)r.R51=v;
-        else if(i==52)r.R52=v; else if(i==53)r.R53=v; else if(i==54)r.R54=v; else if(i==55)r.R55=v;
-        else if(i==56)r.R56=v; else if(i==57)r.R57=v; else if(i==58)r.R58=v; else if(i==59)r.R59=v;
-        else if(i==60)r.R60=v; else if(i==61)r.R61=v; else if(i==62)r.R62=v; else if(i==63)r.R63=v;
-        else if(i==64)r.R64=v; else if(i==65)r.R65=v; else if(i==66)r.R66=v; else if(i==67)r.R67=v;
-        else if(i==68)r.R68=v; else if(i==69)r.R69=v; else if(i==70)r.R70=v; else if(i==71)r.R71=v;
-        else if(i==72)r.R72=v; else if(i==73)r.R73=v; else if(i==74)r.R74=v; else if(i==75)r.R75=v;
-        else if(i==76)r.R76=v; else if(i==77)r.R77=v; else if(i==78)r.R78=v; else if(i==79)r.R79=v;
-        else if(i==80)r.R80=v; else if(i==81)r.R81=v; else if(i==82)r.R82=v; else if(i==83)r.R83=v;
-        else if(i==84)r.R84=v; else if(i==85)r.R85=v; else if(i==86)r.R86=v; else if(i==87)r.R87=v;
-        else if(i==88)r.R88=v; else if(i==89)r.R89=v; else if(i==90)r.R90=v; else if(i==91)r.R91=v;
-        else if(i==92)r.R92=v; else if(i==93)r.R93=v; else if(i==94)r.R94=v; else if(i==95)r.R95=v;
-        else if(i==96)r.R96=v; else if(i==97)r.R97=v; else if(i==98)r.R98=v; else if(i==99)r.R99=v;
-        else if(i==100)r.R100=v; else if(i==101)r.R101=v; else if(i==102)r.R102=v; else if(i==103)r.R103=v;
-        else if(i==104)r.R104=v; else if(i==105)r.R105=v; else if(i==106)r.R106=v; else if(i==107)r.R107=v;
-        else if(i==108)r.R108=v; else if(i==109)r.R109=v; else if(i==110)r.R110=v; else if(i==111)r.R111=v;
-        else if(i==112)r.R112=v; else if(i==113)r.R113=v; else if(i==114)r.R114=v; else if(i==115)r.R115=v;
-        else if(i==116)r.R116=v; else if(i==117)r.R117=v; else if(i==118)r.R118=v; else if(i==119)r.R119=v;
-        else if(i==120)r.R120=v; else if(i==121)r.R121=v; else if(i==122)r.R122=v; else if(i==123)r.R123=v;
-        else if(i==124)r.R124=v; else if(i==125)r.R125=v; else if(i==126)r.R126=v; else if(i==127)r.R127=v;
+        if(i==0)r.R0=v;else if(i==1)r.R1=v;else if(i==2)r.R2=v;else if(i==3)r.R3=v;
+        else if(i==4)r.R4=v;else if(i==5)r.R5=v;else if(i==6)r.R6=v;else if(i==7)r.R7=v;
+        else if(i==8)r.R8=v;else if(i==9)r.R9=v;else if(i==10)r.R10=v;else if(i==11)r.R11=v;
+        else if(i==12)r.R12=v;else if(i==13)r.R13=v;else if(i==14)r.R14=v;else if(i==15)r.R15=v;
+        else if(i==16)r.R16=v;else if(i==17)r.R17=v;else if(i==18)r.R18=v;else if(i==19)r.R19=v;
+        else if(i==20)r.R20=v;else if(i==21)r.R21=v;else if(i==22)r.R22=v;else if(i==23)r.R23=v;
+        else if(i==24)r.R24=v;else if(i==25)r.R25=v;else if(i==26)r.R26=v;else if(i==27)r.R27=v;
+        else if(i==28)r.R28=v;else if(i==29)r.R29=v;else if(i==30)r.R30=v;else if(i==31)r.R31=v;
+        else if(i==32)r.R32=v;else if(i==33)r.R33=v;else if(i==34)r.R34=v;else if(i==35)r.R35=v;
+        else if(i==36)r.R36=v;else if(i==37)r.R37=v;else if(i==38)r.R38=v;else if(i==39)r.R39=v;
+        else if(i==40)r.R40=v;else if(i==41)r.R41=v;else if(i==42)r.R42=v;else if(i==43)r.R43=v;
+        else if(i==44)r.R44=v;else if(i==45)r.R45=v;else if(i==46)r.R46=v;else if(i==47)r.R47=v;
+        else if(i==48)r.R48=v;else if(i==49)r.R49=v;else if(i==50)r.R50=v;else if(i==51)r.R51=v;
+        else if(i==52)r.R52=v;else if(i==53)r.R53=v;else if(i==54)r.R54=v;else if(i==55)r.R55=v;
+        else if(i==56)r.R56=v;else if(i==57)r.R57=v;else if(i==58)r.R58=v;else if(i==59)r.R59=v;
+        else if(i==60)r.R60=v;else if(i==61)r.R61=v;else if(i==62)r.R62=v;else if(i==63)r.R63=v;
+        else if(i==64)r.R64=v;else if(i==65)r.R65=v;else if(i==66)r.R66=v;else if(i==67)r.R67=v;
+        else if(i==68)r.R68=v;else if(i==69)r.R69=v;else if(i==70)r.R70=v;else if(i==71)r.R71=v;
+        else if(i==72)r.R72=v;else if(i==73)r.R73=v;else if(i==74)r.R74=v;else if(i==75)r.R75=v;
+        else if(i==76)r.R76=v;else if(i==77)r.R77=v;else if(i==78)r.R78=v;else if(i==79)r.R79=v;
+        else if(i==80)r.R80=v;else if(i==81)r.R81=v;else if(i==82)r.R82=v;else if(i==83)r.R83=v;
+        else if(i==84)r.R84=v;else if(i==85)r.R85=v;else if(i==86)r.R86=v;else if(i==87)r.R87=v;
+        else if(i==88)r.R88=v;else if(i==89)r.R89=v;else if(i==90)r.R90=v;else if(i==91)r.R91=v;
+        else if(i==92)r.R92=v;else if(i==93)r.R93=v;else if(i==94)r.R94=v;else if(i==95)r.R95=v;
+        else if(i==96)r.R96=v;else if(i==97)r.R97=v;else if(i==98)r.R98=v;else if(i==99)r.R99=v;
+        else if(i==100)r.R100=v;else if(i==101)r.R101=v;else if(i==102)r.R102=v;else if(i==103)r.R103=v;
+        else if(i==104)r.R104=v;else if(i==105)r.R105=v;else if(i==106)r.R106=v;else if(i==107)r.R107=v;
+        else if(i==108)r.R108=v;else if(i==109)r.R109=v;else if(i==110)r.R110=v;else if(i==111)r.R111=v;
+        else if(i==112)r.R112=v;else if(i==113)r.R113=v;else if(i==114)r.R114=v;else if(i==115)r.R115=v;
+        else if(i==116)r.R116=v;else if(i==117)r.R117=v;else if(i==118)r.R118=v;else if(i==119)r.R119=v;
+        else if(i==120)r.R120=v;else if(i==121)r.R121=v;else if(i==122)r.R122=v;else if(i==123)r.R123=v;
+        else if(i==124)r.R124=v;else if(i==125)r.R125=v;else if(i==126)r.R126=v;else if(i==127)r.R127=v;
         return r;
     }
 

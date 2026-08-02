@@ -49,61 +49,149 @@ internal static class MaterialExpressionCompiler
         }
 
         var indices = new Dictionary<string, int>(nodes.GetArrayLength(), StringComparer.Ordinal);
-        var instructions = new SceneMaterialExpressionInstruction[nodes.GetArrayLength()];
+        var instructions = new List<SceneMaterialExpressionInstruction>(nodes.GetArrayLength());
         var parameters = new List<float4>();
-        var nodeIndex = 0;
         foreach (var node in nodes.EnumerateArray())
         {
             Require(node.ValueKind == JsonValueKind.Object, "materialExpression node must be an object");
             var id = ReadString(node, "id");
-            Require(indices.TryAdd(id, nodeIndex), $"materialExpression contains duplicate node ID '{id}'");
-            instructions[nodeIndex] = CompileNode(
+            Require(!indices.ContainsKey(id), $"materialExpression contains duplicate node ID '{id}'");
+            var instruction = CompileNode(
                 node,
                 indices,
                 parameters,
                 textureIndices,
                 expressionTextureIds,
                 expressionTextureIndices);
-            nodeIndex++;
+            Require(indices.TryAdd(id, instructions.Count),
+                $"materialExpression contains duplicate node ID '{id}'");
+            instructions.Add(instruction);
         }
-
-        foreach (var instruction in instructions)
-        {
-            if (instruction.Op != (int)SceneMaterialExpressionOp.Bump)
-            {
-                continue;
-            }
-            var heightOp = instructions[instruction.A].Op;
-            Require(
-                heightOp is (int)SceneMaterialExpressionOp.Constant or
-                    (int)SceneMaterialExpressionOp.ImageColor or
-                    (int)SceneMaterialExpressionOp.ImageAlpha,
-                "Bump finite differences currently require a direct image height input");
-        }
-
         var outputs = Required(root, "outputs");
         Require(outputs.ValueKind == JsonValueKind.Object, "materialExpression outputs must be an object");
         int Output(string name) => ResolveReference(ReadString(outputs, name), indices, name);
+        var expressionOutputs = new SceneMaterialExpressionOutputs(
+            Output("baseColor"),
+            Output("metallic"),
+            Output("roughness"),
+            Output("ior"),
+            Output("diffuseRoughness"),
+            Output("transmissionWeight"),
+            Output("sheenWeight"),
+            Output("sheenColor"),
+            Output("clearcoatWeight"),
+            Output("clearcoatRoughness"),
+            Output("emissionColor"),
+            Output("emissionStrength"),
+            Output("alpha"),
+            Output("normal"));
+        LowerBump(instructions, ref expressionOutputs);
         return new SceneMaterialExpression(
             hash,
-            instructions,
+            instructions.ToArray(),
             parameters.ToArray(),
-            new SceneMaterialExpressionOutputs(
-                Output("baseColor"),
-                Output("metallic"),
-                Output("roughness"),
-                Output("ior"),
-                Output("diffuseRoughness"),
-                Output("transmissionWeight"),
-                Output("sheenWeight"),
-                Output("sheenColor"),
-                Output("clearcoatWeight"),
-                Output("clearcoatRoughness"),
-                Output("emissionColor"),
-                Output("emissionStrength"),
-                Output("alpha"),
-                Output("normal")),
+            expressionOutputs,
             expressionTextureIndices.ToArray());
+    }
+
+    private static void LowerBump(
+        List<SceneMaterialExpressionInstruction> instructions,
+        ref SceneMaterialExpressionOutputs outputs)
+    {
+        var original = instructions.ToArray();
+        var remapped = new int[original.Length];
+        instructions.Clear();
+
+        for (var index = 0; index < original.Length; index++)
+        {
+            var instruction = RemapInputs(original[index], remapped);
+            if (instruction.Op == (int)SceneMaterialExpressionOp.Bump)
+            {
+                var height = original[original[index].A];
+                if (height.Op is (int)SceneMaterialExpressionOp.ImageColor
+                    or (int)SceneMaterialExpressionOp.ImageAlpha)
+                {
+                    var coordinate = remapped[height.A];
+                    var delta = 1.0f / 256.0f;
+                    var left = AddBumpTap(instructions, height, coordinate, -delta, 0.0f);
+                    var right = AddBumpTap(instructions, height, coordinate, delta, 0.0f);
+                    var down = AddBumpTap(instructions, height, coordinate, 0.0f, -delta);
+                    var up = AddBumpTap(instructions, height, coordinate, 0.0f, delta);
+                    var derivatives = AddCombine(instructions, left, right, down);
+                    var controls = AddCombine(instructions, up, instruction.B, instruction.C);
+                    instruction.E = derivatives;
+                    instruction.F = controls;
+                    instruction.Parameters = new float4(
+                        instruction.Parameters.X, 1.0f, 0.0f, 0.0f);
+                }
+            }
+            remapped[index] = instructions.Count;
+            instructions.Add(instruction);
+        }
+
+        Require(instructions.Count <= SceneMaterialExpression.MaxInstructions,
+            $"lowered materialExpression exceeds {SceneMaterialExpression.MaxInstructions} instructions");
+        outputs.BaseColor = remapped[outputs.BaseColor];
+        outputs.Metallic = remapped[outputs.Metallic];
+        outputs.Roughness = remapped[outputs.Roughness];
+        outputs.Ior = remapped[outputs.Ior];
+        outputs.DiffuseRoughness = remapped[outputs.DiffuseRoughness];
+        outputs.TransmissionWeight = remapped[outputs.TransmissionWeight];
+        outputs.SheenWeight = remapped[outputs.SheenWeight];
+        outputs.SheenColor = remapped[outputs.SheenColor];
+        outputs.ClearcoatWeight = remapped[outputs.ClearcoatWeight];
+        outputs.ClearcoatRoughness = remapped[outputs.ClearcoatRoughness];
+        outputs.EmissionColor = remapped[outputs.EmissionColor];
+        outputs.EmissionStrength = remapped[outputs.EmissionStrength];
+        outputs.Alpha = remapped[outputs.Alpha];
+        outputs.Normal = remapped[outputs.Normal];
+    }
+
+    private static SceneMaterialExpressionInstruction RemapInputs(
+        SceneMaterialExpressionInstruction instruction,
+        int[] remapped)
+    {
+        int Remap(int value) => value < 0 ? value : remapped[value];
+        instruction.A = Remap(instruction.A);
+        instruction.B = Remap(instruction.B);
+        instruction.C = Remap(instruction.C);
+        instruction.D = Remap(instruction.D);
+        instruction.E = Remap(instruction.E);
+        instruction.F = Remap(instruction.F);
+        instruction.G = Remap(instruction.G);
+        instruction.H = Remap(instruction.H);
+        return instruction;
+    }
+
+    private static int AddBumpTap(
+        List<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionInstruction height,
+        int coordinate,
+        float offsetX,
+        float offsetY)
+    {
+        var tap = EmptyInstruction();
+        tap.Op = height.Op;
+        tap.A = coordinate;
+        tap.Parameters = new float4(0.0f, 0.0f, offsetX, offsetY);
+        tap.Reserved = height.Reserved;
+        instructions.Add(tap);
+        return instructions.Count - 1;
+    }
+
+    private static int AddCombine(
+        List<SceneMaterialExpressionInstruction> instructions,
+        int x,
+        int y,
+        int z)
+    {
+        var combine = EmptyInstruction();
+        combine.Op = (int)SceneMaterialExpressionOp.CombineXyz;
+        combine.A = x;
+        combine.B = y;
+        combine.C = z;
+        instructions.Add(combine);
+        return instructions.Count - 1;
     }
 
     private static SceneMaterialExpressionInstruction CompileNode(
