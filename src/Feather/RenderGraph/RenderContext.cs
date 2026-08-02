@@ -236,6 +236,24 @@ public interface IRenderContextBackend
     /// </summary>
     RenderPurpose Purpose => RenderPurpose.Interactive;
 
+    /// <summary>Whether the current View is executing progressive iterations.</summary>
+    bool IsProgressive => false;
+
+    /// <summary>Zero-based progressive iteration index before the current pass executes.</summary>
+    long Iteration => 0;
+
+    /// <summary>Samples committed by completed iterations before the current pass executes.</summary>
+    long AccumulatedSamples => 0;
+
+    /// <summary>Samples the scheduler assigns to this iteration.</summary>
+    int SamplesPerIteration => 1;
+
+    /// <summary>Whether temporal state was reset while preparing this iteration.</summary>
+    bool HistoryReset => false;
+
+    /// <summary>Monotonic reset generation for the current View.</summary>
+    long ResetCount => 0;
+
     /// <summary>The absolute root of the project currently being rendered.</summary>
     string ProjectRoot
         => throw new NotSupportedException("This render host does not expose a project root.");
@@ -251,6 +269,19 @@ public interface IRenderContextBackend
     T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
         where T : class, IDisposable
         => throw new NotSupportedException("This render host does not expose retained scene resources.");
+
+    /// <summary>
+    /// Resolves a host-owned texture private to the current pass node and View. The allocation survives
+    /// camera-only executions and is released when the graph or pass assembly changes.
+    /// </summary>
+    GpuTexture2D<TPixel, TValue> GetOrCreatePassTexture<TPixel, TValue>(
+        string identity,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => throw new NotSupportedException("This render host does not expose retained pass textures.");
 
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
 
@@ -406,6 +437,24 @@ public sealed class RenderContext
     /// </summary>
     public bool IsInteractive => Backend.Purpose == RenderPurpose.Interactive;
 
+    /// <summary>Whether the current View is executing progressive iterations.</summary>
+    public bool IsProgressive => Backend.IsProgressive;
+
+    /// <summary>Zero-based scheduler iteration before this execution.</summary>
+    public long Iteration => Backend.Iteration;
+
+    /// <summary>Samples committed before this execution.</summary>
+    public long AccumulatedSamples => Backend.AccumulatedSamples;
+
+    /// <summary>Samples assigned to this scheduler iteration.</summary>
+    public int SamplesPerIteration => Backend.SamplesPerIteration;
+
+    /// <summary>Whether the scheduler reset temporal state before this execution.</summary>
+    public bool HistoryReset => Backend.HistoryReset;
+
+    /// <summary>Monotonic reset generation for the current View.</summary>
+    public long ResetCount => Backend.ResetCount;
+
     /// <summary>Gets the absolute root of the project currently being rendered.</summary>
     public string ProjectRoot => Backend.ProjectRoot;
 
@@ -429,6 +478,30 @@ public sealed class RenderContext
         ArgumentException.ThrowIfNullOrWhiteSpace(identity);
         ArgumentNullException.ThrowIfNull(factory);
         return Backend.GetOrCreateSceneResource(identity, factory);
+    }
+
+    /// <summary>
+    /// Resolves a host-owned texture private to this pass node and View. Use this for temporal state or
+    /// reusable scratch whose lifetime must span pass instances without becoming a graph socket.
+    /// </summary>
+    public GpuTexture2D<TPixel, TValue> GetOrCreatePassTexture<TPixel, TValue>(
+        string identity,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        if (width <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width));
+        }
+        if (height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(height));
+        }
+        return Backend.GetOrCreatePassTexture<TPixel, TValue>(identity, width, height, format);
     }
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)

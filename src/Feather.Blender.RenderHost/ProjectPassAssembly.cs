@@ -174,6 +174,10 @@ internal sealed class PassAssemblyGeneration : IDisposable
     // frames instead of being reallocated and cleared every render.
     private readonly GraphTexturePool texturePool = new();
 
+    // Pass-private state is isolated per View. Unlike graph socket textures it is addressed by the
+    // pass node itself, so switching Views must not discard another View's progressive accumulation.
+    private readonly Dictionary<string, GraphTexturePool> passTexturePools = new(StringComparer.Ordinal);
+
     // Raster targets have the same generation lifetime: a frame may reuse them, while a pass
     // assembly reload must release every target created for the old shader generation.
     private readonly RasterTargetPool rasterTargetPool = new();
@@ -284,6 +288,12 @@ internal sealed class PassAssemblyGeneration : IDisposable
         texturePool.PrepareForGraph(graph.GraphFingerprint);
         rasterTargetPool.PrepareForGraph(graph.GraphFingerprint);
         sceneResourcePool.Prepare(sceneFingerprint, graph.GraphFingerprint);
+        if (!passTexturePools.TryGetValue(viewState.ViewId, out var passTexturePool))
+        {
+            passTexturePool = new GraphTexturePool();
+            passTexturePools.Add(viewState.ViewId, passTexturePool);
+        }
+        passTexturePool.PrepareForGraph(graph.GraphFingerprint);
         var backend = new ProjectRenderContextBackend(
             scene,
             width,
@@ -293,10 +303,17 @@ internal sealed class PassAssemblyGeneration : IDisposable
             inverseViewProjection,
             cameraPosition,
             purpose,
+            graph.ExecutionMode == RenderExecutionMode.Progressive,
+            viewState.Iteration,
+            viewState.AccumulatedSamples,
+            graph.SamplesPerIteration,
+            viewState.ResetOccurred,
+            viewState.ResetCount,
             resources,
             viewState.History,
             texturePool,
             rasterTargetPool,
+            passTexturePool,
             sceneResourcePool,
             inferenceWeights);
         var executedTypes = new List<string>(graph.Passes.Length);
@@ -315,11 +332,13 @@ internal sealed class PassAssemblyGeneration : IDisposable
             {
                 PassMemberBinder.BindResources(instance, passNode, definition, resources);
                 PassMemberBinder.BindParameters(instance, passNode.Parameters);
+                backend.BeginPass(passNode.NodeId);
                 instance.Execute(new RenderContext(backend));
                 executedTypes.Add(definition.TypeName);
             }
             finally
             {
+                backend.EndPass();
                 (instance as IDisposable)?.Dispose();
             }
         }
@@ -349,6 +368,11 @@ internal sealed class PassAssemblyGeneration : IDisposable
         inferenceWeights.Dispose();
         sceneResourcePool.Dispose();
         rasterTargetPool.Dispose();
+        foreach (var passTexturePool in passTexturePools.Values)
+        {
+            passTexturePool.Dispose();
+        }
+        passTexturePools.Clear();
         texturePool.Dispose();
         passTypes.Clear();
         loadContext.Unload();
@@ -1600,8 +1624,10 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly Dictionary<ulong, GraphBufferData> buffers = new();
     private readonly GraphTexturePool texturePool;
     private readonly RasterTargetPool rasterTargetPool;
+    private readonly GraphTexturePool passTexturePool;
     private readonly PassSceneResourcePool sceneResourcePool;
     private readonly InferenceWeightsCache inferenceWeights;
+    private string? currentPassNodeId;
 
     public ProjectRenderContextBackend(
         RenderSceneResources scene,
@@ -1612,15 +1638,23 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         float4x4 inverseViewProjection,
         float3 cameraPosition,
         RenderPurpose purpose,
+        bool isProgressive,
+        long iteration,
+        long accumulatedSamples,
+        int samplesPerIteration,
+        bool historyReset,
+        long resetCount,
         GraphResourceResolver resources,
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool,
         RasterTargetPool rasterTargetPool,
+        GraphTexturePool passTexturePool,
         PassSceneResourcePool sceneResourcePool,
         InferenceWeightsCache inferenceWeights)
     {
         this.texturePool = texturePool;
         this.rasterTargetPool = rasterTargetPool;
+        this.passTexturePool = passTexturePool;
         this.sceneResourcePool = sceneResourcePool;
         this.inferenceWeights = inferenceWeights;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
@@ -1635,6 +1669,12 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         Height = height;
         SampleCount = sampleCount;
         Purpose = purpose;
+        IsProgressive = isProgressive;
+        Iteration = iteration;
+        AccumulatedSamples = accumulatedSamples;
+        SamplesPerIteration = samplesPerIteration;
+        HistoryReset = historyReset;
+        ResetCount = resetCount;
 
         foreach (var (key, handle) in resources.HistoryReadHandles)
         {
@@ -1680,6 +1720,12 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public int Height { get; }
     public SampleCount SampleCount { get; }
     public RenderPurpose Purpose { get; }
+    public bool IsProgressive { get; }
+    public long Iteration { get; }
+    public long AccumulatedSamples { get; }
+    public int SamplesPerIteration { get; }
+    public bool HistoryReset { get; }
+    public long ResetCount { get; }
     public string ProjectRoot => inferenceWeights.ProjectRoot;
     public double GpuReadbackMilliseconds { get; private set; }
 
@@ -1689,6 +1735,36 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
         where T : class, IDisposable
         => sceneResourcePool.GetOrCreate(identity, factory);
+
+    public void BeginPass(string nodeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
+        if (currentPassNodeId is not null)
+        {
+            throw new InvalidOperationException("A render pass is already executing.");
+        }
+        currentPassNodeId = nodeId;
+    }
+
+    public void EndPass()
+        => currentPassNodeId = null;
+
+    public GpuTexture2D<TPixel, TValue> GetOrCreatePassTexture<TPixel, TValue>(
+        string identity,
+        int width,
+        int height,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+    {
+        var passNodeId = currentPassNodeId
+            ?? throw new InvalidOperationException("Pass-private textures are only available during pass execution.");
+        return passTexturePool.GetOrCreate<TPixel, TValue>(
+            $"pass|{passNodeId}|{identity}",
+            width,
+            height,
+            format);
+    }
 
     public void ReportGpuReadback(TimeSpan elapsed)
         => GpuReadbackMilliseconds += elapsed.TotalMilliseconds;
