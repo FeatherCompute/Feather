@@ -67,6 +67,20 @@ internal static class MaterialExpressionCompiler
             nodeIndex++;
         }
 
+        foreach (var instruction in instructions)
+        {
+            if (instruction.Op != (int)SceneMaterialExpressionOp.Bump)
+            {
+                continue;
+            }
+            var heightOp = instructions[instruction.A].Op;
+            Require(
+                heightOp is (int)SceneMaterialExpressionOp.Constant or
+                    (int)SceneMaterialExpressionOp.ImageColor or
+                    (int)SceneMaterialExpressionOp.ImageAlpha,
+                "Bump finite differences currently require a direct image height input");
+        }
+
         var outputs = Required(root, "outputs");
         Require(outputs.ValueKind == JsonValueKind.Object, "materialExpression outputs must be an object");
         int Output(string name) => ResolveReference(ReadString(outputs, name), indices, name);
@@ -220,10 +234,8 @@ internal static class MaterialExpressionCompiler
                 instruction.Parameters = new float4(
                     ReadOptionalBool(nodeParameters, "clamp_factor", true) ? 1.0f : 0.0f,
                     ReadOptionalBool(nodeParameters, "clamp_result", false) ? 1.0f : 0.0f,
-                    0.0f,
+                    MixRgbCode(ReadOptionalString(nodeParameters, "blend_type", "MIX")),
                     0.0f);
-                Require(ReadOptionalString(nodeParameters, "blend_type", "MIX") == "MIX",
-                    "only MIX mode is supported for the generic Mix node");
                 break;
             case "color_ramp":
                 instruction.Op = (int)SceneMaterialExpressionOp.ColorRamp;
@@ -267,12 +279,13 @@ internal static class MaterialExpressionCompiler
                 }
                 break;
             case "math":
+                var mathOperation = ReadString(nodeParameters, "operation");
                 instruction.Op = (int)SceneMaterialExpressionOp.Math;
                 instruction.A = Input("Value");
-                instruction.B = Input("Value_001");
+                instruction.B = IsUnaryMath(mathOperation) ? instruction.A : Input("Value_001");
                 instruction.C = inputs.TryGetProperty("Value_002", out _) ? Input("Value_002") : instruction.A;
                 instruction.Parameters = new float4(
-                    MathCode(ReadString(nodeParameters, "operation")),
+                    MathCode(mathOperation),
                     ReadOptionalBool(nodeParameters, "use_clamp", false) ? 1.0f : 0.0f,
                     0.0f,
                     0.0f);
@@ -338,7 +351,17 @@ internal static class MaterialExpressionCompiler
                 instruction.B = Input("Strength");
                 break;
             case "bump":
-                throw Error("Bump evaluation requires derivative re-evaluation and is not in the M1 raster VM");
+                instruction.Op = (int)SceneMaterialExpressionOp.Bump;
+                instruction.A = Input("Height");
+                instruction.B = Input("Strength");
+                instruction.C = Input("Distance");
+                instruction.D = Input("Normal");
+                instruction.Parameters = new float4(
+                    ReadOptionalBool(nodeParameters, "invert", false) ? 1.0f : 0.0f,
+                    0.0f,
+                    0.0f,
+                    0.0f);
+                break;
             case "separate_xyz":
                 instruction.Op = (int)SceneMaterialExpressionOp.SeparateXyz;
                 instruction.A = Input("Vector");
@@ -435,8 +458,13 @@ internal static class MaterialExpressionCompiler
         "DIAGONAL" => 3,
         "SPHERICAL" => 4,
         "QUADRATIC_SPHERE" => 5,
+        "RADIAL" => 6,
         _ => throw Error($"Gradient Texture mode '{value}' is unsupported by raster evaluation")
     };
+
+    private static bool IsUnaryMath(string value) => value is
+        "ABSOLUTE" or "SQRT" or "FLOOR" or "CEIL" or "FRACT" or "SINE" or
+        "COSINE" or "TANGENT" or "SIGN" or "ARCTANGENT";
 
     private static int RampInterpolationCode(string value) => value switch
     {
@@ -454,6 +482,7 @@ internal static class MaterialExpressionCompiler
         "FLOOR" => 12, "CEIL" => 13, "FRACT" => 14, "MODULO" => 15,
         "SINE" => 16, "COSINE" => 17, "TANGENT" => 18, "SIGN" => 19,
         "COMPARE" => 20, "PINGPONG" => 21, "SNAP" => 22, "WRAP" => 23,
+        "ARCTANGENT" => 24,
         _ => throw Error($"Math operation '{value}' is unsupported by raster evaluation")
     };
 

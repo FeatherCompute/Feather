@@ -115,6 +115,10 @@ public static class FeatherMaterialExpression
             else if (instruction.Parameters.X == 2.0f) value = ShaderMath.Smoothstep(0.0f, 1.0f, value);
             else if (instruction.Parameters.X == 3.0f) value = (a.X + a.Y) * 0.5f;
             else if (instruction.Parameters.X >= 4.0f) { value = ShaderMath.Length(a.XYZ); if (instruction.Parameters.X == 5.0f) value *= value; }
+            if (instruction.Parameters.X == 6.0f)
+            {
+                value = ShaderMath.Fract((Atan2Approx(a.Y, a.X) / 6.28318530718f) + 1.0f);
+            }
             value = ShaderMath.Saturate(value); result = new float4(value);
         }
         else if (instruction.Op == 7)
@@ -126,7 +130,8 @@ public static class FeatherMaterialExpression
         else if (instruction.Op == 8 || instruction.Op == 22)
         {
             var factor = instruction.Op == 22 || instruction.Parameters.X > 0.5f ? ShaderMath.Saturate(a.X) : a.X;
-            result = ShaderMath.Lerp(b, c, factor);
+            var blended = instruction.Op == 22 ? c : Blend(instruction.Parameters.Z, b, c);
+            result = ShaderMath.Lerp(b, blended, factor);
             if (instruction.Op == 8 && instruction.Parameters.Y > 0.5f) result = ShaderMath.Saturate(result);
         }
         else if (instruction.Op == 11)
@@ -144,13 +149,7 @@ public static class FeatherMaterialExpression
         }
         else if (instruction.Op == 14)
         {
-            var blend = c;
-            if (instruction.Parameters.X == 1.0f) blend = b + c;
-            else if (instruction.Parameters.X == 2.0f) blend = b * c;
-            else if (instruction.Parameters.X == 3.0f) blend = b - c;
-            else if (instruction.Parameters.X == 6.0f) blend = ShaderMath.Abs(b - c);
-            else if (instruction.Parameters.X == 7.0f) blend = ShaderMath.Min(b, c);
-            else if (instruction.Parameters.X == 8.0f) blend = ShaderMath.Max(b, c);
+            var blend = Blend(instruction.Parameters.X, b, c);
             result = ShaderMath.Lerp(b, blend, ShaderMath.Saturate(a.X));
             if (instruction.Parameters.Y > 0.5f) result = ShaderMath.Saturate(result);
         }
@@ -191,6 +190,13 @@ public static class FeatherMaterialExpression
             result = new float4(value);
         }
         else if (instruction.Op == 23) result = (a + b) * 0.5f;
+        else if (instruction.Op == 24)
+        {
+            var baseNormal = ShaderMath.Dot(d.XYZ, d.XYZ) > 1e-6f
+                ? ShaderMath.Normalize(d.XYZ)
+                : new float3(0.0f, 0.0f, 1.0f);
+            result = new float4(baseNormal, 0.0f);
+        }
         return result;
     }
 
@@ -276,7 +282,31 @@ public static class FeatherMaterialExpression
         return value;
     }
     [Callable] private static float Math(float op,float a,float b,float c)
-    {if(op==0)return a+b;if(op==1)return a-b;if(op==2)return a*b;if(op==3)return ShaderMath.Abs(b)<1e-8f?0:a/b;if(op==4)return(a*b)+c;if(op==5)return ShaderMath.Pow(ShaderMath.Abs(a),b);if(op==6)return ShaderMath.Min(a,b);if(op==7)return ShaderMath.Max(a,b);if(op==8)return a<b?1:0;if(op==9)return a>b?1:0;if(op==10)return ShaderMath.Abs(a);if(op==11)return ShaderMath.Sqrt(ShaderMath.Max(a,0));if(op==12)return ShaderMath.Floor(a);if(op==13)return ShaderMath.Ceil(a);if(op==14)return ShaderMath.Fract(a);if(op==16)return ShaderMath.Sin(a);if(op==17)return ShaderMath.Cos(a);if(op==18)return ShaderMath.Tan(a);return a;}
+    {if(op==0)return a+b;if(op==1)return a-b;if(op==2)return a*b;if(op==3)return ShaderMath.Abs(b)<1e-8f?0:a/b;if(op==4)return(a*b)+c;if(op==5)return ShaderMath.Pow(ShaderMath.Abs(a),b);if(op==6)return ShaderMath.Min(a,b);if(op==7)return ShaderMath.Max(a,b);if(op==8)return a<b?1:0;if(op==9)return a>b?1:0;if(op==10)return ShaderMath.Abs(a);if(op==11)return ShaderMath.Sqrt(ShaderMath.Max(a,0));if(op==12)return ShaderMath.Floor(a);if(op==13)return ShaderMath.Ceil(a);if(op==14)return ShaderMath.Fract(a);if(op==16)return ShaderMath.Sin(a);if(op==17)return ShaderMath.Cos(a);if(op==18)return ShaderMath.Tan(a);if(op==24)return AtanApprox(a);return a;}
+    [Callable] private static float4 Blend(float op,float4 a,float4 b)
+    {
+        if(op==1)return a+b;if(op==2)return a*b;if(op==3)return a-b;
+        if(op==4)return new float4(1.0f)-((new float4(1.0f)-a)*(new float4(1.0f)-b));
+        if(op==5)return new float4(ShaderMath.Abs(b.X)<1e-8f?0:a.X/b.X,ShaderMath.Abs(b.Y)<1e-8f?0:a.Y/b.Y,ShaderMath.Abs(b.Z)<1e-8f?0:a.Z/b.Z,a.W);
+        if(op==6)return ShaderMath.Abs(a-b);if(op==7)return ShaderMath.Min(a,b);if(op==8)return ShaderMath.Max(a,b);
+        if(op==9)return new float4(Overlay(a.X,b.X),Overlay(a.Y,b.Y),Overlay(a.Z,b.Z),a.W);
+        return b;
+    }
+    [Callable] private static float Overlay(float a,float b)=>a<0.5f?2.0f*a*b:1.0f-(2.0f*(1.0f-a)*(1.0f-b));
+    [Callable] private static float AtanApprox(float value)
+    {
+        var magnitude=ShaderMath.Abs(value);
+        if(magnitude<=1.0f)return value/(1.0f+(0.280872f*value*value));
+        var result=1.57079632679f-(magnitude/((magnitude*magnitude)+0.280872f));
+        return value<0.0f?-result:result;
+    }
+    [Callable] private static float Atan2Approx(float y,float x)
+    {
+        if(ShaderMath.Abs(x)<1e-8f)return y<0.0f?-1.57079632679f:1.57079632679f;
+        var angle=AtanApprox(y/x);
+        if(x<0.0f)angle+=y<0.0f?-3.14159265359f:3.14159265359f;
+        return angle;
+    }
     [Callable] private static float4 VectorMath(float op,float4 a,float4 b,float4 scale)
     {var av=a.XYZ;var bv=b.XYZ;if(op==0)return new float4(av+bv,1);if(op==1)return new float4(av-bv,1);if(op==2)return new float4(av*bv,1);if(op==4)return new float4(ShaderMath.Cross(av,bv),1);if(op==5)return new float4(ShaderMath.Dot(av,bv));if(op==6)return new float4(ShaderMath.Length(av-bv));if(op==7)return new float4(ShaderMath.Length(av));if(op==8)return new float4(av*scale.X,1);if(op==9)return new float4(ShaderMath.Normalize(av),1);if(op==10)return new float4(ShaderMath.Abs(av),1);return a;}
     [Callable] private static float3 RgbToHsv(float3 c){var max=ShaderMath.Max(c.X,ShaderMath.Max(c.Y,c.Z));var min=ShaderMath.Min(c.X,ShaderMath.Min(c.Y,c.Z));var delta=max-min;var h=0.0f;if(delta>1e-6f){if(max==c.X)h=(c.Y-c.Z)/delta;else if(max==c.Y)h=2+((c.Z-c.X)/delta);else h=4+((c.X-c.Y)/delta);h=ShaderMath.Fract(h/6);}return new float3(h,max<=1e-6f?0:delta/max,max);}

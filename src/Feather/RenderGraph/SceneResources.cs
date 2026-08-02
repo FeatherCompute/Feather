@@ -42,7 +42,8 @@ public enum SceneMaterialExpressionOp
     Fresnel = 20,
     LayerWeight = 21,
     MixShader = 22,
-    AddShader = 23
+    AddShader = 23,
+    Bump = 24
 }
 
 /// <summary>A host-lowered instruction copied into a generated pass's shader-local layout.</summary>
