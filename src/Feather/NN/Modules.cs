@@ -606,7 +606,21 @@ public abstract class Optimizer : IDisposable
     /// Copies native AD gradients directly into matching parameter gradient tensors on the device,
     /// then applies one optimizer step.
     /// </summary>
-    internal void Step<TKernel>(GpuADKernel<TKernel> adKernel)
+    /// <remarks>
+    /// The device-only handoff path, and the one to prefer for training: gradients move buffer-to-buffer
+    /// on the GPU without a host round trip, unlike <see cref="StepFromDebugGradients" />.
+    ///
+    /// Public so a project can drive several AD kernels per step — separate losses per layer group, for
+    /// instance — without falling back to the readback path. Each parameter must be matched by exactly
+    /// one native gradient name; an unmatched or ambiguous parameter throws rather than stepping on a
+    /// stale gradient buffer.
+    ///
+    /// <paramref name="adKernel" />'s <see cref="GpuADKernel{TKernel}.Backward" /> must have run
+    /// successfully first.
+    /// </remarks>
+    /// <typeparam name="TKernel">The generated AD kernel type.</typeparam>
+    /// <param name="adKernel">The AD kernel holding this step's native gradients.</param>
+    public void Step<TKernel>(GpuADKernel<TKernel> adKernel)
         where TKernel : struct, IKernel1D, Feather.Interop.IGeneratedKernel<TKernel>
     {
         ArgumentNullException.ThrowIfNull(adKernel);
@@ -726,21 +740,69 @@ public sealed class TrainingStep<TKernel> : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         adKernel.Backward(count);
-        var loss = 0f;
-        if (lossBuffer is not null)
+        var loss = ReduceLossBuffer();
+        StepOptimizer();
+        LastLoss = loss;
+        return LastLoss;
+    }
+
+    /// <summary>
+    /// Runs backward, gradient handoff, and the optimizer step without reading the loss buffer back.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="LastLoss" /> is left unchanged, so it keeps reporting whichever step last measured a
+    /// loss rather than going stale silently. Prefer this on the steps whose loss the caller will not
+    /// report: a host reporting every 25 steps otherwise pays a blocking whole-buffer readback on the 24
+    /// steps nobody looks at.
+    ///
+    /// Pair it with <see cref="ReadLoss" /> on reporting steps. The loss buffer holds this step's values
+    /// until the next dispatch overwrites them, so reading it immediately after is well defined.
+    /// </remarks>
+    public void RunWithoutLossReadback()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        adKernel.Backward(count);
+        StepOptimizer();
+    }
+
+    /// <summary>
+    /// Reads the loss buffer and returns the reduced scalar without running a step.
+    /// </summary>
+    /// <remarks>
+    /// Use after <see cref="RunWithoutLossReadback" /> on a reporting step. Returns zero when the step
+    /// was created without a loss buffer, matching <see cref="Run" />. Updates
+    /// <see cref="LastLoss" />, because the value it returns is a real measurement rather than a
+    /// placeholder.
+    /// </remarks>
+    public float ReadLoss()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        LastLoss = ReduceLossBuffer();
+        return LastLoss;
+    }
+
+    private float ReduceLossBuffer()
+    {
+        if (lossBuffer is null)
         {
-            var values = lossBuffer.ToArray();
-            for (var i = 0; i < count; i++)
-            {
-                loss += values[i];
-            }
+            return 0f;
         }
 
+        var values = lossBuffer.ToArray();
+        var loss = 0f;
+        for (var i = 0; i < count; i++)
+        {
+            loss += values[i];
+        }
+
+        return loss;
+    }
+
+    private void StepOptimizer()
+    {
         optimizer.Step(adKernel);
         LastDispatchPath = adKernel.LastDispatchPath;
         GradientsMaterialized = adKernel.Gradients.HasMaterializedValues;
-        LastLoss = loss;
-        return LastLoss;
     }
 
     /// <summary>

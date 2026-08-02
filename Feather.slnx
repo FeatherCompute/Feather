@@ -38,6 +38,7 @@
     <Project Path="samples/AdTransformer/AdTransformer.csproj" />
     <Project Path="samples/AdGptDemo/AdGptDemo.csproj" />
     <Project Path="samples/AdGptPoetDemo/AdGptPoetDemo.csproj" />
+    <Project Path="samples/AdMlpRegression/AdMlpRegression.csproj" />
     <Project Path="samples/ColorFilter/ColorFilter.csproj" />
     <Project Path="samples/HelloWorld/HelloWorld.csproj" />
     <Project Path="samples/ProfilerSuite/ProfilerSuite.csproj" />
