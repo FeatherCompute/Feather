@@ -29,6 +29,7 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         float4x4 inverseViewProjection,
         float3 cameraPosition,
         RenderPurpose purpose,
+        string sceneFingerprint,
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -53,7 +54,7 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
 
         return current!.Execute(
             graph, scene, width, height, viewProjection, inverseViewProjection, cameraPosition, purpose,
-            reloaded, viewState);
+            sceneFingerprint, reloaded, viewState);
     }
 
     public void Dispose()
@@ -176,6 +177,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
     // Raster targets have the same generation lifetime: a frame may reuse them, while a pass
     // assembly reload must release every target created for the old shader generation.
     private readonly RasterTargetPool rasterTargetPool = new();
+    private readonly PassSceneResourcePool sceneResourcePool = new();
     private readonly InferenceWeightsCache inferenceWeights;
     private bool disposed;
 
@@ -271,6 +273,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         float4x4 inverseViewProjection,
         float3 cameraPosition,
         RenderPurpose purpose,
+        string sceneFingerprint,
         bool reloaded,
         RenderViewState viewState)
     {
@@ -280,6 +283,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         // start from an empty pool.
         texturePool.PrepareForGraph(graph.GraphFingerprint);
         rasterTargetPool.PrepareForGraph(graph.GraphFingerprint);
+        sceneResourcePool.Prepare(sceneFingerprint, graph.GraphFingerprint);
         var backend = new ProjectRenderContextBackend(
             scene,
             width,
@@ -293,6 +297,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             viewState.History,
             texturePool,
             rasterTargetPool,
+            sceneResourcePool,
             inferenceWeights);
         var executedTypes = new List<string>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
@@ -342,6 +347,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         }
 
         inferenceWeights.Dispose();
+        sceneResourcePool.Dispose();
         rasterTargetPool.Dispose();
         texturePool.Dispose();
         passTypes.Clear();
@@ -1594,6 +1600,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly Dictionary<ulong, GraphBufferData> buffers = new();
     private readonly GraphTexturePool texturePool;
     private readonly RasterTargetPool rasterTargetPool;
+    private readonly PassSceneResourcePool sceneResourcePool;
     private readonly InferenceWeightsCache inferenceWeights;
 
     public ProjectRenderContextBackend(
@@ -1609,10 +1616,12 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         IReadOnlyDictionary<string, GraphHistoryEntry> history,
         GraphTexturePool texturePool,
         RasterTargetPool rasterTargetPool,
+        PassSceneResourcePool sceneResourcePool,
         InferenceWeightsCache inferenceWeights)
     {
         this.texturePool = texturePool;
         this.rasterTargetPool = rasterTargetPool;
+        this.sceneResourcePool = sceneResourcePool;
         this.inferenceWeights = inferenceWeights;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         objectRanges = scene.Geometry.Objects;
@@ -1676,6 +1685,10 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
 
     public InferenceWeights GetOrLoadWeights(string projectRelativePath)
         => inferenceWeights.GetOrLoad(projectRelativePath);
+
+    public T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+        => sceneResourcePool.GetOrCreate(identity, factory);
 
     public void ReportGpuReadback(TimeSpan elapsed)
         => GpuReadbackMilliseconds += elapsed.TotalMilliseconds;

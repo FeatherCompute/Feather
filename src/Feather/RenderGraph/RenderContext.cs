@@ -244,6 +244,14 @@ public interface IRenderContextBackend
     InferenceWeights GetOrLoadWeights(string projectRelativePath)
         => throw new NotSupportedException("This render host does not expose inference weights.");
 
+    /// <summary>
+    /// Returns an assembly-generation-owned resource associated with the current scene and graph.
+    /// The host disposes cached values when either identity changes or the pass assembly unloads.
+    /// </summary>
+    T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+        => throw new NotSupportedException("This render host does not expose retained scene resources.");
+
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
 
     RenderCamera GetCamera(CameraHandle handle);
@@ -409,6 +417,18 @@ public sealed class RenderContext
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         return Backend.GetOrLoadWeights(checkpointPath);
+    }
+
+    /// <summary>
+    /// Returns a host-owned resource retained while the scene, graph, and pass build identities match.
+    /// The caller must not dispose the returned value.
+    /// </summary>
+    public T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        ArgumentNullException.ThrowIfNull(factory);
+        return Backend.GetOrCreateSceneResource(identity, factory);
     }
 
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)

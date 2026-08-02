@@ -7,6 +7,7 @@ internal sealed class RenderHostRunner : IDisposable
     private readonly MinimalRasterRenderer renderer = new();
     private readonly ProjectPassAssemblyManager projectPasses = new();
     private readonly RenderScheduler scheduler = new();
+    private readonly RenderSceneCache sceneCache = new();
 
     internal WeakReference? LastUnloadedPassContextForTesting
         => projectPasses.LastUnloadedContextForTesting;
@@ -30,20 +31,16 @@ internal sealed class RenderHostRunner : IDisposable
         stage.Stop();
         var protocolLoadMilliseconds = stage.Elapsed.TotalMilliseconds;
 
-        stage.Restart();
-        var snapshot = SceneSnapshot.Load(request.ScenePath);
-        if (!string.Equals(request.GenerationId, snapshot.Metadata.GenerationId, StringComparison.Ordinal))
+        var cachedScene = sceneCache.Resolve(request.ScenePath);
+        if (!string.Equals(request.GenerationId, cachedScene.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Render request generation '{request.GenerationId}' does not match scene generation '{snapshot.Metadata.GenerationId}'.");
+                $"Render request generation '{request.GenerationId}' does not match scene generation '{cachedScene.GenerationId}'.");
         }
-        stage.Stop();
-        var sceneLoadMilliseconds = stage.Elapsed.TotalMilliseconds;
-        var viewState = scheduler.Prepare(request, graph, snapshot.ContentFingerprint);
-        stage.Restart();
-        var scene = SceneResourceBuilder.Build(snapshot);
-        stage.Stop();
-        var sceneBuildMilliseconds = stage.Elapsed.TotalMilliseconds;
+        var sceneLoadMilliseconds = cachedScene.LoadMilliseconds;
+        var viewState = scheduler.Prepare(request, graph, cachedScene.ContentFingerprint);
+        var scene = cachedScene.Resources;
+        var sceneBuildMilliseconds = cachedScene.BuildMilliseconds;
         var geometry = scene.Geometry;
         RenderedFrame frame;
         string buildId;
@@ -64,6 +61,7 @@ internal sealed class RenderHostRunner : IDisposable
                 request.InverseViewProjection,
                 request.CameraPosition,
                 request.Purpose,
+                cachedScene.ContentFingerprint,
                 viewState);
             frame = execution.Frame;
             buildId = execution.BuildId;
