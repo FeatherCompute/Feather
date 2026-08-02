@@ -293,6 +293,13 @@ internal sealed class RenderGraphDocument
             throw new InvalidDataException("The selected render graph output socket is not connected.");
         }
 
+        var selectedAov = string.IsNullOrWhiteSpace(Output.Aov) ? "Combined" : Output.Aov.Trim();
+        if (selectedAov.Length > 128 || selectedAov.Any(char.IsControl))
+        {
+            throw new InvalidDataException("Render graph output.aov is invalid.");
+        }
+        var selectedOutput = ResolveSelectedOutput(selectedAov, outputLink, Nodes);
+
         var executionNodeIds = new HashSet<string>(StringComparer.Ordinal)
         {
             output.NodeId,
@@ -300,6 +307,14 @@ internal sealed class RenderGraphDocument
         };
         var pendingNodes = new Stack<string>();
         pendingNodes.Push(output.NodeId);
+        if (!string.Equals(selectedOutput.NodeId, outputLink.FromNode, StringComparison.Ordinal) ||
+            !string.Equals(selectedOutput.SocketGuid, outputLink.FromSocket, StringComparison.OrdinalIgnoreCase))
+        {
+            // An AOV can be an otherwise-unwired output of an upstream pass. It is still a valid
+            // preview target, so make it an execution root before walking its dependencies.
+            executionNodeIds.Add(selectedOutput.NodeId);
+            pendingNodes.Push(selectedOutput.NodeId);
+        }
         foreach (var historyWrite in Nodes.Where(node => node.Kind == "history-write"))
         {
             if (Links.Any(link => string.Equals(link.ToNode, historyWrite.NodeId, StringComparison.Ordinal)))
@@ -404,12 +419,6 @@ internal sealed class RenderGraphDocument
             }
         }
 
-        var selectedAov = string.IsNullOrWhiteSpace(Output.Aov) ? "Combined" : Output.Aov.Trim();
-        if (selectedAov.Length > 128 || selectedAov.Any(char.IsControl))
-        {
-            throw new InvalidDataException("Render graph output.aov is invalid.");
-        }
-
         var samplesPerIteration = SamplesPerIteration == 0 ? 1 : SamplesPerIteration;
         var previewEverySamples = PreviewEverySamples == 0 ? 1 : PreviewEverySamples;
         var targetSamples = TargetSamples;
@@ -436,10 +445,52 @@ internal sealed class RenderGraphDocument
             output,
             outputLink,
             historyReads,
-            historyWrites)
+            historyWrites,
+            selectedOutput)
         {
             GraphFingerprint = graphFingerprint
         };
+
+        static GraphOutputTarget ResolveSelectedOutput(
+            string selectedAov,
+            GraphLink outputLink,
+            GraphNode[] nodes)
+        {
+            if (string.Equals(selectedAov, "Combined", StringComparison.OrdinalIgnoreCase))
+            {
+                return new GraphOutputTarget(outputLink.FromNode, outputLink.FromSocket, "Combined");
+            }
+
+            foreach (var node in nodes.Where(node => node.Kind == "pass"))
+            {
+                var displayName = string.IsNullOrWhiteSpace(node.DisplayName)
+                    ? node.Name
+                    : node.DisplayName;
+                foreach (var socket in node.Outputs)
+                {
+                    if (!IsTextureResource(socket.ResourceKind))
+                    {
+                        continue;
+                    }
+
+                    var label = $"{displayName} \u00b7 {socket.Name}";
+                    if (string.Equals(selectedAov, label, StringComparison.Ordinal) ||
+                        string.Equals(selectedAov, socket.Name, StringComparison.Ordinal))
+                    {
+                        return new GraphOutputTarget(node.NodeId, socket.SocketGuid, selectedAov);
+                    }
+
+                }
+            }
+
+            // Graphs written before output socket metadata was retained cannot resolve a label. Their
+            // output wire is the only source of truth, and preserving it keeps P1 preview graphs valid.
+            var legacyAov = nodes.All(node => node.Outputs.Length == 0) ? selectedAov : "Combined";
+            return new GraphOutputTarget(outputLink.FromNode, outputLink.FromSocket, legacyAov);
+        }
+
+        static bool IsTextureResource(string resourceKind)
+            => resourceKind is "Texture1D" or "Texture2D" or "Texture3D" or "DepthTarget";
 
         static void RequireUniqueHistoryKeys(GraphNode[] nodes, string direction)
         {
@@ -481,9 +532,15 @@ internal sealed record RenderGraphExecution(
     GraphNode Output,
     GraphLink OutputLink,
     GraphNode[] HistoryReads,
-    GraphNode[] HistoryWrites)
+    GraphNode[] HistoryWrites,
+    GraphOutputTarget? SelectedOutput = null)
 {
     public string GraphFingerprint { get; init; } = "";
+
+    public GraphOutputTarget ResolvedOutput
+        => SelectedOutput ?? new GraphOutputTarget(OutputLink.FromNode, OutputLink.FromSocket, SelectedAov);
+
+    public string PublishedAov => ResolvedOutput.Aov;
 
     public string ExecutionModeName => ExecutionMode switch
     {
@@ -554,9 +611,13 @@ internal sealed class GraphNode
     public string Kind { get; init; } = "";
     public string PassGuid { get; init; } = "";
     public string TypeName { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string DisplayName { get; init; } = "";
     public bool Muted { get; init; }
     public JsonElement Parameters { get; init; }
     public string HistoryKey { get; init; } = "";
+    public GraphSocket[] Inputs { get; init; } = [];
+    public GraphSocket[] Outputs { get; init; } = [];
 
     // Texture nodes declare a graph resource the user controls: a Blender image to sample, or an
     // empty target a compute pass writes into.
@@ -579,6 +640,16 @@ internal sealed class GraphNode
     public string ObjectName { get; init; } = "";
 }
 
+internal sealed class GraphSocket
+{
+    public string SocketGuid { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string ResourceKind { get; init; } = "";
+    public string Format { get; init; } = "";
+    public string Access { get; init; } = "";
+    public string ElementType { get; init; } = "";
+}
+
 internal sealed class GraphLink
 {
     public string FromNode { get; init; } = "";
@@ -593,6 +664,8 @@ internal sealed class GraphOutput
     public string SocketGuid { get; init; } = "";
     public string Aov { get; init; } = "";
 }
+
+internal sealed record GraphOutputTarget(string NodeId, string SocketGuid, string Aov);
 
 internal enum RenderExecutionMode
 {

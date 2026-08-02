@@ -112,7 +112,7 @@ internal sealed class RenderHostRunner : IDisposable
             passReloaded,
             graph.ExecutionModeName,
             request.Purpose == RenderPurpose.Final ? "FINAL" : "INTERACTIVE",
-            graph.SelectedAov,
+            graph.PublishedAov,
             graph.TargetSamples,
             iteration.Iteration,
             iteration.AccumulatedSamples,

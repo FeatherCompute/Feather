@@ -234,8 +234,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
         }
 
         var finalHandle = resources.ResolveTextureSource(
-            graph.OutputLink.FromNode,
-            graph.OutputLink.FromSocket);
+            graph.ResolvedOutput.NodeId,
+            graph.ResolvedOutput.SocketGuid);
         var frame = backend.TakeFrame(finalHandle);
         var historyUpdates = backend.CaptureHistory();
         viewState.CommitHistory(historyUpdates);
@@ -706,7 +706,7 @@ internal sealed class GraphResourceResolver
             }
         }
 
-        _ = ResolveTextureSource(graph.OutputLink.FromNode, graph.OutputLink.FromSocket);
+        _ = ResolveTextureSource(graph.ResolvedOutput.NodeId, graph.ResolvedOutput.SocketGuid);
     }
 
     public object ResolveInputHandle(GraphNode passNode, ProjectPassSocketDefinition input)

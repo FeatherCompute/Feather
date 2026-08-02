@@ -156,6 +156,26 @@ public sealed class TemporalRenderHostIntegrationTests
     }
 
     [Fact]
+    public void SelectedAovLabelResolvesAnAlternatePassOutputWithoutRewiringCombined()
+    {
+        using var fixture = new ProtocolFixture();
+        var manifestPath = Path.Combine(fixture.Root, "aov-label-manifest.json");
+        fixture.WriteScene();
+        WriteManifest(manifestPath, DualAovManifest());
+        WriteAovGraph(
+            fixture,
+            RenderGraphDocument.OutputColorSocketGuid,
+            "AOV Pass \u00b7 Normals");
+        fixture.WriteRequest(manifestPath: manifestPath);
+        using var host = new RenderHostRunner();
+
+        var normals = host.RenderOnce(fixture.RequestPath);
+
+        Assert.Equal("AOV Pass \u00b7 Normals", normals.Aov);
+        Assert.Equal(new byte[] { 20, 40, 230, 255 }, FramePixel(fixture));
+    }
+
+    [Fact]
     public async Task OfflineInvocationRunsToItsTargetWhileUnboundedProgressiveRunsOnce()
     {
         using var offline = new ProtocolFixture();
@@ -327,10 +347,25 @@ public sealed class TemporalRenderHostIntegrationTests
                 {
                     ["nodeId"] = "aov-pass",
                     ["kind"] = "pass",
+                    ["name"] = "AOV Pass",
+                    ["displayName"] = "AOV Pass",
                     ["passGuid"] = DualAovPassGuid,
                     ["typeName"] = typeof(DualAovPass).FullName,
                     ["muted"] = false,
-                    ["parameters"] = new JsonObject()
+                    ["parameters"] = new JsonObject(),
+                    ["outputs"] = new JsonArray(
+                        new JsonObject
+                        {
+                            ["socketGuid"] = CombinedOutputGuid,
+                            ["name"] = "Combined",
+                            ["resourceKind"] = "Texture2D"
+                        },
+                        new JsonObject
+                        {
+                            ["socketGuid"] = NormalsOutputGuid,
+                            ["name"] = "Normals",
+                            ["resourceKind"] = "Texture2D"
+                        })
                 },
                 new JsonObject { ["nodeId"] = "output", ["kind"] = "output" }),
             ["links"] = new JsonArray(

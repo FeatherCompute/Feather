@@ -27,6 +27,10 @@ public sealed class SceneResourceTests
         Assert.Equal(1.45f, material.Ior);
         Assert.Equal(0.2f, material.DiffuseRoughness);
         Assert.Equal(0.65f, material.TransmissionWeight);
+        Assert.Equal(0.45f, material.SheenWeight);
+        Assert.Equal(new float4(0.8f, 0.3f, 0.1f, 1.0f), material.SheenColor);
+        Assert.Equal(0.7f, material.ClearcoatWeight);
+        Assert.Equal(0.15f, material.ClearcoatRoughness);
         Assert.Equal(new float4(0.25f, 0.5f, 0.75f, 1.0f), material.EmissionColor);
         Assert.Equal(2.5f, material.EmissionStrength);
         Assert.Equal(0, material.BaseColorTextureIndex);
@@ -263,6 +267,10 @@ public sealed class SceneResourceTests
                 material["ior"] = ior;
                 material["diffuseRoughness"] = diffuseRoughness;
                 material["transmissionWeight"] = transmissionWeight;
+                material["sheenWeight"] = 0.45f;
+                material["sheenColor"] = new[] { 0.8f, 0.3f, 0.1f, 1.0f };
+                material["clearcoatWeight"] = 0.7f;
+                material["clearcoatRoughness"] = 0.15f;
             }
 
             var metadata = new
@@ -380,6 +388,10 @@ public sealed class SceneResourceTests
                 TransmissionWeight = property == "transmissionWeight"
                     ? value
                     : source.TransmissionWeight,
+                SheenWeight = source.SheenWeight,
+                SheenColor = source.SheenColor,
+                ClearcoatWeight = source.ClearcoatWeight,
+                ClearcoatRoughness = source.ClearcoatRoughness,
                 EmissionColor = source.EmissionColor,
                 EmissionStrength = source.EmissionStrength,
                 Alpha = source.Alpha,
