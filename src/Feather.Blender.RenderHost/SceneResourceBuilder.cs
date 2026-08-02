@@ -19,7 +19,7 @@ internal static class SceneResourceBuilder
         ArgumentNullException.ThrowIfNull(snapshot);
 
         var (textures, textureIndices) = BuildTextures(snapshot);
-        var (materials, materialIndices) = BuildMaterials(snapshot, textureIndices, textures.Textures.Length);
+        var (materials, materialIndices) = BuildMaterials(snapshot, textureIndices, textures);
         var geometry = SceneGeometryBuilder.BuildResolved(
             snapshot,
             materialIndices,
@@ -110,7 +110,7 @@ internal static class SceneResourceBuilder
     private static (SceneMaterialTable Table, Dictionary<string, int> Indices) BuildMaterials(
         SceneSnapshot snapshot,
         IReadOnlyDictionary<string, int> textureIndices,
-        int textureCount)
+        SceneTextureTable textures)
     {
         var metadata = snapshot.Metadata.Materials
             ?? throw new InvalidDataException("Scene metadata materials are missing.");
@@ -173,7 +173,7 @@ internal static class SceneResourceBuilder
                     textureIndex = SceneMaterial.NoTexture;
                 }
             }
-            if (textureIndex >= textureCount)
+            if (textureIndex >= textures.Textures.Length)
             {
                 throw new InvalidDataException(
                     $"Material '{item.MaterialId}' resolved an invalid texture table index.");
@@ -187,7 +187,7 @@ internal static class SceneResourceBuilder
                     expression = MaterialExpressionCompiler.Compile(
                         item.MaterialExpression,
                         textureIndices);
-                    if (expression is not null && expression.TextureIndex >= textureCount)
+                    if (expression is not null && expression.TextureIndex >= textures.Textures.Length)
                     {
                         throw new InvalidDataException(
                             "MATERIAL_EXPRESSION_UNSUPPORTED: resolved texture index is invalid");
@@ -291,7 +291,7 @@ internal static class SceneResourceBuilder
             0.5f,
             new float4(0.0f, 0.0f, 0.0f, 1.0f),
             1.0f));
-        return (new SceneMaterialTable(materials.ToArray(), defaultMaterialIndex), indices);
+        return (new SceneMaterialTable(materials.ToArray(), defaultMaterialIndex, textures), indices);
     }
 
     private static void ValidatePrincipledRange(

@@ -378,7 +378,10 @@ public sealed class SceneMaterial
 /// </summary>
 public sealed class SceneMaterialTable
 {
-    public SceneMaterialTable(ReadOnlyMemory<SceneMaterial> materials, int defaultMaterialIndex)
+    public SceneMaterialTable(
+        ReadOnlyMemory<SceneMaterial> materials,
+        int defaultMaterialIndex,
+        SceneTextureTable? textures = null)
     {
         if (materials.IsEmpty)
         {
@@ -398,11 +401,19 @@ public sealed class SceneMaterialTable
 
         Materials = materials;
         DefaultMaterialIndex = defaultMaterialIndex;
+        Textures = textures ?? new SceneTextureTable(Array.Empty<SceneTexture>());
     }
 
     public ReadOnlyMemory<SceneMaterial> Materials { get; }
 
     public int DefaultMaterialIndex { get; }
+
+    /// <summary>Textures referenced by the compiled expressions in this material table.</summary>
+    /// <remarks>
+    /// Keeping the references here lets a renderer that shades several materials in one dispatch
+    /// build one shared atlas. Raster passes can still consume the standalone texture-table resource.
+    /// </remarks>
+    public SceneTextureTable Textures { get; }
 }
 
 /// <summary>
