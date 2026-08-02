@@ -159,6 +159,12 @@ public sealed class MinimalRasterPass : IRasterPass
                 var ior = ViewMode == 2 ? material.Ior : SceneMaterial.DefaultIor;
                 var diffuseRoughness = ViewMode == 2 ? material.DiffuseRoughness : 0.0f;
                 var transmissionWeight = ViewMode == 2 ? material.TransmissionWeight : 0.0f;
+                var sheenWeight = ViewMode == 2 ? material.SheenWeight : 0.0f;
+                var sheenColor = ViewMode == 2 ? material.SheenColor : SceneMaterial.DefaultSheenColor;
+                var clearcoatWeight = ViewMode == 2 ? material.ClearcoatWeight : 0.0f;
+                var clearcoatRoughness = ViewMode == 2
+                    ? material.ClearcoatRoughness
+                    : SceneMaterial.DefaultClearcoatRoughness;
                 var emission = ViewMode == 2
                     ? material.EmissionColor
                     : new float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -178,6 +184,10 @@ public sealed class MinimalRasterPass : IRasterPass
                         new Uniform<float>(ior),
                         new Uniform<float>(diffuseRoughness),
                         new Uniform<float>(transmissionWeight),
+                        new Uniform<float>(sheenWeight),
+                        new Uniform<float4>(sheenColor),
+                        new Uniform<float>(clearcoatWeight),
+                        new Uniform<float>(clearcoatRoughness),
                         new Uniform<float4>(emission),
                         new Uniform<float>(Exposure),
                         new Uniform<int>(ViewMode),
@@ -371,6 +381,10 @@ public readonly partial struct MinimalRasterFragmentShader(
     Uniform<float> ior,
     Uniform<float> diffuseRoughness,
     Uniform<float> transmissionWeight,
+    Uniform<float> sheenWeight,
+    Uniform<float4> sheenColor,
+    Uniform<float> clearcoatWeight,
+    Uniform<float> clearcoatRoughness,
     Uniform<float4> emission,
     Uniform<float> exposure,
     Uniform<int> viewMode,
@@ -422,6 +436,8 @@ public readonly partial struct MinimalRasterFragmentShader(
 
         var direct = new float3(0.0f, 0.0f, 0.0f);
         var specular = new float3(0.0f, 0.0f, 0.0f);
+        var clearcoat = new float3(0.0f, 0.0f, 0.0f);
+        var sheen = new float3(0.0f, 0.0f, 0.0f);
         var transmitted = new float3(0.0f, 0.0f, 0.0f);
         for (var index = 0; index < lightCount.Value; index++)
         {
@@ -488,6 +504,24 @@ public readonly partial struct MinimalRasterFragmentShader(
             var specularStrength = distribution * visibility * clampedNormalDotLight * illumination;
             specular += fresnel * light.Color * specularStrength;
 
+            // Coat is a separate dielectric GGX lobe over the base surface. Sheen is deliberately
+            // grazing-weighted, which keeps its coloured fabric-like response distinct from metal.
+            var coatAlpha = ShaderMath.Max(
+                clearcoatRoughness.Value * clearcoatRoughness.Value,
+                0.002f);
+            var coatAlphaSquared = coatAlpha * coatAlpha;
+            var coatDenominator =
+                (normalDotHalf * normalDotHalf * (coatAlphaSquared - 1.0f)) + 1.0f;
+            var coatDistribution = coatAlphaSquared / ShaderMath.Max(
+                3.14159265f * coatDenominator * coatDenominator,
+                1e-6f);
+            var coatFresnel = 0.04f + (0.96f * fresnelWeight);
+            clearcoat += light.Color * (coatDistribution * visibility * clampedNormalDotLight
+                * illumination * coatFresnel * clearcoatWeight.Value);
+            var sheenFresnel = ShaderMath.Pow(1.0f - normalDotView, 5.0f);
+            sheen += new float3(sheenColor.Value.R, sheenColor.Value.G, sheenColor.Value.B)
+                * light.Color * (diffuse * illumination * sheenFresnel * sheenWeight.Value);
+
             // Oren-Nayar qualitative model. Diffuse Roughness turns the Lambertian term into a
             // retroreflective one, which is what makes a rough dielectric read as chalk or cloth
             // rather than smooth plastic.
@@ -535,7 +569,7 @@ public readonly partial struct MinimalRasterFragmentShader(
         var ambientShare = (1.0f - (transmissionWeight.Value * 0.5f)) * dielectric;
         var ambient = surface * ((0.12f + (roughness.Value * 0.08f)) * ambientShare);
         var emitted = new float3(emission.Value.R, emission.Value.G, emission.Value.B);
-        var result = (ambient + direct + specular + transmitted + emitted) * exposure.Value;
+        var result = (ambient + direct + specular + clearcoat + sheen + transmitted + emitted) * exposure.Value;
         return new float4(result, 1.0f);
     }
 }

@@ -183,6 +183,32 @@ public class PublicApiTests
         Assert.Equal(parameterName, exception.ParamName);
     }
 
+    [Fact]
+    public void SceneMaterialCarriesSheenAndClearcoatValues()
+    {
+        var material = new SceneMaterial(
+            "material-t1",
+            "T1",
+            new float4(0.1f, 0.2f, 0.3f, 1.0f),
+            0.0f,
+            0.5f,
+            new float4(0.0f, 0.0f, 0.0f, 1.0f),
+            1.0f,
+            1.5f,
+            0.0f,
+            0.0f,
+            emissionStrength: 0.0f,
+            sheenWeight: 0.4f,
+            sheenColor: new float4(0.8f, 0.3f, 0.1f, 1.0f),
+            clearcoatWeight: 0.7f,
+            clearcoatRoughness: 0.15f);
+
+        Assert.Equal(0.4f, material.SheenWeight);
+        Assert.Equal(new float4(0.8f, 0.3f, 0.1f, 1.0f), material.SheenColor);
+        Assert.Equal(0.7f, material.ClearcoatWeight);
+        Assert.Equal(0.15f, material.ClearcoatRoughness);
+    }
+
     public static TheoryData<float, float, float, string> InvalidPrincipledMaterialValues
         => new()
         {

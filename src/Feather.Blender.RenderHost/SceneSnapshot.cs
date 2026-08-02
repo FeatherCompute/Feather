@@ -249,10 +249,15 @@ internal sealed class SceneMaterialMetadata
     public float? Ior { get; init; }
     public float? DiffuseRoughness { get; init; }
     public float? TransmissionWeight { get; init; }
+    public float? SheenWeight { get; init; }
+    public float[] SheenColor { get; init; } = [];
+    public float? ClearcoatWeight { get; init; }
+    public float? ClearcoatRoughness { get; init; }
     public float[] EmissionColor { get; init; } = [];
     public float? EmissionStrength { get; init; }
     public float? Alpha { get; init; }
     public string? BaseColorTextureId { get; init; }
+    public JsonElement? MaterialExpression { get; init; }
     public string? GraphStatus { get; init; }
     public string? Diagnostic { get; init; }
     public bool UseNodes { get; init; }

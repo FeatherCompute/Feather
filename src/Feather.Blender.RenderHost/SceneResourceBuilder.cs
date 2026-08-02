@@ -184,6 +184,12 @@ internal static class SceneResourceBuilder
             var ior = item.Ior ?? SceneMaterial.DefaultIor;
             var diffuseRoughness = item.DiffuseRoughness ?? SceneMaterial.DefaultDiffuseRoughness;
             var transmissionWeight = item.TransmissionWeight ?? SceneMaterial.DefaultTransmissionWeight;
+            var sheenWeight = item.SheenWeight ?? SceneMaterial.DefaultSheenWeight;
+            var sheenColor = item.SheenColor is null or { Length: 0 }
+                ? SceneMaterial.DefaultSheenColor
+                : ReadColor(item.SheenColor, null, $"Material '{item.MaterialId}' sheenColor");
+            var clearcoatWeight = item.ClearcoatWeight ?? SceneMaterial.DefaultClearcoatWeight;
+            var clearcoatRoughness = item.ClearcoatRoughness ?? SceneMaterial.DefaultClearcoatRoughness;
             var alpha = item.Alpha ?? baseColor.W;
             var emissionStrength = item.EmissionStrength ?? 0.0f;
             ValidatePrincipledRange(item.MaterialId, "ior", ior, 1.0f, 1000.0f);
@@ -199,6 +205,9 @@ internal static class SceneResourceBuilder
                 transmissionWeight,
                 0.0f,
                 1.0f);
+            ValidatePrincipledRange(item.MaterialId, "sheenWeight", sheenWeight, 0.0f, 1.0f);
+            ValidatePrincipledRange(item.MaterialId, "clearcoatWeight", clearcoatWeight, 0.0f, 1.0f);
+            ValidatePrincipledRange(item.MaterialId, "clearcoatRoughness", clearcoatRoughness, 0.0f, 1.0f);
             if (status == SceneMaterialStatus.Fallback)
             {
                 diagnostic = string.IsNullOrWhiteSpace(diagnostic)
@@ -210,6 +219,10 @@ internal static class SceneResourceBuilder
                 ior = SceneMaterial.DefaultIor;
                 diffuseRoughness = SceneMaterial.DefaultDiffuseRoughness;
                 transmissionWeight = SceneMaterial.DefaultTransmissionWeight;
+                sheenWeight = SceneMaterial.DefaultSheenWeight;
+                sheenColor = SceneMaterial.DefaultSheenColor;
+                clearcoatWeight = SceneMaterial.DefaultClearcoatWeight;
+                clearcoatRoughness = SceneMaterial.DefaultClearcoatRoughness;
                 emissionColor = new float4(0.0f, 0.0f, 0.0f, 1.0f);
                 emissionStrength = 0.0f;
                 alpha = 1.0f;
@@ -232,7 +245,11 @@ internal static class SceneResourceBuilder
                     textureIndex,
                     status,
                     diagnostic,
-                    emissionStrength));
+                    emissionStrength,
+                    sheenWeight,
+                    sheenColor,
+                    clearcoatWeight,
+                    clearcoatRoughness));
             }
             catch (ArgumentException exception)
             {

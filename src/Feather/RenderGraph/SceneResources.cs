@@ -25,6 +25,10 @@ public sealed class SceneMaterial
     public const float DefaultIor = 1.5f;
     public const float DefaultDiffuseRoughness = 0.0f;
     public const float DefaultTransmissionWeight = 0.0f;
+    public const float DefaultSheenWeight = 0.0f;
+    public static float4 DefaultSheenColor => new(1.0f, 1.0f, 1.0f, 1.0f);
+    public const float DefaultClearcoatWeight = 0.0f;
+    public const float DefaultClearcoatRoughness = 0.03f;
 
     public static float4 FallbackBaseColor => new(1.0f, 0.0f, 1.0f, 1.0f);
 
@@ -54,7 +58,11 @@ public sealed class SceneMaterial
             baseColorTextureIndex,
             status,
             diagnostic,
-            emissionStrength)
+            emissionStrength,
+            DefaultSheenWeight,
+            DefaultSheenColor,
+            DefaultClearcoatWeight,
+            DefaultClearcoatRoughness)
     {
     }
 
@@ -72,7 +80,11 @@ public sealed class SceneMaterial
         int baseColorTextureIndex = NoTexture,
         SceneMaterialStatus status = SceneMaterialStatus.Supported,
         string? diagnostic = null,
-        float emissionStrength = 0.0f)
+        float emissionStrength = 0.0f,
+        float sheenWeight = DefaultSheenWeight,
+        float4? sheenColor = null,
+        float clearcoatWeight = DefaultClearcoatWeight,
+        float clearcoatRoughness = DefaultClearcoatRoughness)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(name);
@@ -101,6 +113,20 @@ public sealed class SceneMaterial
             throw new ArgumentOutOfRangeException(
                 nameof(transmissionWeight),
                 "Transmission weight must be between zero and one.");
+        }
+        if (!float.IsFinite(sheenWeight) || sheenWeight is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sheenWeight), "Sheen weight must be between zero and one.");
+        }
+        var resolvedSheenColor = sheenColor ?? DefaultSheenColor;
+        ValidateFinite(resolvedSheenColor, nameof(sheenColor));
+        if (!float.IsFinite(clearcoatWeight) || clearcoatWeight is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(clearcoatWeight), "Clearcoat weight must be between zero and one.");
+        }
+        if (!float.IsFinite(clearcoatRoughness) || clearcoatRoughness is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(clearcoatRoughness), "Clearcoat roughness must be between zero and one.");
         }
         if (!float.IsFinite(alpha) || alpha is < 0.0f or > 1.0f)
         {
@@ -131,6 +157,10 @@ public sealed class SceneMaterial
         Ior = ior;
         DiffuseRoughness = diffuseRoughness;
         TransmissionWeight = transmissionWeight;
+        SheenWeight = sheenWeight;
+        SheenColor = resolvedSheenColor;
+        ClearcoatWeight = clearcoatWeight;
+        ClearcoatRoughness = clearcoatRoughness;
         EmissionColor = emissionColor;
         EmissionStrength = emissionStrength;
         Alpha = alpha;
@@ -154,6 +184,14 @@ public sealed class SceneMaterial
     public float DiffuseRoughness { get; }
 
     public float TransmissionWeight { get; }
+
+    public float SheenWeight { get; }
+
+    public float4 SheenColor { get; }
+
+    public float ClearcoatWeight { get; }
+
+    public float ClearcoatRoughness { get; }
 
     public float4 EmissionColor { get; }
 
