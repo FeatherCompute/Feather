@@ -27,6 +27,8 @@ Feather is currently experimental. The compute path is the most mature surface. 
 | ![Mandelbrot rendered with Feather](docs/img/mandelbrot-feather.png) | ![Sponza renderer in Feather](docs/img/sponza.png) | ![Cornell box rendered with Feather](docs/img/cornell-box.png) |
 | ![Julia set rendered with Feather](docs/img/julia-set.png) | ![SDF renderer in Feather](docs/img/sdf-renderer.png) | ![Volumetric fog rendered with Feather](docs/img/volumetric-fog.png) |
 
+![Complex rendered with Feather](docs/img/render-result.png) 
+
 Feather is designed for C# developers who want to stay inside .NET while writing GPU workloads:
 
 - Compute kernels over buffers, 2D textures, and 3D textures.

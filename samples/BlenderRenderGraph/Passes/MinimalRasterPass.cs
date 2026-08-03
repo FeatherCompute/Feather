@@ -93,151 +93,148 @@ public sealed class MinimalRasterPass : IRasterPass
         SceneLightTable lights,
         GpuTexture2D<Rgba8, Rgba8> color)
     {
-        var shaderVertices = new MinimalRasterVertex[geometry.Vertices.Length];
-        for (var index = 0; index < shaderVertices.Length; index++)
-        {
-            var vertex = geometry.Vertices.Span[index];
-            shaderVertices[index] = new MinimalRasterVertex
-            {
-                Position = vertex.Position,
-                Normal = vertex.Normal,
-                UV = vertex.UV
-            };
-        }
-
-        var draws = geometry.Submeshes.IsEmpty
-            ? [new SceneSubmesh(0, geometry.Indices.Length, materials.DefaultMaterialIndex)]
-            : geometry.Submeshes.ToArray();
-        var shaderLights = BuildLights(lights);
-        using var vertices = GPU.CreateBuffer(shaderVertices, BufferAccess.ReadOnly);
-        using var lightBuffer = GPU.CreateBuffer(shaderLights, BufferAccess.ReadOnly);
+        var resources = context.GetOrCreateSceneResource(
+            "MinimalRasterPass.SceneResources.v3",
+            () => MinimalRasterSceneResources.Create(
+                geometry,
+                materials,
+                textures,
+                lights,
+                includeMaterialDraws: ViewMode == 2));
         var depth = context.GetOrCreateDepthTarget(Color);
-        using var sampler = GPU.CreateSampler(SamplerDesc.LinearRepeat);
-        using var whiteTexture = CreateWhiteTexture();
-        using var pipeline = GPU.CreateGraphicsPipeline<
-            MinimalRasterVertexShader,
-            MinimalRasterFragmentShader,
-            MinimalRasterVaryings>(
-            new GraphicsPipelineDesc
-            {
-                SampleCount = context.SampleCount,
-                DepthStencil = DepthStencilState.Default with
-                {
-                    DepthTest = true,
-                    DepthWrite = true,
-                    DepthCompare = CompareOp.Less
-                },
-                Raster = RasterState.Default with { CullMode = CullMode.None },
-                DebugName = "Project Minimal Raster"
-            });
+        var pipeline = resources.GetPipeline(context.SampleCount);
+        IGpuTexture2D[] targets = [color];
+        var cameraPosition = camera.WorldPosition;
 
-        var gpuTextures = new GpuTexture2D<Rgba8, float4>?[textures.Textures.Length];
-        try
+        if (ViewMode != 2)
         {
-            IGpuTexture2D[] targets = [color];
-            // Fresnel and the specular lobe are view-dependent, so the eye has to reach the shader.
-            var cameraPosition = camera.WorldPosition;
-            var firstDraw = true;
-            foreach (var draw in draws)
-            {
-                var material = materials.Materials.Span[draw.MaterialIndex];
-                var expression = ViewMode == 2 ? material.Expression : null;
-                var texture = whiteTexture.AsSampled();
-                var textureIndex = expression?.TextureIndex
-                    ?? (ViewMode == 2 ? material.BaseColorTextureIndex : SceneMaterial.NoTexture);
-                if (textureIndex != SceneMaterial.NoTexture)
-                {
-                    gpuTextures[textureIndex] ??= CreateSceneTexture(textures.Textures.Span[textureIndex]);
-                    texture = gpuTextures[textureIndex]!.AsSampled();
-                }
-
-                var expressionInstructions = BuildExpressionInstructions(expression);
-                var expressionParameters = expression is { Parameters.IsEmpty: false }
-                    ? expression.Parameters.ToArray()
-                    : [float4.Zero];
-                var expressionOutputs = new[] { BuildExpressionOutputs(expression) };
-                using var instructionBuffer = GPU.CreateBuffer(
-                    expressionInstructions, BufferAccess.ReadOnly);
-                using var parameterBuffer = GPU.CreateBuffer(
-                    expressionParameters, BufferAccess.ReadOnly);
-                using var outputBuffer = GPU.CreateBuffer(
-                    expressionOutputs, BufferAccess.ReadOnly);
-
-                var baseColor = ViewMode == 0
+            DrawIndexed(
+                pipeline,
+                resources,
+                camera,
+                cameraPosition,
+                targets,
+                depth,
+                resources.FullIndices,
+                resources.WhiteTexture,
+                resources.FallbackInstructionBuffer,
+                resources.FallbackParameterBuffer,
+                resources.FallbackOutputBuffer,
+                expressionInstructionCount: 0,
+                baseColor: ViewMode == 0
                     ? new float4(0.8f, 0.8f, 0.8f, 1.0f)
-                    : material.BaseColor;
-                var metallic = ViewMode == 2 ? material.Metallic : 0.0f;
-                var roughness = ViewMode == 2 ? material.Roughness : 1.0f;
-                // Only the material preview shades the real material. The white-model and normal
-                // views deliberately pin these so geometry reads clearly, which means an IOR of 1.5
-                // (the F0 = 0.04 dielectric) and no diffuse roughness or transmission.
-                var ior = ViewMode == 2 ? material.Ior : SceneMaterial.DefaultIor;
-                var diffuseRoughness = ViewMode == 2 ? material.DiffuseRoughness : 0.0f;
-                var transmissionWeight = ViewMode == 2 ? material.TransmissionWeight : 0.0f;
-                var sheenWeight = ViewMode == 2 ? material.SheenWeight : 0.0f;
-                var sheenColor = ViewMode == 2 ? material.SheenColor : SceneMaterial.DefaultSheenColor;
-                var clearcoatWeight = ViewMode == 2 ? material.ClearcoatWeight : 0.0f;
-                var clearcoatRoughness = ViewMode == 2
-                    ? material.ClearcoatRoughness
-                    : SceneMaterial.DefaultClearcoatRoughness;
-                var emission = ViewMode == 2
-                    ? material.EmissionColor
-                    : new float4(0.0f, 0.0f, 0.0f, 1.0f);
-
-                using var indices = GPU.CreateIndexBuffer(
-                    geometry.Indices.Span.Slice(draw.FirstIndex, draw.IndexCount));
-                pipeline.DrawIndexed(
-                    new MinimalRasterVertexShader(
-                        vertices.AsReadOnly(),
-                        new Uniform<float4x4>(camera.ViewProjection)),
-                    new MinimalRasterFragmentShader(
-                        texture,
-                        sampler,
-                        new Uniform<float4>(baseColor),
-                        new Uniform<float>(metallic),
-                        new Uniform<float>(roughness),
-                        new Uniform<float>(ior),
-                        new Uniform<float>(diffuseRoughness),
-                        new Uniform<float>(transmissionWeight),
-                        new Uniform<float>(sheenWeight),
-                        new Uniform<float4>(sheenColor),
-                        new Uniform<float>(clearcoatWeight),
-                        new Uniform<float>(clearcoatRoughness),
-                        new Uniform<float4>(emission),
-                        new Uniform<float>(Exposure),
-                        new Uniform<int>(ViewMode),
-                        new Uniform<int>(expression?.Instructions.Length ?? 0),
-                        new Uniform<int>(shaderLights.Length),
-                        new Uniform<float3>(cameraPosition),
-                        instructionBuffer.AsReadOnly(),
-                        parameterBuffer.AsReadOnly(),
-                        outputBuffer.AsReadOnly(),
-                        lightBuffer.AsReadOnly()),
-                    targets,
-                    depth,
-                    indices,
-                    new GraphicsDrawDesc
-                    {
-                        ColorLoadOp = firstDraw
-                            ? GraphicsColorLoadOp.Clear
-                            : GraphicsColorLoadOp.Load,
-                        ClearColor = firstDraw ? ClearColor : null,
-                        DepthLoadOp = firstDraw
-                            ? GraphicsDepthLoadOp.Clear
-                            : GraphicsDepthLoadOp.Load,
-                        ClearDepth = firstDraw ? 1.0f : null
-                    });
-                firstDraw = false;
-            }
+                    : new float4(1.0f, 1.0f, 1.0f, 1.0f),
+                metallic: 0.0f,
+                roughness: 1.0f,
+                ior: SceneMaterial.DefaultIor,
+                diffuseRoughness: 0.0f,
+                transmissionWeight: 0.0f,
+                sheenWeight: 0.0f,
+                sheenColor: SceneMaterial.DefaultSheenColor,
+                clearcoatWeight: 0.0f,
+                clearcoatRoughness: SceneMaterial.DefaultClearcoatRoughness,
+                emission: new float4(0.0f, 0.0f, 0.0f, 1.0f),
+                firstDraw: true);
             return pipeline.LastDispatchPath;
         }
-        finally
+
+        var firstDraw = true;
+        foreach (var draw in resources.MaterialDraws)
         {
-            foreach (var texture in gpuTextures)
-            {
-                texture?.Dispose();
-            }
+            var material = materials.Materials.Span[draw.MaterialIndex];
+            DrawIndexed(
+                pipeline,
+                resources,
+                camera,
+                cameraPosition,
+                targets,
+                depth,
+                draw.Indices,
+                draw.Texture,
+                draw.InstructionBuffer,
+                draw.ParameterBuffer,
+                draw.OutputBuffer,
+                draw.ExpressionInstructionCount,
+                material.BaseColor,
+                material.Metallic,
+                material.Roughness,
+                material.Ior,
+                material.DiffuseRoughness,
+                material.TransmissionWeight,
+                material.SheenWeight,
+                material.SheenColor,
+                material.ClearcoatWeight,
+                material.ClearcoatRoughness,
+                material.EmissionColor,
+                firstDraw);
+            firstDraw = false;
         }
+        return pipeline.LastDispatchPath;
+    }
+
+    private void DrawIndexed(
+        GpuGraphicsPipeline<MinimalRasterVertexShader, MinimalRasterFragmentShader, MinimalRasterVaryings> pipeline,
+        MinimalRasterSceneResources resources,
+        RenderCamera camera,
+        float3 cameraPosition,
+        IGpuTexture2D[] targets,
+        GpuTexture2D<float, float> depth,
+        GpuBuffer<uint> indices,
+        GpuTexture2D<Rgba8, float4> texture,
+        GpuBuffer<RasterMaterialInstruction> instructionBuffer,
+        GpuBuffer<float4> parameterBuffer,
+        GpuBuffer<MaterialExpressionOutputs> outputBuffer,
+        int expressionInstructionCount,
+        float4 baseColor,
+        float metallic,
+        float roughness,
+        float ior,
+        float diffuseRoughness,
+        float transmissionWeight,
+        float sheenWeight,
+        float4 sheenColor,
+        float clearcoatWeight,
+        float clearcoatRoughness,
+        float4 emission,
+        bool firstDraw)
+    {
+        pipeline.DrawIndexed(
+            new MinimalRasterVertexShader(
+                resources.Vertices.AsReadOnly(),
+                new Uniform<float4x4>(camera.ViewProjection)),
+            new MinimalRasterFragmentShader(
+                texture.AsSampled(),
+                resources.Sampler,
+                new Uniform<float4>(baseColor),
+                new Uniform<float>(metallic),
+                new Uniform<float>(roughness),
+                new Uniform<float>(ior),
+                new Uniform<float>(diffuseRoughness),
+                new Uniform<float>(transmissionWeight),
+                new Uniform<float>(sheenWeight),
+                new Uniform<float4>(sheenColor),
+                new Uniform<float>(clearcoatWeight),
+                new Uniform<float>(clearcoatRoughness),
+                new Uniform<float4>(emission),
+                new Uniform<float>(Exposure),
+                new Uniform<int>(ViewMode),
+                new Uniform<int>(expressionInstructionCount),
+                new Uniform<int>(resources.LightCount),
+                new Uniform<float3>(cameraPosition),
+                instructionBuffer.AsReadOnly(),
+                parameterBuffer.AsReadOnly(),
+                outputBuffer.AsReadOnly(),
+                resources.LightBuffer.AsReadOnly()),
+            targets,
+            depth,
+            indices,
+            new GraphicsDrawDesc
+            {
+                ColorLoadOp = firstDraw ? GraphicsColorLoadOp.Clear : GraphicsColorLoadOp.Load,
+                ClearColor = firstDraw ? ClearColor : null,
+                DepthLoadOp = firstDraw ? GraphicsDepthLoadOp.Clear : GraphicsDepthLoadOp.Load,
+                ClearDepth = firstDraw ? 1.0f : null
+            });
     }
 
     private static GpuTexture2D<Rgba8, float4> CreateWhiteTexture()
@@ -260,6 +257,292 @@ public sealed class MinimalRasterPass : IRasterPass
             TextureAccess.Sampled);
         texture.Upload(source.Pixels.Span);
         return texture;
+    }
+
+    /// <summary>Scene-derived CPU conversions and GPU objects retained by the RenderHost.</summary>
+    private sealed class MinimalRasterSceneResources : IDisposable
+    {
+        private readonly Dictionary<SampleCount,
+            GpuGraphicsPipeline<MinimalRasterVertexShader, MinimalRasterFragmentShader, MinimalRasterVaryings>>
+            pipelines = [];
+        private readonly GpuTexture2D<Rgba8, float4>?[] sceneTextures;
+
+        private MinimalRasterSceneResources(
+            GpuBuffer<MinimalRasterVertex> vertices,
+            GpuBuffer<uint> fullIndices,
+            GpuBuffer<MinimalRasterLight> lightBuffer,
+            int lightCount,
+            SamplerState sampler,
+            GpuTexture2D<Rgba8, float4> whiteTexture,
+            GpuBuffer<RasterMaterialInstruction> fallbackInstructionBuffer,
+            GpuBuffer<float4> fallbackParameterBuffer,
+            GpuBuffer<MaterialExpressionOutputs> fallbackOutputBuffer,
+            GpuTexture2D<Rgba8, float4>?[] sceneTextures,
+            MinimalRasterDrawResources[] materialDraws)
+        {
+            Vertices = vertices;
+            FullIndices = fullIndices;
+            LightBuffer = lightBuffer;
+            LightCount = lightCount;
+            Sampler = sampler;
+            WhiteTexture = whiteTexture;
+            FallbackInstructionBuffer = fallbackInstructionBuffer;
+            FallbackParameterBuffer = fallbackParameterBuffer;
+            FallbackOutputBuffer = fallbackOutputBuffer;
+            this.sceneTextures = sceneTextures;
+            MaterialDraws = materialDraws;
+        }
+
+        public GpuBuffer<MinimalRasterVertex> Vertices { get; }
+        public GpuBuffer<uint> FullIndices { get; }
+        public GpuBuffer<MinimalRasterLight> LightBuffer { get; }
+        public int LightCount { get; }
+        public SamplerState Sampler { get; }
+        public GpuTexture2D<Rgba8, float4> WhiteTexture { get; }
+        public GpuBuffer<RasterMaterialInstruction> FallbackInstructionBuffer { get; }
+        public GpuBuffer<float4> FallbackParameterBuffer { get; }
+        public GpuBuffer<MaterialExpressionOutputs> FallbackOutputBuffer { get; }
+        public MinimalRasterDrawResources[] MaterialDraws { get; }
+
+        public static MinimalRasterSceneResources Create(
+            SceneGeometry geometry,
+            SceneMaterialTable materials,
+            SceneTextureTable textures,
+            SceneLightTable lights,
+            bool includeMaterialDraws)
+        {
+            var shaderVertices = new MinimalRasterVertex[geometry.Vertices.Length];
+            for (var index = 0; index < shaderVertices.Length; index++)
+            {
+                var vertex = geometry.Vertices.Span[index];
+                shaderVertices[index] = new MinimalRasterVertex
+                {
+                    Position = vertex.Position,
+                    Normal = vertex.Normal,
+                    UV = vertex.UV
+                };
+            }
+
+            var shaderLights = BuildLights(lights);
+            GpuBuffer<MinimalRasterVertex>? vertices = null;
+            GpuBuffer<uint>? fullIndices = null;
+            GpuBuffer<MinimalRasterLight>? lightBuffer = null;
+            GpuBuffer<RasterMaterialInstruction>? fallbackInstructionBuffer = null;
+            GpuBuffer<float4>? fallbackParameterBuffer = null;
+            GpuBuffer<MaterialExpressionOutputs>? fallbackOutputBuffer = null;
+            GpuTexture2D<Rgba8, float4>? whiteTexture = null;
+            var sampler = default(SamplerState);
+            var samplerCreated = false;
+            var sceneTextures = new GpuTexture2D<Rgba8, float4>?[textures.Textures.Length];
+            var materialDraws = new List<MinimalRasterDrawResources>();
+            try
+            {
+                vertices = GPU.CreateBuffer(shaderVertices, BufferAccess.ReadOnly);
+                fullIndices = GPU.CreateIndexBuffer(geometry.Indices.Span);
+                lightBuffer = GPU.CreateBuffer(shaderLights, BufferAccess.ReadOnly);
+                fallbackInstructionBuffer = GPU.CreateBuffer(
+                    BuildExpressionInstructions(null), BufferAccess.ReadOnly);
+                fallbackParameterBuffer = GPU.CreateBuffer([float4.Zero], BufferAccess.ReadOnly);
+                fallbackOutputBuffer = GPU.CreateBuffer(
+                    new[] { BuildExpressionOutputs(null) }, BufferAccess.ReadOnly);
+                sampler = GPU.CreateSampler(SamplerDesc.LinearRepeat);
+                samplerCreated = true;
+                whiteTexture = CreateWhiteTexture();
+
+                if (includeMaterialDraws)
+                {
+                    var draws = geometry.Submeshes.IsEmpty
+                        ? [new SceneSubmesh(0, geometry.Indices.Length, materials.DefaultMaterialIndex)]
+                        : geometry.Submeshes.ToArray();
+                    foreach (var draw in draws)
+                    {
+                        var material = materials.Materials.Span[draw.MaterialIndex];
+                        var expression = material.Expression;
+                        var textureIndex = expression?.TextureIndex ?? material.BaseColorTextureIndex;
+                        var texture = whiteTexture;
+                        if (textureIndex != SceneMaterial.NoTexture)
+                        {
+                            sceneTextures[textureIndex] ??=
+                                CreateSceneTexture(textures.Textures.Span[textureIndex]);
+                            texture = sceneTextures[textureIndex]!;
+                        }
+                        materialDraws.Add(MinimalRasterDrawResources.Create(
+                            geometry,
+                            draw,
+                            expression,
+                            texture));
+                    }
+                }
+
+                return new MinimalRasterSceneResources(
+                    vertices,
+                    fullIndices,
+                    lightBuffer,
+                    shaderLights.Length,
+                    sampler,
+                    whiteTexture,
+                    fallbackInstructionBuffer,
+                    fallbackParameterBuffer,
+                    fallbackOutputBuffer,
+                    sceneTextures,
+                    materialDraws.ToArray());
+            }
+            catch
+            {
+                foreach (var draw in materialDraws)
+                {
+                    draw.Dispose();
+                }
+                foreach (var texture in sceneTextures)
+                {
+                    texture?.Dispose();
+                }
+                whiteTexture?.Dispose();
+                if (samplerCreated)
+                {
+                    sampler.Dispose();
+                }
+                fallbackOutputBuffer?.Dispose();
+                fallbackParameterBuffer?.Dispose();
+                fallbackInstructionBuffer?.Dispose();
+                lightBuffer?.Dispose();
+                fullIndices?.Dispose();
+                vertices?.Dispose();
+                throw;
+            }
+        }
+
+        public GpuGraphicsPipeline<
+            MinimalRasterVertexShader,
+            MinimalRasterFragmentShader,
+            MinimalRasterVaryings> GetPipeline(SampleCount sampleCount)
+        {
+            if (pipelines.TryGetValue(sampleCount, out var pipeline))
+            {
+                return pipeline;
+            }
+            pipeline = GPU.CreateGraphicsPipeline<
+                MinimalRasterVertexShader,
+                MinimalRasterFragmentShader,
+                MinimalRasterVaryings>(
+                new GraphicsPipelineDesc
+                {
+                    SampleCount = sampleCount,
+                    DepthStencil = DepthStencilState.Default with
+                    {
+                        DepthTest = true,
+                        DepthWrite = true,
+                        DepthCompare = CompareOp.Less
+                    },
+                    Raster = RasterState.Default with { CullMode = CullMode.None },
+                    DebugName = "Project Minimal Raster"
+                });
+            pipelines.Add(sampleCount, pipeline);
+            return pipeline;
+        }
+
+        public void Dispose()
+        {
+            foreach (var pipeline in pipelines.Values)
+            {
+                pipeline.Dispose();
+            }
+            foreach (var draw in MaterialDraws)
+            {
+                draw.Dispose();
+            }
+            foreach (var texture in sceneTextures)
+            {
+                texture?.Dispose();
+            }
+            WhiteTexture.Dispose();
+            Sampler.Dispose();
+            FallbackOutputBuffer.Dispose();
+            FallbackParameterBuffer.Dispose();
+            FallbackInstructionBuffer.Dispose();
+            LightBuffer.Dispose();
+            FullIndices.Dispose();
+            Vertices.Dispose();
+        }
+    }
+
+    private sealed class MinimalRasterDrawResources : IDisposable
+    {
+        private MinimalRasterDrawResources(
+            int materialIndex,
+            GpuBuffer<uint> indices,
+            GpuTexture2D<Rgba8, float4> texture,
+            GpuBuffer<RasterMaterialInstruction> instructionBuffer,
+            GpuBuffer<float4> parameterBuffer,
+            GpuBuffer<MaterialExpressionOutputs> outputBuffer,
+            int expressionInstructionCount)
+        {
+            MaterialIndex = materialIndex;
+            Indices = indices;
+            Texture = texture;
+            InstructionBuffer = instructionBuffer;
+            ParameterBuffer = parameterBuffer;
+            OutputBuffer = outputBuffer;
+            ExpressionInstructionCount = expressionInstructionCount;
+        }
+
+        public int MaterialIndex { get; }
+        public GpuBuffer<uint> Indices { get; }
+        public GpuTexture2D<Rgba8, float4> Texture { get; }
+        public GpuBuffer<RasterMaterialInstruction> InstructionBuffer { get; }
+        public GpuBuffer<float4> ParameterBuffer { get; }
+        public GpuBuffer<MaterialExpressionOutputs> OutputBuffer { get; }
+        public int ExpressionInstructionCount { get; }
+
+        public static MinimalRasterDrawResources Create(
+            SceneGeometry geometry,
+            SceneSubmesh draw,
+            SceneMaterialExpression? expression,
+            GpuTexture2D<Rgba8, float4> texture)
+        {
+            GpuBuffer<uint>? indices = null;
+            GpuBuffer<RasterMaterialInstruction>? instructionBuffer = null;
+            GpuBuffer<float4>? parameterBuffer = null;
+            GpuBuffer<MaterialExpressionOutputs>? outputBuffer = null;
+            try
+            {
+                indices = GPU.CreateIndexBuffer(
+                    geometry.Indices.Span.Slice(draw.FirstIndex, draw.IndexCount));
+                instructionBuffer = GPU.CreateBuffer(
+                    BuildExpressionInstructions(expression), BufferAccess.ReadOnly);
+                parameterBuffer = GPU.CreateBuffer(
+                    expression is { Parameters.IsEmpty: false }
+                        ? expression.Parameters.ToArray()
+                        : [float4.Zero],
+                    BufferAccess.ReadOnly);
+                outputBuffer = GPU.CreateBuffer(
+                    new[] { BuildExpressionOutputs(expression) }, BufferAccess.ReadOnly);
+                return new MinimalRasterDrawResources(
+                    draw.MaterialIndex,
+                    indices,
+                    texture,
+                    instructionBuffer,
+                    parameterBuffer,
+                    outputBuffer,
+                    expression?.Instructions.Length ?? 0);
+            }
+            catch
+            {
+                outputBuffer?.Dispose();
+                parameterBuffer?.Dispose();
+                instructionBuffer?.Dispose();
+                indices?.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            OutputBuffer.Dispose();
+            ParameterBuffer.Dispose();
+            InstructionBuffer.Dispose();
+            Indices.Dispose();
+        }
     }
 
     private static RasterMaterialInstruction[] BuildExpressionInstructions(
