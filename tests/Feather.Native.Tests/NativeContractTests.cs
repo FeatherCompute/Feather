@@ -48,7 +48,8 @@ public class NativeContractTests
             Marshal.FreeHGlobal(sourceBuffer);
         }
 
-        Assert.Equal(new byte[] { 64, 64, 64, 255 }, destination.Skip(20).Take(4));
+        // Half-texel mapping puts (1,1) at (0.25,0.25), so the white tap contributes 1/16 of 255: B=16.
+        Assert.Equal(new byte[] { 64, 64, 16, 255 }, destination.Skip(20).Take(4));
     }
 
     [Fact]
