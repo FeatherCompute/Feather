@@ -48,6 +48,7 @@ internal sealed class RenderHostRunner : IDisposable
         var passCount = 1;
         var passReloaded = false;
         var gpuReadbackMilliseconds = 0.0;
+        IReadOnlyList<PassExecutionTiming> passTimings = Array.Empty<PassExecutionTiming>();
         stage.Restart();
         if (request.ManifestPath is not null)
         {
@@ -69,6 +70,7 @@ internal sealed class RenderHostRunner : IDisposable
             passCount = execution.PassCount;
             passReloaded = execution.Reloaded;
             gpuReadbackMilliseconds = execution.GpuReadbackMilliseconds;
+            passTimings = execution.PassTimings;
         }
         else
         {
@@ -126,6 +128,7 @@ internal sealed class RenderHostRunner : IDisposable
             gpuReadbackMilliseconds,
             frameWriteMilliseconds,
             started.Elapsed.TotalMilliseconds,
+            passTimings,
             scene.Diagnostics);
     }
 
@@ -166,4 +169,5 @@ internal sealed record RenderHostResult(
     double GpuReadbackMilliseconds,
     double FrameWriteMilliseconds,
     double TotalMilliseconds,
+    IReadOnlyList<PassExecutionTiming> PassTimings,
     IReadOnlyList<RenderHostDiagnostic> Diagnostics);

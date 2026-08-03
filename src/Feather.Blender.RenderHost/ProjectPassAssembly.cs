@@ -161,7 +161,22 @@ internal sealed record ProjectPassExecutionResult(
     string PassType,
     int PassCount,
     bool Reloaded,
-    double GpuReadbackMilliseconds);
+    double GpuReadbackMilliseconds,
+    IReadOnlyList<PassExecutionTiming> PassTimings);
+
+/// <summary>
+/// A measured CPU interval for one graph pass. EasyGPU does not currently expose timestamp-query
+/// objects through Feather, so <see cref="GpuMs"/> is null instead of an estimated share
+/// of the graph total. <see cref="WaitMs"/> is zero until an explicit pass-owned wait can
+/// be observed independently from graph readback.
+/// </summary>
+internal sealed record PassExecutionTiming(
+    string PassGuid,
+    string NodeGuid,
+    string Name,
+    double CpuMs,
+    double? GpuMs,
+    double WaitMs);
 
 internal sealed class PassAssemblyGeneration : IDisposable
 {
@@ -317,6 +332,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             sceneResourcePool,
             inferenceWeights);
         var executedTypes = new List<string>(graph.Passes.Length);
+        var passTimings = new List<PassExecutionTiming>(graph.Passes.Length);
         foreach (var passNode in graph.Passes)
         {
             if (passNode.Muted)
@@ -328,6 +344,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             var type = passTypes[definition.PassGuid];
             var instance = (IRenderPass)(Activator.CreateInstance(type)
                 ?? throw new InvalidDataException($"Unable to create pass type '{definition.TypeName}'."));
+            var passStarted = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 PassMemberBinder.BindResources(instance, passNode, definition, resources);
@@ -340,6 +357,19 @@ internal sealed class PassAssemblyGeneration : IDisposable
             {
                 backend.EndPass();
                 (instance as IDisposable)?.Dispose();
+                passStarted.Stop();
+                var name = string.IsNullOrWhiteSpace(passNode.DisplayName)
+                    ? (string.IsNullOrWhiteSpace(passNode.Name)
+                        ? definition.TypeName.Split('.').Last()
+                        : passNode.Name)
+                    : passNode.DisplayName;
+                passTimings.Add(new PassExecutionTiming(
+                    definition.PassGuid,
+                    passNode.NodeId,
+                    name,
+                    passStarted.Elapsed.TotalMilliseconds,
+                    null,
+                    0.0));
             }
         }
 
@@ -355,7 +385,8 @@ internal sealed class PassAssemblyGeneration : IDisposable
             executedTypes.LastOrDefault() ?? "bypass",
             executedTypes.Count,
             reloaded,
-            backend.GpuReadbackMilliseconds);
+            backend.GpuReadbackMilliseconds,
+            passTimings);
     }
 
     public void Dispose()
