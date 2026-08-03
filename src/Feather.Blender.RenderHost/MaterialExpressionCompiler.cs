@@ -86,13 +86,557 @@ internal static class MaterialExpressionCompiler
             Output("alpha"),
             Output("normal"));
         LowerBump(instructions, ref expressionOutputs);
+        var compiledProgram = CompileCanonical(instructions, parameters, expressionOutputs);
         return new SceneMaterialExpression(
             hash,
             instructions.ToArray(),
             parameters.ToArray(),
             expressionOutputs,
-            expressionTextureIndices.ToArray());
+            expressionTextureIndices.ToArray(),
+            compiledProgram);
     }
+
+    /// <summary>
+    /// Recognizes a deliberately small topology vocabulary. This is a second lowering target rather
+    /// than source generation per material: a scene with 287 instances still emits the same ten
+    /// shader functions, while texture IDs and constants remain data.
+    /// </summary>
+    private static CompiledMaterialProgram? CompileCanonical(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        IReadOnlyList<float4> parameters,
+        SceneMaterialExpressionOutputs outputs)
+    {
+        if (AllOutputsConstant(instructions, outputs))
+        {
+            // Keep scalar-only Principled graphs on the compatibility path. Besides being cheap, the
+            // established gates intentionally pin their extreme-IOR floating-point behaviour. The
+            // independently removable cost is in texture/math programs, not these leaf constants.
+            return null;
+        }
+
+        if (TryCompileTextureChannels(instructions, outputs, out var channels))
+        {
+            return channels;
+        }
+
+        if (TryCompileTextureMath(instructions, outputs, out var math))
+        {
+            return math;
+        }
+
+        if (TryCompileTextureMix(instructions, outputs, out var mix))
+        {
+            return mix;
+        }
+
+        if (TryCompileTextureRamp(instructions, parameters, outputs, out var ramp))
+        {
+            return ramp;
+        }
+
+        return null;
+    }
+
+    private static bool TryCompileTextureChannels(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs,
+        out CompiledMaterialProgram? program)
+    {
+        program = null;
+        if (!OtherOutputsAreConstant(instructions, outputs) ||
+            !TryOptionalColor(instructions, outputs.BaseColor, out var baseColor) ||
+            !TryOptionalScalar(instructions, outputs.Metallic, out var metallic) ||
+            !TryOptionalScalar(instructions, outputs.Roughness, out var roughness) ||
+            !TryOptionalScalar(instructions, outputs.Alpha, out var alpha) ||
+            !TryOptionalNormal(instructions, outputs.Normal, out var normal))
+        {
+            return false;
+        }
+
+        program = new CompiledMaterialProgram(
+            SceneMaterialCompiledVariant.TextureChannels,
+            baseColor.Texture,
+            metallic.Texture,
+            roughness.Texture,
+            alpha.Texture,
+            normal.Texture,
+            baseColor.Channel,
+            metallic.Channel,
+            roughness.Channel,
+            alpha.Channel,
+            normal.Channel,
+            parameter0: new float4(normal.Strength, 0.0f, 0.0f, 0.0f));
+        return true;
+    }
+
+    private static bool TryCompileTextureMath(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs,
+        out CompiledMaterialProgram? program)
+    {
+        program = null;
+        if (!OtherOutputsAreConstant(instructions, outputs) ||
+            !TryOptionalColor(instructions, outputs.BaseColor, out var baseColor) ||
+            !TryOptionalNormal(instructions, outputs.Normal, out var normal))
+        {
+            return false;
+        }
+
+        var dynamicCount = 0;
+        var target = 0;
+        var output = -1;
+        CountDynamic(outputs.Metallic, 1);
+        CountDynamic(outputs.Roughness, 2);
+        CountDynamic(outputs.Alpha, 3);
+        if (dynamicCount != 1 || !TryMathChain(instructions, output, out var math))
+        {
+            return false;
+        }
+
+        // Non-target scalar channels must be constants. Direct image channels are handled by the
+        // texture-channel topology and a graph with two unrelated math chains stays on the VM.
+        if ((target == 1 || IsConstant(instructions, outputs.Metallic)) &&
+            (target == 2 || IsConstant(instructions, outputs.Roughness)) &&
+            (target == 3 || IsConstant(instructions, outputs.Alpha)))
+        {
+            program = new CompiledMaterialProgram(
+                math.Variant,
+                baseColor.Texture,
+                math.Source.Texture,
+                texture4: normal.Texture,
+                channel0: baseColor.Channel,
+                channel1: math.Source.Channel,
+                channel4: normal.Channel,
+                target: target,
+                parameter0: math.Parameters,
+                parameter1: new float4(normal.Strength, 0.0f, 0.0f, 0.0f));
+            return true;
+        }
+        return false;
+
+        void CountDynamic(int index, int candidateTarget)
+        {
+            if (!IsConstant(instructions, index))
+            {
+                dynamicCount++;
+                target = candidateTarget;
+                output = index;
+            }
+        }
+    }
+
+    private static bool TryCompileTextureMix(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs,
+        out CompiledMaterialProgram? program)
+    {
+        program = null;
+        if (!AllExceptBaseColorConstant(instructions, outputs))
+        {
+            return false;
+        }
+        var instruction = instructions[outputs.BaseColor];
+        if (instruction.Op is not ((int)SceneMaterialExpressionOp.Mix) and
+            not ((int)SceneMaterialExpressionOp.MixRgb))
+        {
+            return false;
+        }
+        var blendMode = instruction.Op == (int)SceneMaterialExpressionOp.Mix
+            ? instruction.Parameters.Z
+            : instruction.Parameters.X;
+        var clampResult = instruction.Op == (int)SceneMaterialExpressionOp.Mix
+            ? instruction.Parameters.Y
+            : instruction.Parameters.Y;
+        if (blendMode != 0.0f || clampResult > 0.5f ||
+            !TryColorOrConstant(instructions, instruction.B, out var a) ||
+            !TryColorOrConstant(instructions, instruction.C, out var b) ||
+            !TryScalarOrConstant(instructions, instruction.A, out var factor))
+        {
+            return false;
+        }
+        var clampFactor = instruction.Op == (int)SceneMaterialExpressionOp.Mix
+            ? instruction.Parameters.X
+            : 1.0f;
+        program = new CompiledMaterialProgram(
+            SceneMaterialCompiledVariant.TextureMix,
+            a.Source.Texture,
+            b.Source.Texture,
+            factor.Source.Texture,
+            channel0: a.Source.Channel,
+            channel1: b.Source.Channel,
+            channel2: factor.Source.Channel,
+            parameter0: a.Constant,
+            parameter1: b.Constant,
+            parameter2: new float4(factor.Constant.X, clampFactor, 0.0f, 0.0f));
+        return true;
+    }
+
+    private static bool TryCompileTextureRamp(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        IReadOnlyList<float4> parameters,
+        SceneMaterialExpressionOutputs outputs,
+        out CompiledMaterialProgram? program)
+    {
+        program = null;
+        if (!AllExceptBaseColorConstant(instructions, outputs))
+        {
+            return false;
+        }
+        var instruction = instructions[outputs.BaseColor];
+        if (instruction.Op != (int)SceneMaterialExpressionOp.ColorRamp ||
+            instruction.ParameterCount != 2 || instruction.Parameters.Y > 0.5f ||
+            !TryScalarOrConstant(instructions, instruction.A, out var factor))
+        {
+            return false;
+        }
+        var offset = instruction.ParameterOffset;
+        if (offset < 0 || offset + 3 >= parameters.Count)
+        {
+            return false;
+        }
+        var variant = instruction.Parameters.X switch
+        {
+            0.0f => SceneMaterialCompiledVariant.TextureRampConstant,
+            1.0f => SceneMaterialCompiledVariant.TextureRampLinear,
+            2.0f => SceneMaterialCompiledVariant.TextureRampEase,
+            _ => SceneMaterialCompiledVariant.Fallback
+        };
+        if (variant == SceneMaterialCompiledVariant.Fallback)
+        {
+            return false;
+        }
+        program = new CompiledMaterialProgram(
+            variant,
+            factor.Source.Texture,
+            channel0: factor.Source.Channel,
+            parameter0: factor.Constant,
+            parameter1: parameters[offset],
+            parameter2: parameters[offset + 2],
+            parameter3: new float4(parameters[offset + 1].X, parameters[offset + 3].X, 0.0f, 0.0f));
+        return true;
+    }
+
+    private static bool TryMathChain(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int output,
+        out MathChain chain)
+    {
+        chain = default;
+        if ((uint)output >= (uint)instructions.Count)
+        {
+            return false;
+        }
+        var outer = instructions[output];
+        if (outer.Op != (int)SceneMaterialExpressionOp.Math)
+        {
+            return false;
+        }
+
+        // A multiply followed by an add is common for mask remapping. It is one fixed fused topology,
+        // not a two-record interpreter loop.
+        if ((int)outer.Parameters.X == 0 && outer.Parameters.Y <= 0.5f)
+        {
+            var innerIndex = IsConstant(instructions, outer.A) ? outer.B : outer.A;
+            var addIndex = innerIndex == outer.A ? outer.B : outer.A;
+            if (TryConstant(instructions, addIndex, out var add) &&
+                (uint)innerIndex < (uint)instructions.Count)
+            {
+                var inner = instructions[innerIndex];
+                if (inner.Op == (int)SceneMaterialExpressionOp.Math &&
+                    (int)inner.Parameters.X == 2 && inner.Parameters.Y <= 0.5f &&
+                    TryBinaryTextureConstant(instructions, inner, out var source, out var multiply))
+                {
+                    chain = new MathChain(
+                        SceneMaterialCompiledVariant.TextureMultiplyAdd,
+                        source,
+                        new float4(multiply.X, add.X, 0.0f, 0.0f));
+                    return true;
+                }
+            }
+        }
+
+        var operation = (int)outer.Parameters.X;
+        if (operation is 0 or 2 &&
+            TryBinaryTextureConstant(instructions, outer, out var commutativeSource, out var constant))
+        {
+            chain = new MathChain(
+                operation == 2
+                    ? SceneMaterialCompiledVariant.TextureMultiply
+                    : SceneMaterialCompiledVariant.TextureAdd,
+                commutativeSource,
+                new float4(constant.X, outer.Parameters.Y, 0.0f, 0.0f));
+            return true;
+        }
+        if (operation == 1 && TryConstant(instructions, outer.A, out var from) &&
+            TryScalarSource(instructions, outer.B, out var subtractSource))
+        {
+            chain = new MathChain(
+                SceneMaterialCompiledVariant.TextureSubtractFromConstant,
+                subtractSource,
+                new float4(from.X, outer.Parameters.Y, 0.0f, 0.0f));
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryBinaryTextureConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionInstruction instruction,
+        out TextureSource source,
+        out float4 constant)
+    {
+        if (TryScalarSource(instructions, instruction.A, out source) &&
+            TryConstant(instructions, instruction.B, out constant))
+        {
+            return true;
+        }
+        if (TryScalarSource(instructions, instruction.B, out source) &&
+            TryConstant(instructions, instruction.A, out constant))
+        {
+            return true;
+        }
+        source = TextureSource.None;
+        constant = float4.Zero;
+        return false;
+    }
+
+    private static bool TryOptionalColor(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out TextureSource source)
+    {
+        if (IsConstant(instructions, index))
+        {
+            source = TextureSource.None;
+            return true;
+        }
+        return TryColorSource(instructions, index, out source);
+    }
+
+    private static bool TryOptionalScalar(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out TextureSource source)
+    {
+        if (IsConstant(instructions, index))
+        {
+            source = TextureSource.None;
+            return true;
+        }
+        return TryScalarSource(instructions, index, out source);
+    }
+
+    private static bool TryOptionalNormal(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out NormalSource source)
+    {
+        if (TryConstant(instructions, index, out var constant))
+        {
+            // The flattened SceneMaterial has no tangent-normal field. Only the zero sentinel can be
+            // left to its defaults; an authored constant normal must retain exact VM evaluation.
+            source = NormalSource.None;
+            return constant.X == 0.0f && constant.Y == 0.0f && constant.Z == 0.0f;
+        }
+        if ((uint)index >= (uint)instructions.Count)
+        {
+            source = NormalSource.None;
+            return false;
+        }
+        var normal = instructions[index];
+        if (normal.Op == (int)SceneMaterialExpressionOp.NormalMap &&
+            TryColorSource(instructions, normal.A, out var image) &&
+            TryConstant(instructions, normal.B, out var strength))
+        {
+            source = new NormalSource(image.Texture, image.Channel, ShaderMathClampNonNegative(strength.X));
+            return true;
+        }
+        source = NormalSource.None;
+        return false;
+    }
+
+    private static bool TryColorSource(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out TextureSource source)
+    {
+        if ((uint)index < (uint)instructions.Count)
+        {
+            var item = instructions[index];
+            if (item.Op == (int)SceneMaterialExpressionOp.ImageColor && IsUv(instructions, item.A))
+            {
+                source = new TextureSource(item.Reserved, -1);
+                return true;
+            }
+        }
+        source = TextureSource.None;
+        return false;
+    }
+
+    private static bool TryScalarSource(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out TextureSource source)
+    {
+        if ((uint)index < (uint)instructions.Count)
+        {
+            var item = instructions[index];
+            if (item.Op == (int)SceneMaterialExpressionOp.ImageAlpha && IsUv(instructions, item.A))
+            {
+                source = new TextureSource(item.Reserved, 3);
+                return true;
+            }
+            if (item.Op == (int)SceneMaterialExpressionOp.ImageColor && IsUv(instructions, item.A))
+            {
+                source = new TextureSource(item.Reserved, 0);
+                return true;
+            }
+            if (item.Op == (int)SceneMaterialExpressionOp.SeparateXyz &&
+                TryColorSource(instructions, item.A, out var image))
+            {
+                source = new TextureSource(image.Texture, (int)item.Parameters.X);
+                return true;
+            }
+        }
+        source = TextureSource.None;
+        return false;
+    }
+
+    private static bool TryColorOrConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out ValueSource value)
+    {
+        if (TryConstant(instructions, index, out var constant))
+        {
+            value = new ValueSource(TextureSource.None, constant);
+            return true;
+        }
+        if (TryColorSource(instructions, index, out var source))
+        {
+            value = new ValueSource(source, float4.Zero);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    private static bool TryScalarOrConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out ValueSource value)
+    {
+        if (TryConstant(instructions, index, out var constant))
+        {
+            value = new ValueSource(TextureSource.None, constant);
+            return true;
+        }
+        if (TryScalarSource(instructions, index, out var source))
+        {
+            value = new ValueSource(source, float4.Zero);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    private static bool TryConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        out float4 value)
+    {
+        if (IsConstant(instructions, index))
+        {
+            value = instructions[index].Value;
+            return true;
+        }
+        value = float4.Zero;
+        return false;
+    }
+
+    private static bool IsConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index)
+        => (uint)index < (uint)instructions.Count &&
+           instructions[index].Op == (int)SceneMaterialExpressionOp.Constant;
+
+    private static bool IsUv(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index)
+        => (uint)index < (uint)instructions.Count &&
+           instructions[index].Op == (int)SceneMaterialExpressionOp.Uv;
+
+    private static bool AllOutputsConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs)
+        => OutputIndices(outputs).All(index => IsConstant(instructions, index));
+
+    private static bool OtherOutputsAreConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs)
+        => IsConstant(instructions, outputs.Ior) &&
+           IsConstant(instructions, outputs.DiffuseRoughness) &&
+           IsConstant(instructions, outputs.TransmissionWeight) &&
+           IsConstant(instructions, outputs.SheenWeight) &&
+           IsConstant(instructions, outputs.SheenColor) &&
+           IsConstant(instructions, outputs.ClearcoatWeight) &&
+           IsConstant(instructions, outputs.ClearcoatRoughness) &&
+           IsConstant(instructions, outputs.EmissionColor) &&
+           IsConstant(instructions, outputs.EmissionStrength);
+
+    private static bool AllExceptBaseColorConstant(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        SceneMaterialExpressionOutputs outputs)
+        => IsConstant(instructions, outputs.Metallic) &&
+           IsConstant(instructions, outputs.Roughness) &&
+           IsConstant(instructions, outputs.Ior) &&
+           IsConstant(instructions, outputs.DiffuseRoughness) &&
+           IsConstant(instructions, outputs.TransmissionWeight) &&
+           IsConstant(instructions, outputs.SheenWeight) &&
+           IsConstant(instructions, outputs.SheenColor) &&
+           IsConstant(instructions, outputs.ClearcoatWeight) &&
+           IsConstant(instructions, outputs.ClearcoatRoughness) &&
+           IsConstant(instructions, outputs.EmissionColor) &&
+           IsConstant(instructions, outputs.EmissionStrength) &&
+           IsConstant(instructions, outputs.Alpha) &&
+           IsConstant(instructions, outputs.Normal);
+
+    private static int[] OutputIndices(SceneMaterialExpressionOutputs outputs) =>
+    [
+        outputs.BaseColor,
+        outputs.Metallic,
+        outputs.Roughness,
+        outputs.Ior,
+        outputs.DiffuseRoughness,
+        outputs.TransmissionWeight,
+        outputs.SheenWeight,
+        outputs.SheenColor,
+        outputs.ClearcoatWeight,
+        outputs.ClearcoatRoughness,
+        outputs.EmissionColor,
+        outputs.EmissionStrength,
+        outputs.Alpha,
+        outputs.Normal
+    ];
+
+    private static float ShaderMathClampNonNegative(float value) => System.MathF.Max(value, 0.0f);
+
+    private readonly record struct TextureSource(int Texture, int Channel)
+    {
+        public static TextureSource None => new(SceneMaterial.NoTexture, 0);
+    }
+
+    private readonly record struct NormalSource(int Texture, int Channel, float Strength)
+    {
+        public static NormalSource None => new(SceneMaterial.NoTexture, 0, 1.0f);
+    }
+
+    private readonly record struct ValueSource(TextureSource Source, float4 Constant);
+
+    private readonly record struct MathChain(
+        SceneMaterialCompiledVariant Variant,
+        TextureSource Source,
+        float4 Parameters);
 
     private static void LowerBump(
         List<SceneMaterialExpressionInstruction> instructions,

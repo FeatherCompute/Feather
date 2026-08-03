@@ -46,6 +46,106 @@ public enum SceneMaterialExpressionOp
     Bump = 24
 }
 
+/// <summary>
+/// Bounded straight-line material topologies understood by the shared raster/path shader evaluator.
+/// Unsupported graphs deliberately remain on <see cref="Fallback"/> so shader source size is
+/// independent of the number of materials in a scene.
+/// </summary>
+public enum SceneMaterialCompiledVariant
+{
+    Fallback = 0,
+    Constant = 1,
+    TextureChannels = 2,
+    TextureMultiply = 3,
+    TextureAdd = 4,
+    TextureSubtractFromConstant = 5,
+    TextureMultiplyAdd = 6,
+    TextureMix = 7,
+    TextureRampConstant = 8,
+    TextureRampLinear = 9,
+    TextureRampEase = 10
+}
+
+/// <summary>
+/// Parameters for one canonical material topology. Texture slots contain resolved scene texture
+/// indices; values stay in buffers so all material instances share the same small set of functions.
+/// </summary>
+public sealed class CompiledMaterialProgram
+{
+    /// <summary>
+    /// The fixed evaluator ABI currently contains ten shader topologies. This is deliberately below
+    /// the 16-variant pipeline budget from the GI optimization plan; material count cannot increase it.
+    /// </summary>
+    public const int VariantCount = 10;
+
+    public CompiledMaterialProgram(
+        SceneMaterialCompiledVariant variant,
+        int texture0 = SceneMaterial.NoTexture,
+        int texture1 = SceneMaterial.NoTexture,
+        int texture2 = SceneMaterial.NoTexture,
+        int texture3 = SceneMaterial.NoTexture,
+        int texture4 = SceneMaterial.NoTexture,
+        int channel0 = 0,
+        int channel1 = 0,
+        int channel2 = 0,
+        int channel3 = 0,
+        int channel4 = 0,
+        int target = 0,
+        float4 parameter0 = default,
+        float4 parameter1 = default,
+        float4 parameter2 = default,
+        float4 parameter3 = default)
+    {
+        if (variant is <= SceneMaterialCompiledVariant.Fallback ||
+            (int)variant > VariantCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+        Variant = variant;
+        Texture0 = ValidateTexture(texture0, nameof(texture0));
+        Texture1 = ValidateTexture(texture1, nameof(texture1));
+        Texture2 = ValidateTexture(texture2, nameof(texture2));
+        Texture3 = ValidateTexture(texture3, nameof(texture3));
+        Texture4 = ValidateTexture(texture4, nameof(texture4));
+        Channel0 = channel0;
+        Channel1 = channel1;
+        Channel2 = channel2;
+        Channel3 = channel3;
+        Channel4 = channel4;
+        Target = target;
+        Parameter0 = parameter0;
+        Parameter1 = parameter1;
+        Parameter2 = parameter2;
+        Parameter3 = parameter3;
+    }
+
+    public SceneMaterialCompiledVariant Variant { get; }
+    public int Texture0 { get; }
+    public int Texture1 { get; }
+    public int Texture2 { get; }
+    public int Texture3 { get; }
+    public int Texture4 { get; }
+    public int Channel0 { get; }
+    public int Channel1 { get; }
+    public int Channel2 { get; }
+    public int Channel3 { get; }
+    public int Channel4 { get; }
+    public int Target { get; }
+    public float4 Parameter0 { get; }
+    public float4 Parameter1 { get; }
+    public float4 Parameter2 { get; }
+    public float4 Parameter3 { get; }
+
+    private static int ValidateTexture(int texture, string name)
+    {
+        if (texture < SceneMaterial.NoTexture)
+        {
+            throw new ArgumentOutOfRangeException(name);
+        }
+        return texture;
+    }
+}
+
 /// <summary>A host-lowered instruction copied into a generated pass's shader-local layout.</summary>
 public partial struct SceneMaterialExpressionInstruction
 {
@@ -132,13 +232,15 @@ public sealed class SceneMaterialExpression
         ReadOnlyMemory<SceneMaterialExpressionInstruction> instructions,
         ReadOnlyMemory<float4> parameters,
         SceneMaterialExpressionOutputs outputs,
-        int textureIndex = SceneMaterial.NoTexture)
+        int textureIndex = SceneMaterial.NoTexture,
+        CompiledMaterialProgram? compiledProgram = null)
         : this(
             hash,
             instructions,
             parameters,
             outputs,
-            textureIndex == SceneMaterial.NoTexture ? ReadOnlyMemory<int>.Empty : new[] { textureIndex })
+            textureIndex == SceneMaterial.NoTexture ? ReadOnlyMemory<int>.Empty : new[] { textureIndex },
+            compiledProgram)
     {
     }
 
@@ -147,7 +249,8 @@ public sealed class SceneMaterialExpression
         ReadOnlyMemory<SceneMaterialExpressionInstruction> instructions,
         ReadOnlyMemory<float4> parameters,
         SceneMaterialExpressionOutputs outputs,
-        ReadOnlyMemory<int> textureIndices)
+        ReadOnlyMemory<int> textureIndices,
+        CompiledMaterialProgram? compiledProgram = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hash);
         if (instructions.IsEmpty || instructions.Length > MaxInstructions)
@@ -169,6 +272,7 @@ public sealed class SceneMaterialExpression
         Parameters = parameters;
         Outputs = outputs;
         TextureIndices = textureIndices;
+        CompiledProgram = compiledProgram;
     }
 
     public string Hash { get; }
@@ -181,6 +285,9 @@ public sealed class SceneMaterialExpression
 
     /// <summary>Scene texture bindings in the material-local table order declared by the IR.</summary>
     public ReadOnlyMemory<int> TextureIndices { get; }
+
+    /// <summary>The canonical straight-line lowering, or null when the bounded VM is required.</summary>
+    public CompiledMaterialProgram? CompiledProgram { get; }
 
     /// <summary>Legacy alias for the first material texture binding.</summary>
     public int TextureIndex => TextureIndices.IsEmpty ? SceneMaterial.NoTexture : TextureIndices.Span[0];

@@ -54,9 +54,209 @@ public partial struct RasterMaterialRegisters
     public float4 R124; public float4 R125; public float4 R126; public float4 R127;
 }
 
+/// <summary>
+/// Buffer-backed parameters for the fixed canonical material topologies. The layout is intentionally
+/// independent of any one renderer so raster previews and path kernels use the same evaluator.
+/// </summary>
+[GpuStruct]
+public partial struct RasterCompiledMaterialProgram
+{
+    public float4 Parameter0;
+    public float4 Parameter1;
+    public float4 Parameter2;
+    public float4 Parameter3;
+    public int Variant;
+    public int Texture0;
+    public int Texture1;
+    public int Texture2;
+    public int Texture3;
+    public int Texture4;
+    public int Channel0;
+    public int Channel1;
+    public int Channel2;
+    public int Channel3;
+    public int Channel4;
+    public int Target;
+    public int Pad0;
+    public int Pad1;
+    public int Pad2;
+    public int Pad3;
+}
+
+/// <summary>Only fields marked present replace the flattened material defaults.</summary>
+[GpuStruct]
+public partial struct RasterCompiledMaterialResult
+{
+    public float3 BaseColor;
+    public int HasBaseColor;
+    public float3 TangentNormal;
+    public int HasNormal;
+    public float Metallic;
+    public float Roughness;
+    public float Alpha;
+    public int HasMetallic;
+    public int HasRoughness;
+    public int HasAlpha;
+    public int Pad0;
+    public int Pad1;
+}
+
 [ShaderLibrary]
 public static class FeatherMaterialExpression
 {
+    /// <summary>
+    /// Executes one of the bounded canonical topology functions. Samples are resolved by the caller
+    /// because shader resources cannot cross a callable boundary; all graph/register addressing was
+    /// resolved by the host compiler.
+    /// </summary>
+    [Callable]
+    public static RasterCompiledMaterialResult EvaluateCompiled(
+        RasterCompiledMaterialProgram program,
+        float4 sample0,
+        float4 sample1,
+        float4 sample2,
+        float4 sample3,
+        float4 sample4)
+    {
+        RasterCompiledMaterialResult result = default;
+        if (program.Variant == 1)
+        {
+            return result;
+        }
+
+        if (program.Variant == 2)
+        {
+            if (program.Texture0 >= 0)
+            {
+                result.BaseColor = sample0.XYZ;
+                result.HasBaseColor = 1;
+            }
+            if (program.Texture1 >= 0)
+            {
+                result.Metallic = Channel(sample1, program.Channel1);
+                result.HasMetallic = 1;
+            }
+            if (program.Texture2 >= 0)
+            {
+                result.Roughness = Channel(sample2, program.Channel2);
+                result.HasRoughness = 1;
+            }
+            if (program.Texture3 >= 0)
+            {
+                result.Alpha = Channel(sample3, program.Channel3);
+                result.HasAlpha = 1;
+            }
+            if (program.Texture4 >= 0)
+            {
+                result.TangentNormal = NormalMap(sample4, program.Parameter0.X);
+                result.HasNormal = 1;
+            }
+            return result;
+        }
+
+        if (program.Variant >= 3 && program.Variant <= 6)
+        {
+            if (program.Texture0 >= 0)
+            {
+                result.BaseColor = sample0.XYZ;
+                result.HasBaseColor = 1;
+            }
+            var value = Channel(sample1, program.Channel1);
+            if (program.Variant == 3) value *= program.Parameter0.X;
+            else if (program.Variant == 4) value += program.Parameter0.X;
+            else if (program.Variant == 5) value = program.Parameter0.X - value;
+            else value = (value * program.Parameter0.X) + program.Parameter0.Y;
+            if (program.Variant != 6 && program.Parameter0.Y > 0.5f)
+            {
+                value = ShaderMath.Saturate(value);
+            }
+            if (program.Target == 1)
+            {
+                result.Metallic = value;
+                result.HasMetallic = 1;
+            }
+            else if (program.Target == 2)
+            {
+                result.Roughness = value;
+                result.HasRoughness = 1;
+            }
+            else
+            {
+                result.Alpha = value;
+                result.HasAlpha = 1;
+            }
+            if (program.Texture4 >= 0)
+            {
+                result.TangentNormal = NormalMap(sample4, program.Parameter1.X);
+                result.HasNormal = 1;
+            }
+            return result;
+        }
+
+        if (program.Variant == 7)
+        {
+            var a = program.Texture0 >= 0 ? sample0 : program.Parameter0;
+            var b = program.Texture1 >= 0 ? sample1 : program.Parameter1;
+            var factor = program.Texture2 >= 0
+                ? Channel(sample2, program.Channel2)
+                : program.Parameter2.X;
+            if (program.Parameter2.Y > 0.5f)
+            {
+                factor = ShaderMath.Saturate(factor);
+            }
+            result.BaseColor = ShaderMath.Lerp(a, b, factor).XYZ;
+            result.HasBaseColor = 1;
+            return result;
+        }
+
+        // The three two-stop ramp variants differ by one fixed interpolation expression. There is no
+        // parameter-table loop and no dynamic register access.
+        if (program.Variant >= 8 && program.Variant <= 10)
+        {
+            var factor = program.Texture0 >= 0
+                ? Channel(sample0, program.Channel0)
+                : program.Parameter0.X;
+            var p0 = program.Parameter3.X;
+            var p1 = program.Parameter3.Y;
+            var color = program.Parameter1;
+            if (factor >= p1)
+            {
+                color = program.Parameter2;
+            }
+            else if (factor >= p0 && program.Variant != 8)
+            {
+                var blend = ShaderMath.Saturate((factor - p0) / ShaderMath.Max(p1 - p0, 1e-6f));
+                if (program.Variant == 10)
+                {
+                    blend = blend * blend * (3.0f - (2.0f * blend));
+                }
+                color = ShaderMath.Lerp(program.Parameter1, program.Parameter2, blend);
+            }
+            result.BaseColor = color.XYZ;
+            result.HasBaseColor = 1;
+        }
+        return result;
+    }
+
+    [Callable]
+    private static float Channel(float4 value, int channel)
+    {
+        if (channel == 1) return value.Y;
+        if (channel == 2) return value.Z;
+        if (channel == 3) return value.W;
+        return value.X;
+    }
+
+    [Callable]
+    private static float3 NormalMap(float4 color, float strength)
+    {
+        var mapped = (color.XYZ * 2.0f) - new float3(1.0f);
+        return ShaderMath.Normalize(ShaderMath.Lerp(
+            new float3(0.0f, 0.0f, 1.0f),
+            mapped,
+            ShaderMath.Max(strength, 0.0f)));
+    }
+
     [Callable]
     public static float4 Evaluate(
         RasterMaterialInstruction instruction,
