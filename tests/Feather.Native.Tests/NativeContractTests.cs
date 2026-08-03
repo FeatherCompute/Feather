@@ -18,6 +18,40 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeRuntimeBilinearlyUpscalesRgba8()
+    {
+        var source = new byte[]
+        {
+            0, 0, 0, 255,
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+            255, 255, 255, 255
+        };
+        var destination = new byte[4 * 4 * 4];
+        var sourceBuffer = Marshal.AllocHGlobal(source.Length);
+        var destinationBuffer = Marshal.AllocHGlobal(destination.Length);
+        try
+        {
+            Marshal.Copy(source, 0, sourceBuffer, source.Length);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_bilinear_upscale_rgba8(
+                sourceBuffer,
+                2,
+                2,
+                destinationBuffer,
+                4,
+                4));
+            Marshal.Copy(destinationBuffer, destination, 0, destination.Length);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(destinationBuffer);
+            Marshal.FreeHGlobal(sourceBuffer);
+        }
+
+        Assert.Equal(new byte[] { 64, 64, 64, 255 }, destination.Skip(20).Take(4));
+    }
+
+    [Fact]
     public void ResultValuesMatchNativeAbiSpecification()
     {
         Assert.Equal(0u, (uint)FeResult.Ok);
