@@ -331,6 +331,15 @@ public static class NativeMethods
     public static extern FeResult fe_texture_generate_mipmaps(FeTextureHandle texture);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_bilinear_upscale_rgba8(
+        IntPtr source,
+        uint source_width,
+        uint source_height,
+        IntPtr destination,
+        uint width,
+        uint height);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_sampler_create(FeContextHandle context, in FeSamplerDesc desc, out FeSamplerHandle out_sampler);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

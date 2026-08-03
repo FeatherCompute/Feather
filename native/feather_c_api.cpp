@@ -4942,6 +4942,8 @@ void download_easygpu_texture(TextureState& texture, GPU::Backend::Backend& back
     texture.device_dirty = false;
 }
 
+bool map_sampler_desc(const FeSamplerDesc& source, GPU::Backend::SamplerDesc* out);
+
 void bind_easygpu_runtime_buffers(const KernelState& kernel, GPU::Kernel::KernelBuildContext& context,
                                   GPU::Backend::Backend& backend) {
     for (const auto& [binding, feather_buffer] : kernel.buffers) {
@@ -4981,8 +4983,15 @@ void bind_easygpu_runtime_textures(const KernelState& kernel, GPU::Kernel::Kerne
             throw std::runtime_error("Kernel references an invalid Feather texture.");
         }
 
-        context.BindRuntimeTexture(binding, ensure_easygpu_texture(texture->second, backend));
-    }
+		context.BindRuntimeTexture(binding, ensure_easygpu_texture(texture->second, backend));
+		if (kernel.samplers.size() == 1) {
+			const auto sampler = g_samplers.find(kernel.samplers.begin()->second);
+			GPU::Backend::SamplerDesc mapped;
+			if (sampler != g_samplers.end() && map_sampler_desc(sampler->second.desc, &mapped)) {
+				context.BindRuntimeTextureSampler(binding, mapped);
+			}
+		}
+	}
 }
 
 void mark_easygpu_writable_textures_dirty(const KernelState& kernel, const GPU::Kernel::KernelBuildContext& context) {
@@ -5381,7 +5390,11 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
         context->SetCachedPipeline(pipeline);
     }
 
-    if (local_context != nullptr && local_context->GetTextureInfos().empty()) {
+    // Runtime texture handles and sampler descriptors are rebound above on every dispatch and
+    // invalidate the context's resource bindings when they change. Keeping the translated context
+    // therefore has the same semantics as rebuilding it, without paying IR lowering and pipeline
+    // lookup costs for every viewport frame.
+    if (local_context != nullptr) {
         auto& cache = g_compute_kernel_caches[kernel_handle];
         cache.context = std::move(local_context);
         context = cache.context.get();
@@ -11767,6 +11780,61 @@ FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture) {
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU texture could not be created for mipmap generation.");
         }
 
+        return ok();
+    });
+}
+
+FE_API FeResult fe_bilinear_upscale_rgba8(const uint8_t* source, uint32_t source_width, uint32_t source_height,
+                                          uint8_t* destination, uint32_t width, uint32_t height) {
+    return protect([&] {
+        if (source == nullptr || destination == nullptr || source_width == 0 || source_height == 0 ||
+            width == 0 || height == 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Bilinear RGBA8 images require data and positive dimensions.");
+        }
+
+        struct HorizontalTap {
+            uint32_t x0;
+            uint32_t x1;
+            uint32_t weight;
+        };
+        std::vector<HorizontalTap> horizontal(width);
+        for (uint32_t x = 0; x < width; ++x) {
+            const float coordinate = ((static_cast<float>(x) + 0.5f) * source_width / width) - 0.5f;
+            const int base = static_cast<int>(std::floor(coordinate));
+            horizontal[x] = {
+                static_cast<uint32_t>(std::clamp(base, 0, static_cast<int>(source_width) - 1)),
+                static_cast<uint32_t>(std::clamp(base + 1, 0, static_cast<int>(source_width) - 1)),
+                static_cast<uint32_t>(std::clamp(
+                    static_cast<int>(std::lround((coordinate - std::floor(coordinate)) * 256.0f)), 0, 256))};
+        }
+
+        for (uint32_t y = 0; y < height; ++y) {
+            const float coordinate = ((static_cast<float>(y) + 0.5f) * source_height / height) - 0.5f;
+            const int base = static_cast<int>(std::floor(coordinate));
+            const auto y0 = static_cast<uint32_t>(std::clamp(base, 0, static_cast<int>(source_height) - 1));
+            const auto y1 = static_cast<uint32_t>(std::clamp(base + 1, 0, static_cast<int>(source_height) - 1));
+            const auto wy = static_cast<uint32_t>(std::clamp(
+                static_cast<int>(std::lround((coordinate - std::floor(coordinate)) * 256.0f)), 0, 256));
+            const auto inverse_y = 256u - wy;
+            for (uint32_t x = 0; x < width; ++x) {
+                const auto tap = horizontal[x];
+                const auto inverse_x = 256u - tap.weight;
+                const size_t offsets[4] = {
+                    (static_cast<size_t>(y0) * source_width + tap.x0) * 4,
+                    (static_cast<size_t>(y0) * source_width + tap.x1) * 4,
+                    (static_cast<size_t>(y1) * source_width + tap.x0) * 4,
+                    (static_cast<size_t>(y1) * source_width + tap.x1) * 4};
+                const auto destination_offset = (static_cast<size_t>(y) * width + x) * 4;
+                for (size_t channel = 0; channel < 4; ++channel) {
+                    const auto lower = source[offsets[0] + channel] * inverse_x
+                                     + source[offsets[1] + channel] * tap.weight;
+                    const auto upper = source[offsets[2] + channel] * inverse_x
+                                     + source[offsets[3] + channel] * tap.weight;
+                    destination[destination_offset + channel] = static_cast<uint8_t>(
+                        ((lower * inverse_y) + (upper * wy) + 32768u) >> 16);
+                }
+            }
+        }
         return ok();
     });
 }

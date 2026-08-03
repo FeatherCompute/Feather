@@ -236,7 +236,8 @@ public interface IRenderContextBackend
     /// </summary>
     RenderPurpose Purpose => RenderPurpose.Interactive;
 
-    /// <summary>Whether the current View is executing progressive iterations.</summary>
+    /// <summary>Whether the current View is executing scheduled accumulation iterations.</summary>
+    /// <remarks>This includes progressive viewport accumulation and bounded offline render jobs.</remarks>
     bool IsProgressive => false;
 
     /// <summary>Zero-based progressive iteration index before the current pass executes.</summary>
@@ -437,7 +438,8 @@ public sealed class RenderContext
     /// </summary>
     public bool IsInteractive => Backend.Purpose == RenderPurpose.Interactive;
 
-    /// <summary>Whether the current View is executing progressive iterations.</summary>
+    /// <summary>Whether the current View is executing scheduled accumulation iterations.</summary>
+    /// <remarks>This includes progressive viewport accumulation and bounded offline render jobs.</remarks>
     public bool IsProgressive => Backend.IsProgressive;
 
     /// <summary>Zero-based scheduler iteration before this execution.</summary>
