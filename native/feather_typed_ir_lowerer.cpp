@@ -36,7 +36,9 @@ constexpr uint8_t kTypeResourceWrapper = 6;
 constexpr uint8_t kTypeVoid = 7;
 
 constexpr uint32_t kTypeResourceBuffer = 0;
-constexpr uint32_t kTypeResourceRead = 0;
+constexpr uint32_t kTypeResourceTexture2D = 1;
+constexpr uint32_t kTypeResourceTexture3D = 2;
+constexpr uint32_t kTypeResourceSampler = 3;
 
 constexpr uint8_t kPrimitiveBool = 0;
 constexpr uint8_t kPrimitiveInt = 1;
@@ -266,7 +268,7 @@ public:
             static_cast<uint32_t>(inputs_.group_z),
             DimensionFor(entry.kind));
 
-        if (!RegisterResources() || !ResolveCallableBufferBindings() || !RegisterCallables() ||
+        if (!RegisterResources() || !ResolveCallableResourceBindings() || !RegisterCallables() ||
             !EmitBoundsCheckGuard(entry.kind) ||
             !LowerStatement(entry.body_statement_index)) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
@@ -395,13 +397,9 @@ private:
                 return Fail("hidden logical dispatch-size data is missing");
             }
 
-            logical_size_resource_[axis] = builder_.AddPushConstant(
-                UINT32_MAX - axis,
-                GPU::IR::Type::Int(),
-                "__feather_dispatch_size_" + std::to_string(axis),
-                values[axis],
-                sizeof(int32_t),
-                alignof(int32_t));
+            logical_size_resource_[axis] = builder_.AddPushConstant(UINT32_MAX - axis, GPU::IR::Type::Int(),
+                                                                    "__feather_dispatch_size_" + std::to_string(axis),
+                                                                    values[axis], sizeof(int32_t), alignof(int32_t));
             if (logical_size_resource_[axis] == GPU::IR::InvalidResourceId) {
                 return Fail("EasyGPU rejected hidden logical dispatch-size push constants");
             }
@@ -410,42 +408,48 @@ private:
         return true;
     }
 
-    bool IsReadOnlyBufferType(uint32_t type_id) const {
+    bool IsSupportedCallableResourceType(uint32_t type_id) const {
         if (type_id >= typed_.types.size()) {
             return false;
         }
 
         const auto& type = typed_.types[type_id];
-        if (type.kind != kTypeResourceWrapper || type.a != kTypeResourceBuffer || type.c != kTypeResourceRead ||
-            type.b >= typed_.types.size()) {
+        if (type.kind != kTypeResourceWrapper || type.b >= typed_.types.size()) {
             return false;
         }
 
-        const auto element_type = ToModuleType(type.b);
-        switch (element_type.kind) {
-        case GPU::IR::Type::Kind::Bool:
-        case GPU::IR::Type::Kind::Int:
-        case GPU::IR::Type::Kind::UInt:
-        case GPU::IR::Type::Kind::Float:
-        case GPU::IR::Type::Kind::Bool2:
-        case GPU::IR::Type::Kind::Bool3:
-        case GPU::IR::Type::Kind::Bool4:
-        case GPU::IR::Type::Kind::Int2:
-        case GPU::IR::Type::Kind::Int3:
-        case GPU::IR::Type::Kind::Int4:
-        case GPU::IR::Type::Kind::UInt2:
-        case GPU::IR::Type::Kind::UInt3:
-        case GPU::IR::Type::Kind::UInt4:
-        case GPU::IR::Type::Kind::Float2:
-        case GPU::IR::Type::Kind::Float3:
-        case GPU::IR::Type::Kind::Float4:
+        switch (type.a) {
+        case kTypeResourceBuffer:
+        case kTypeResourceTexture2D:
+        case kTypeResourceTexture3D:
+            return ToModuleType(type.b).IsValid();
+        case kTypeResourceSampler:
             return true;
         default:
             return false;
         }
     }
 
-    std::optional<GPU::IR::ResourceId> ResolveBufferReference(uint32_t expression_id) const {
+    bool ResourceMatchesType(const RegisteredResource& resource, uint32_t type_id) const {
+        if (!IsSupportedCallableResourceType(type_id)) {
+            return false;
+        }
+
+        const auto& type = typed_.types[type_id];
+        const auto expected_kind = type.a == kTypeResourceBuffer      ? kResourceKindBuffer
+                                   : type.a == kTypeResourceTexture2D ? kResourceKindTexture2D
+                                   : type.a == kTypeResourceTexture3D ? kResourceKindTexture3D
+                                                                      : kResourceKindSampler;
+        const auto expected_access = type.c == 0   ? kAccessRead
+                                     : type.c == 1 ? kAccessWrite
+                                     : type.c == 2 ? static_cast<uint8_t>(kAccessRead | kAccessWrite)
+                                                   : kAccessSample;
+        return resource.kind == expected_kind && resource.access == expected_access;
+    }
+
+    std::optional<RegisteredResource>
+    ResolveResourceReference(uint32_t expression_id,
+                             const std::unordered_map<std::string, RegisteredResource>& active_resources) const {
         if (expression_id >= typed_.expressions.size()) {
             return std::nullopt;
         }
@@ -460,68 +464,270 @@ private:
             return std::nullopt;
         }
 
-        if (const auto active = active_buffer_parameters_.find(*name); active != active_buffer_parameters_.end()) {
+        if (const auto active = active_resources.find(*name); active != active_resources.end()) {
             return active->second;
         }
 
-        const auto resource = resources_by_name_.find(*name);
-        if (resource == resources_by_name_.end()) {
-            return std::nullopt;
-        }
-
         const auto info = resource_infos_by_name_.find(*name);
-        return info != resource_infos_by_name_.end() && info->second.kind == kResourceKindBuffer &&
-                       info->second.access == kAccessRead
-                   ? std::optional<GPU::IR::ResourceId>{resource->second}
-                   : std::nullopt;
+        return info == resource_infos_by_name_.end() ? std::nullopt : std::optional<RegisteredResource>{info->second};
     }
 
-    bool ResolveCallableBufferBindings() {
-        for (const auto& expression : typed_.expressions) {
-            if (expression.kind != kExpressionCallableCall) {
-                continue;
+    std::optional<RegisteredResource> ResolveResourceReference(uint32_t expression_id) const {
+        return ResolveResourceReference(expression_id, active_resource_parameters_);
+    }
+
+    bool CollectCallableCallsFromExpression(uint32_t expression_id, std::vector<uint32_t>& calls,
+                                            std::unordered_set<uint32_t>& seen_expressions,
+                                            std::unordered_set<uint32_t>& seen_lvalues) const {
+        if (expression_id == NoIndex)
+            return true;
+        if (expression_id >= typed_.expressions.size())
+            return false;
+        if (!seen_expressions.insert(expression_id).second)
+            return true;
+        const auto& expression = typed_.expressions[expression_id];
+        if (expression.kind == kExpressionCallableCall)
+            calls.push_back(expression_id);
+
+        auto expression_child = [&](uint32_t child) {
+            return CollectCallableCallsFromExpression(child, calls, seen_expressions, seen_lvalues);
+        };
+        auto lvalue_child = [&](uint32_t child) {
+            return CollectCallableCallsFromLValue(child, calls, seen_expressions, seen_lvalues);
+        };
+        auto argument_children = [&]() {
+            if (expression.argument_count == 0)
+                return expression.first_argument == NoIndex;
+            if (expression.first_argument == NoIndex || expression.first_argument > typed_.arguments.size() ||
+                expression.argument_count > typed_.arguments.size() - expression.first_argument)
+                return false;
+            for (uint32_t i = 0; i < expression.argument_count; ++i) {
+                if (!expression_child(typed_.arguments[expression.first_argument + i]))
+                    return false;
             }
+            return true;
+        };
 
-            const auto* raw_name = GetString(expression.name_id);
-            const auto callable = raw_name == nullptr ? typed_.callables.end() : typed_.callables.find(*raw_name);
-            if (callable == typed_.callables.end() || callable->second.function_index >= typed_.functions.size()) {
-                return Fail("callable buffer binding references an unknown callable");
+        switch (expression.kind) {
+        case kExpressionLiteral:
+        case kExpressionLocal:
+        case kExpressionParameter:
+        case kExpressionBuiltin:
+        case kExpressionPushConstant:
+            return true;
+        case kExpressionField:
+        case kExpressionResourceElement:
+        case kExpressionUnary:
+        case kExpressionConversion:
+        case kExpressionSwizzle:
+        case kExpressionMemberAccess:
+        case kExpressionSharedMemoryElement:
+            return expression_child(expression.a);
+        case kExpressionBinary:
+        case kExpressionComparison:
+        case kExpressionLogical:
+        case kExpressionIndexAccess:
+        case kExpressionMatrixColumn:
+            return expression_child(expression.a) && expression_child(expression.b);
+        case kExpressionConditional:
+            return expression_child(expression.a) && expression_child(expression.b) && expression_child(expression.c);
+        case kExpressionConstructor:
+        case kExpressionIntrinsic:
+        case kExpressionCallableCall:
+        case kExpressionTextureSample:
+            return argument_children();
+        case kExpressionAtomic:
+            return lvalue_child(expression.a) && argument_children();
+        default:
+            return false;
+        }
+    }
+
+    bool CollectCallableCallsFromLValue(uint32_t lvalue_id, std::vector<uint32_t>& calls,
+                                        std::unordered_set<uint32_t>& seen_expressions,
+                                        std::unordered_set<uint32_t>& seen_lvalues) const {
+        if (lvalue_id == NoIndex)
+            return true;
+        if (lvalue_id >= typed_.lvalues.size())
+            return false;
+        if (!seen_lvalues.insert(lvalue_id).second)
+            return true;
+        const auto& lvalue = typed_.lvalues[lvalue_id];
+        auto expression_child = [&](uint32_t child) {
+            return CollectCallableCallsFromExpression(child, calls, seen_expressions, seen_lvalues);
+        };
+        auto lvalue_child = [&](uint32_t child) {
+            return CollectCallableCallsFromLValue(child, calls, seen_expressions, seen_lvalues);
+        };
+        switch (lvalue.kind) {
+        case kLValueLocal:
+        case kLValueParameter:
+            return true;
+        case kLValueField:
+            return lvalue.a == NoIndex || lvalue_child(lvalue.a);
+        case kLValueResourceElement:
+        case kLValueSwizzle:
+        case kLValueSharedMemoryElement:
+            return expression_child(lvalue.a);
+        case kLValueMemberAccess:
+            return lvalue_child(lvalue.a);
+        case kLValueIndexAccess:
+            return lvalue_child(lvalue.a) && expression_child(lvalue.b);
+        case kLValueMatrixColumn:
+            return expression_child(lvalue.a) && expression_child(lvalue.b);
+        default:
+            return false;
+        }
+    }
+
+    bool CollectCallableCallsFromStatement(uint32_t statement_id, std::vector<uint32_t>& calls,
+                                           std::unordered_set<uint32_t>& seen_statements,
+                                           std::unordered_set<uint32_t>& seen_expressions,
+                                           std::unordered_set<uint32_t>& seen_lvalues) const {
+        if (statement_id == NoIndex)
+            return true;
+        if (statement_id >= typed_.statements.size())
+            return false;
+        if (!seen_statements.insert(statement_id).second)
+            return true;
+        const auto& statement = typed_.statements[statement_id];
+        auto stmt = [&](uint32_t child) {
+            return CollectCallableCallsFromStatement(child, calls, seen_statements, seen_expressions, seen_lvalues);
+        };
+        auto expr = [&](uint32_t child) {
+            return CollectCallableCallsFromExpression(child, calls, seen_expressions, seen_lvalues);
+        };
+        auto lvalue = [&](uint32_t child) {
+            return CollectCallableCallsFromLValue(child, calls, seen_expressions, seen_lvalues);
+        };
+        switch (statement.kind) {
+        case kStatementBlock:
+            if (statement.child_count == 0)
+                return statement.first_child == NoIndex;
+            if (statement.first_child == NoIndex || statement.first_child > typed_.children.size() ||
+                statement.child_count > typed_.children.size() - statement.first_child)
+                return false;
+            for (uint32_t i = 0; i < statement.child_count; ++i) {
+                if (!stmt(typed_.children[statement.first_child + i]))
+                    return false;
             }
+            return true;
+        case kStatementLocalDeclaration:
+            return statement.a == NoIndex || expr(statement.a);
+        case kStatementAssignment:
+        case kStatementCompoundAssignment:
+            return lvalue(statement.a) && expr(statement.b);
+        case kStatementIf:
+            return expr(statement.a) && stmt(statement.b) && (statement.c == NoIndex || stmt(statement.c));
+        case kStatementFor:
+            return (statement.a == NoIndex || stmt(statement.a)) && (statement.b == NoIndex || expr(statement.b)) &&
+                   (statement.c == NoIndex || stmt(statement.c)) && stmt(statement.op);
+        case kStatementWhile:
+            return expr(statement.a) && stmt(statement.b);
+        case kStatementDoWhile:
+            return stmt(statement.a) && expr(statement.b);
+        case kStatementReturn:
+            return statement.a == NoIndex || expr(statement.a);
+        case kStatementExpression:
+            return expr(statement.a);
+        case kStatementIncrementDecrement:
+            return lvalue(statement.a);
+        case kStatementBreak:
+        case kStatementContinue:
+        case kStatementBarrier:
+        case kStatementSharedMemoryDeclaration:
+            return true;
+        default:
+            return false;
+        }
+    }
 
-            const auto& function = typed_.functions[callable->second.function_index];
-            if (function.parameter_count != expression.argument_count ||
-                (function.parameter_count > 0 &&
-                 (function.first_parameter == NoIndex || expression.first_argument == NoIndex ||
-                  function.first_parameter > typed_.parameters.size() ||
-                  function.parameter_count > typed_.parameters.size() - function.first_parameter ||
-                  expression.first_argument > typed_.arguments.size() ||
-                  expression.argument_count > typed_.arguments.size() - expression.first_argument))) {
-                return Fail("callable buffer binding has an invalid parameter or argument range");
+    bool ResolveCallableResourceBindings() {
+        std::unordered_map<uint32_t, std::vector<uint32_t>> calls_by_function;
+        for (uint32_t function_id = 0; function_id < typed_.functions.size(); ++function_id) {
+            std::unordered_set<uint32_t> seen_statements;
+            std::unordered_set<uint32_t> seen_expressions;
+            std::unordered_set<uint32_t> seen_lvalues;
+            if (!CollectCallableCallsFromStatement(typed_.functions[function_id].body_statement_index,
+                                                   calls_by_function[function_id], seen_statements, seen_expressions,
+                                                   seen_lvalues)) {
+                return Fail("callable resource binding could not traverse a function body");
             }
+        }
 
-            for (uint32_t i = 0; i < function.parameter_count; ++i) {
-                const auto& parameter = typed_.parameters[function.first_parameter + i];
-                if (parameter.type_id >= typed_.types.size() ||
-                    typed_.types[parameter.type_id].kind != kTypeResourceWrapper) {
-                    continue;
-                }
-                if (!IsReadOnlyBufferType(parameter.type_id) || parameter.direction != 0) {
-                    return Fail("callable resource parameters support only input ReadOnlyBuffer<T> with scalar or "
-                                "vector elements");
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (uint32_t owner_id = 0; owner_id < typed_.functions.size(); ++owner_id) {
+                std::unordered_map<std::string, RegisteredResource> owner_resources;
+                const auto& owner = typed_.functions[owner_id];
+                if (owner.kind == kFunctionCallable) {
+                    const auto* owner_name = GetString(owner.mangled_name_id);
+                    if (owner_name == nullptr)
+                        return false;
+                    for (uint32_t i = 0; i < owner.parameter_count; ++i) {
+                        const auto& parameter = typed_.parameters[owner.first_parameter + i];
+                        const auto* parameter_name = GetString(parameter.name_id);
+                        const auto binding = callable_resource_bindings_[*owner_name].find(i);
+                        if (parameter_name != nullptr && binding != callable_resource_bindings_[*owner_name].end()) {
+                            owner_resources[*parameter_name] = binding->second;
+                        }
+                    }
                 }
 
-                const auto argument_id = typed_.arguments[expression.first_argument + i];
-                const auto resource = ResolveBufferReference(argument_id);
-                if (!resource.has_value()) {
-                    continue;
-                }
+                for (const auto expression_id : calls_by_function[owner_id]) {
+                    const auto& expression = typed_.expressions[expression_id];
 
-                auto& bindings = callable_buffer_bindings_[*raw_name];
-                const auto existing = bindings.find(i);
-                if (existing != bindings.end() && existing->second != *resource) {
-                    return Fail("a read-only buffer callable parameter is called with multiple buffer bindings");
+                    const auto* raw_name = GetString(expression.name_id);
+                    const auto callable =
+                        raw_name == nullptr ? typed_.callables.end() : typed_.callables.find(*raw_name);
+                    if (callable == typed_.callables.end() ||
+                        callable->second.function_index >= typed_.functions.size()) {
+                        return Fail("callable resource binding references an unknown callable");
+                    }
+
+                    const auto& function = typed_.functions[callable->second.function_index];
+                    if (function.parameter_count != expression.argument_count ||
+                        (function.parameter_count > 0 &&
+                         (function.first_parameter == NoIndex || expression.first_argument == NoIndex ||
+                          function.first_parameter > typed_.parameters.size() ||
+                          function.parameter_count > typed_.parameters.size() - function.first_parameter ||
+                          expression.first_argument > typed_.arguments.size() ||
+                          expression.argument_count > typed_.arguments.size() - expression.first_argument))) {
+                        return Fail("callable resource binding has an invalid parameter or argument range");
+                    }
+
+                    for (uint32_t i = 0; i < function.parameter_count; ++i) {
+                        const auto& parameter = typed_.parameters[function.first_parameter + i];
+                        if (parameter.type_id >= typed_.types.size() ||
+                            typed_.types[parameter.type_id].kind != kTypeResourceWrapper) {
+                            continue;
+                        }
+                        if (!IsSupportedCallableResourceType(parameter.type_id) || parameter.direction != 0) {
+                            return Fail(
+                                "callable resource parameters require a supported input buffer, texture, or sampler");
+                        }
+
+                        const auto argument_id = typed_.arguments[expression.first_argument + i];
+                        const auto resource = ResolveResourceReference(argument_id, owner_resources);
+                        if (!resource.has_value()) {
+                            continue;
+                        }
+                        if (!ResourceMatchesType(*resource, parameter.type_id)) {
+                            return Fail("callable resource argument kind or access does not match its parameter");
+                        }
+
+                        auto& bindings = callable_resource_bindings_[*raw_name];
+                        const auto existing = bindings.find(i);
+                        if (existing != bindings.end() && existing->second.id != resource->id) {
+                            return Fail("a callable resource parameter is called with multiple resource bindings");
+                        }
+                        if (existing == bindings.end()) {
+                            bindings[i] = *resource;
+                            changed = true;
+                        }
+                    }
                 }
-                bindings[i] = *resource;
             }
         }
 
@@ -534,9 +740,9 @@ private:
                 const auto& parameter = typed_.parameters[function.first_parameter + i];
                 if (parameter.type_id < typed_.types.size() &&
                     typed_.types[parameter.type_id].kind == kTypeResourceWrapper &&
-                    callable_buffer_bindings_[callable.first].find(i) ==
-                        callable_buffer_bindings_[callable.first].end()) {
-                    return Fail("read-only buffer callable parameters must resolve to a kernel buffer binding");
+                    callable_resource_bindings_[callable.first].find(i) ==
+                        callable_resource_bindings_[callable.first].end()) {
+                    return Fail("callable resource parameters must resolve to a kernel resource binding");
                 }
             }
         }
@@ -589,7 +795,7 @@ private:
             auto previous_declared_locals = declared_locals_;
             auto previous_local_glsl_names = local_glsl_names_;
             auto previous_shared_values = shared_values_;
-            auto previous_active_buffer_parameters = active_buffer_parameters_;
+            auto previous_active_resource_parameters = active_resource_parameters_;
             std::vector<GPU::IR::CallableParameter> parameters;
             parameters.reserve(function.parameter_count);
 
@@ -605,14 +811,14 @@ private:
                 const auto* parameter_name = GetString(parameter.name_id);
                 if (parameter.type_id < typed_.types.size() &&
                     typed_.types[parameter.type_id].kind == kTypeResourceWrapper) {
-                    const auto binding = callable_buffer_bindings_[*raw_name].find(i);
+                    const auto binding = callable_resource_bindings_[*raw_name].find(i);
                     if (parameter_name == nullptr || parameter_name->empty() ||
-                        !IsReadOnlyBufferType(parameter.type_id) || parameter.direction != 0 ||
-                        binding == callable_buffer_bindings_[*raw_name].end()) {
+                        !IsSupportedCallableResourceType(parameter.type_id) || parameter.direction != 0 ||
+                        binding == callable_resource_bindings_[*raw_name].end()) {
                         return false;
                     }
 
-                    active_buffer_parameters_[*parameter_name] = binding->second;
+                    active_resource_parameters_[*parameter_name] = binding->second;
                     continue;
                 }
 
@@ -640,7 +846,7 @@ private:
             declared_locals_ = std::move(previous_declared_locals);
             local_glsl_names_ = std::move(previous_local_glsl_names);
             shared_values_ = std::move(previous_shared_values);
-            active_buffer_parameters_ = std::move(previous_active_buffer_parameters);
+            active_resource_parameters_ = std::move(previous_active_resource_parameters);
             if (!body.has_value()) {
                 return false;
             }
@@ -1663,8 +1869,13 @@ private:
             return InvalidValue("resource element expression has an invalid resource-name string id");
         }
 
-        const auto resource = resources_by_name_.find(*name);
-        if (resource == resources_by_name_.end()) {
+        const auto active = active_resource_parameters_.find(*name);
+        const auto info = active != active_resource_parameters_.end()
+            ? std::optional<RegisteredResource>{active->second}
+            : resource_infos_by_name_.find(*name) != resource_infos_by_name_.end()
+                ? std::optional<RegisteredResource>{resource_infos_by_name_.find(*name)->second}
+                : std::nullopt;
+        if (!info.has_value()) {
             return InvalidValue("resource element expression references unknown resource '" + *name + "'");
         }
 
@@ -1673,13 +1884,11 @@ private:
             return GPU::IR::InvalidValueId;
         }
 
-        const auto info = resource_infos_by_name_.find(*name);
-        if (info != resource_infos_by_name_.end() &&
-            (info->second.kind == kResourceKindTexture2D || info->second.kind == kResourceKindTexture3D)) {
-            return BuildTextureElement(info->second.id, index);
+        if (info->kind == kResourceKindTexture2D || info->kind == kResourceKindTexture3D) {
+            return BuildTextureElement(info->id, index);
         }
 
-        return builder_.ResourceElement(resource->second, index);
+        return builder_.ResourceElement(info->id, index);
     }
 
     GPU::IR::ValueId BuildFieldReference(const Expression& expression) {
@@ -2012,10 +2221,10 @@ private:
             const auto& parameter = typed_.parameters[function.first_parameter + i];
             if (parameter.type_id < typed_.types.size() &&
                 typed_.types[parameter.type_id].kind == kTypeResourceWrapper) {
-                const auto resource = ResolveBufferReference(argument_id);
-                const auto binding = callable_buffer_bindings_[*raw_name].find(i);
-                if (!resource.has_value() || binding == callable_buffer_bindings_[*raw_name].end() ||
-                    *resource != binding->second) {
+                const auto resource = ResolveResourceReference(argument_id);
+                const auto binding = callable_resource_bindings_[*raw_name].find(i);
+                if (!resource.has_value() || binding == callable_resource_bindings_[*raw_name].end() ||
+                    resource->id != binding->second.id) {
                     return GPU::IR::InvalidValueId;
                 }
                 continue;
@@ -2091,8 +2300,7 @@ private:
         const auto instance = BuildExpression(expression.a);
         const auto result_type = MemberAccessResultType(expression);
         const auto* member = GetString(expression.name_id);
-        if (instance == GPU::IR::InvalidValueId || !result_type.IsValid() ||
-            member == nullptr || member->empty()) {
+        if (instance == GPU::IR::InvalidValueId || !result_type.IsValid() || member == nullptr || member->empty()) {
             return GPU::IR::InvalidValueId;
         }
 
@@ -2113,8 +2321,13 @@ private:
             return GPU::IR::InvalidValueId;
         }
 
-        if (const auto resource = ResolveBufferReference(expression.a); resource.has_value()) {
-            return builder_.ResourceElement(*resource, index);
+        if (const auto resource = ResolveResourceReference(expression.a); resource.has_value()) {
+            if (resource->kind == kResourceKindBuffer) {
+                return builder_.ResourceElement(resource->id, index);
+            }
+            if (resource->kind == kResourceKindTexture2D || resource->kind == kResourceKindTexture3D) {
+                return BuildTextureElement(resource->id, index);
+            }
         }
 
         const auto instance = BuildExpression(expression.a);
@@ -2210,6 +2423,11 @@ private:
             return std::nullopt;
         }
 
+        const auto active = active_resource_parameters_.find(*name);
+        if (active != active_resource_parameters_.end()) {
+            return active->second;
+        }
+
         const auto found = resource_infos_by_name_.find(*name);
         return found == resource_infos_by_name_.end() ? std::nullopt : std::optional<RegisteredResource>(found->second);
     }
@@ -2295,8 +2513,13 @@ private:
             return InvalidValue("resource l-value has an invalid resource-name string id");
         }
 
-        const auto resource = resources_by_name_.find(*name);
-        if (resource == resources_by_name_.end()) {
+        const auto active = active_resource_parameters_.find(*name);
+        const auto info = active != active_resource_parameters_.end()
+                              ? std::optional<RegisteredResource>{active->second}
+                          : resource_infos_by_name_.find(*name) != resource_infos_by_name_.end()
+                              ? std::optional<RegisteredResource>{resource_infos_by_name_.find(*name)->second}
+                              : std::nullopt;
+        if (!info.has_value()) {
             return InvalidValue("resource l-value references unknown resource '" + *name + "'");
         }
 
@@ -2305,13 +2528,32 @@ private:
             return GPU::IR::InvalidValueId;
         }
 
-        const auto info = resource_infos_by_name_.find(*name);
-        if (info != resource_infos_by_name_.end() &&
-            (info->second.kind == kResourceKindTexture2D || info->second.kind == kResourceKindTexture3D)) {
-            return BuildTextureElement(info->second.id, index);
+        if (info->kind == kResourceKindTexture2D || info->kind == kResourceKindTexture3D) {
+            return BuildTextureElement(info->id, index);
         }
 
-        return builder_.ResourceElement(resource->second, index);
+        return builder_.ResourceElement(info->id, index);
+    }
+
+    std::optional<RegisteredResource> ResolveResourceLValue(uint32_t lvalue_id) const {
+        if (lvalue_id >= typed_.lvalues.size()) {
+            return std::nullopt;
+        }
+        const auto& lvalue = typed_.lvalues[lvalue_id];
+        if (lvalue.kind != kLValueLocal && lvalue.kind != kLValueParameter) {
+            return std::nullopt;
+        }
+        const auto* name = GetString(lvalue.name_id);
+        if (name == nullptr) {
+            return std::nullopt;
+        }
+        const auto active = active_resource_parameters_.find(*name);
+        if (active != active_resource_parameters_.end()) {
+            return active->second;
+        }
+        const auto resource = resource_infos_by_name_.find(*name);
+        return resource == resource_infos_by_name_.end() ? std::nullopt
+                                                         : std::optional<RegisteredResource>{resource->second};
     }
 
     GPU::IR::ValueId BuildSharedMemoryLValueAddress(const LValue& lvalue) {
@@ -2338,8 +2580,7 @@ private:
         const auto vector = BuildExpression(lvalue.a);
         const auto type = ToModuleType(lvalue.type_id);
         const auto* components = GetString(lvalue.name_id);
-        if (vector == GPU::IR::InvalidValueId || !type.IsValid() ||
-            components == nullptr || components->empty()) {
+        if (vector == GPU::IR::InvalidValueId || !type.IsValid() || components == nullptr || components->empty()) {
             return InvalidValue("swizzle l-value has invalid vector, result type, or component string");
         }
 
@@ -2353,6 +2594,20 @@ private:
     }
 
     GPU::IR::ValueId BuildIndexLValueAddress(const LValue& lvalue) {
+        if (const auto resource = ResolveResourceLValue(lvalue.a); resource.has_value()) {
+            const auto index = BuildExpression(lvalue.b);
+            if (index == GPU::IR::InvalidValueId) {
+                return GPU::IR::InvalidValueId;
+            }
+            if (resource->kind == kResourceKindBuffer) {
+                return builder_.ResourceElement(resource->id, index);
+            }
+            if (resource->kind == kResourceKindTexture2D || resource->kind == kResourceKindTexture3D) {
+                return BuildTextureElement(resource->id, index);
+            }
+            return GPU::IR::InvalidValueId;
+        }
+
         const auto instance = BuildLValueRead(lvalue.a);
         const auto index = BuildExpression(lvalue.b);
         const auto type = ToModuleType(lvalue.type_id);
@@ -3040,26 +3295,23 @@ private:
     std::unordered_map<std::string, std::string> local_glsl_names_;
     std::unordered_set<std::string> used_glsl_names_;
     std::unordered_map<std::string, std::string> callable_names_;
-    std::unordered_map<std::string, std::unordered_map<uint32_t, GPU::IR::ResourceId>> callable_buffer_bindings_;
-    std::unordered_map<std::string, GPU::IR::ResourceId> active_buffer_parameters_;
+    std::unordered_map<std::string, std::unordered_map<uint32_t, RegisteredResource>> callable_resource_bindings_;
+    std::unordered_map<std::string, RegisteredResource> active_resource_parameters_;
     struct SharedMemoryInfo {
         GPU::IR::Type type;
         std::string glsl_name;
     };
     std::unordered_map<std::string, SharedMemoryInfo> shared_values_;
-    std::array<GPU::IR::ResourceId, 3> logical_size_resource_{
-        GPU::IR::InvalidResourceId,
-        GPU::IR::InvalidResourceId,
-        GPU::IR::InvalidResourceId
-    };
+    std::array<GPU::IR::ResourceId, 3> logical_size_resource_{GPU::IR::InvalidResourceId, GPU::IR::InvalidResourceId,
+                                                              GPU::IR::InvalidResourceId};
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;
 };
 
 } // namespace
 
-std::unique_ptr<GPU::IR::Module> TryLowerToEasyGpuModule(
-    const Module& typed, const LoweringInputs& inputs, std::string* error) {
+std::unique_ptr<GPU::IR::Module> TryLowerToEasyGpuModule(const Module& typed, const LoweringInputs& inputs,
+                                                         std::string* error) {
     if (error != nullptr) {
         error->clear();
     }

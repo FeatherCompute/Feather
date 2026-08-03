@@ -17,7 +17,7 @@ internal sealed record SceneSnapshot(
     private const int MinimumSchemaVersion = 1;
     private const int CurrentSchemaVersion = 2;
     private const int MaximumMetadataLength = 64 * 1024 * 1024;
-    private const int MaximumPayloadLength = 1024 * 1024 * 1024;
+    private const long MaximumPayloadLength = 1536L * 1024 * 1024;
 
     public static SceneSnapshot Load(string path)
     {

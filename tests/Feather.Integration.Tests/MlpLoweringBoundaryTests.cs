@@ -9,10 +9,9 @@ namespace Feather.Integration.Tests;
 /// Pins the <c>[Callable]</c> resource-parameter boundary that shapes how MLP inference is exposed.
 /// </summary>
 /// <remarks>
-/// Read-only scalar and vector buffers lower by specializing the callable's resource access to the bound
-/// SSBO. Writable buffers remain outside the phase-1 subset. <c>MlpShader</c> still exposes layout
-/// arithmetic and inference still ships as <see cref="Feather.NN.MlpInference3To1Kernel" /> until that
-/// API is deliberately consolidated.
+/// Buffer parameters lower by specializing the callable's resource access to the bound SSBO.
+/// <c>MlpShader</c> still exposes layout arithmetic and inference still ships as
+/// <see cref="Feather.NN.MlpInference3To1Kernel" /> until that API is deliberately consolidated.
 /// </remarks>
 public class MlpLoweringBoundaryTests
 {
@@ -36,11 +35,12 @@ public class MlpLoweringBoundaryTests
     }
 
     [Fact]
-    public void ReadWriteBufferCallableParametersDoNotLower()
+    public void ReadWriteBufferCallableParametersLowerAsGlobalResourceAccessors()
     {
-        var ex = Assert.Throws<FeatherNativeException>(ShaderInspection.GetGLSL<CallableReadWriteBufferProbeKernel>);
+        var glsl = ShaderInspection.GetGLSL<CallableReadWriteBufferProbeKernel>();
 
-        Assert.Contains("typed IR", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("IntoReadWriteBuffer", glsl, StringComparison.Ordinal);
+        Assert.Contains("fe_0[", glsl, StringComparison.Ordinal);
     }
 }
 
@@ -65,7 +65,7 @@ public static class CallableBoundaryProbeLibrary
         return source[index];
     }
 
-    /// <summary>A callable taking a read-write buffer, which does not lower.</summary>
+    /// <summary>A callable taking a read-write buffer, specialized to its global SSBO.</summary>
     /// <param name="destination">The buffer to write.</param>
     /// <param name="index">The element to write.</param>
     /// <param name="value">The value to store.</param>

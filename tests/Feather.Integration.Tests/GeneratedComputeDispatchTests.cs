@@ -1697,6 +1697,115 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void DispatchExecutesCallableWriteThroughReadWriteBufferAndCallerObservesStore()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var input = GPU.CreateBuffer<float>([2, 4, 6, 8]);
+            using var output = GPU.CreateBuffer<float>(4);
+
+            var glsl = ShaderInspection.GetGLSL<ReadWriteBufferCallableKernel>();
+            var path = DispatchAndGetPath(
+                new ReadWriteBufferCallableKernel(input.AsReadOnly(), output.AsReadWrite()),
+                4);
+
+            Assert.Contains("StoreScaled", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("destination[]", glsl, StringComparison.Ordinal);
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([7, 13, 19, 25], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesGenericGpuStructCallableWithReadWriteBufferArgument()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var writers = GPU.CreateBuffer<MonoBufferWriter>(
+            [
+                new MonoBufferWriter(2),
+                new MonoBufferWriter(3),
+                new MonoBufferWriter(-1),
+                new MonoBufferWriter(0.5f)
+            ]);
+            using var input = GPU.CreateBuffer<float>([5, 5, 5, 8]);
+            using var output = GPU.CreateBuffer<float>(4);
+
+            var glsl = ShaderInspection.GetGLSL<GenericBufferWriterKernel>();
+            var path = DispatchAndGetPath(new GenericBufferWriterKernel(
+                writers.AsReadOnly(), input.AsReadOnly(), output.AsReadWrite()), 4);
+
+            Assert.Contains("MonoBufferWriterOps_Write_T_global__Feather_Integration_Tests_MonoBufferWriter", glsl, StringComparison.Ordinal);
+            Assert.Contains("MonoBufferWriter_Write", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("IMonoBufferWriter", glsl, StringComparison.Ordinal);
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([10, 15, -5, 4], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesTextureSamplingCallableWithSpecializedTextureAndSampler()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.Sampled);
+            using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+            using var output = GPU.CreateBuffer<float>(1);
+            texture.Upload([new Rgba32(128, 0, 0, 255)]);
+
+            var glsl = ShaderInspection.GetGLSL<TextureCallableKernel>();
+            var path = DispatchAndGetPath(
+                new TextureCallableKernel(texture.AsSampled(), sampler, output.AsReadWrite()),
+                1);
+
+            Assert.Contains("SampleRed", glsl, StringComparison.Ordinal);
+            Assert.Contains("texture(", glsl, StringComparison.Ordinal);
+            Assert.Contains("vec2 uv)", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("sampler2D texture", glsl, StringComparison.Ordinal);
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            AssertNear([128.0f / 255.0f], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DispatchExecutesReadOnlyTextureCallableWithSpecializedStorageTexture()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.ReadOnly);
+            using var output = GPU.CreateBuffer<float>(1);
+            texture.Upload([new Rgba32(64, 0, 0, 255)]);
+
+            var path = DispatchAndGetPath(
+                new ReadOnlyTextureCallableKernel(texture.AsReadOnly(), output.AsReadWrite()),
+                1);
+
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            AssertNear([64.0f / 255.0f], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void DispatchExecutesCallableWithControlFlowFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -5456,6 +5565,111 @@ public readonly partial struct ReadOnlyBufferCallableKernel(
     {
         int i = ThreadIds.X;
         output[i] = ReadOnlyBufferCallableLibrary.GatherWeight(i, weights);
+    }
+}
+
+[ShaderLibrary]
+public static class ReadWriteBufferCallableLibrary
+{
+    [Callable]
+    public static void StoreScaled(int index, float value, ReadWriteBuffer<float> destination)
+    {
+        destination[index] = value * 3.0f;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct ReadWriteBufferCallableKernel(
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        ReadWriteBufferCallableLibrary.StoreScaled(i, input[i], output);
+        output[i] = output[i] + 1.0f;
+    }
+}
+
+public interface IMonoBufferWriter
+{
+    void Write(ReadWriteBuffer<float> destination, int index, float value);
+}
+
+[GpuStruct]
+public readonly partial record struct MonoBufferWriter(float Scale) : IMonoBufferWriter
+{
+    [Callable]
+    public void Write(ReadWriteBuffer<float> destination, int index, float value)
+    {
+        destination[index] = value * Scale;
+    }
+}
+
+[ShaderLibrary]
+public static class MonoBufferWriterOps
+{
+    [Callable]
+    public static void Write<TWriter>(TWriter writer, ReadWriteBuffer<float> destination, int index, float value)
+        where TWriter : IMonoBufferWriter
+    {
+        writer.Write(destination, index, value);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct GenericBufferWriterKernel(
+    ReadOnlyBuffer<MonoBufferWriter> writers,
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        MonoBufferWriterOps.Write(writers[i], output, i, input[i]);
+    }
+}
+
+[ShaderLibrary]
+public static class TextureCallableLibrary
+{
+    [Callable]
+    public static float SampleRed(SampledTexture2D<Rgba32> texture, SamplerState sampler, float2 uv)
+    {
+        return texture.Sample(sampler, uv).R;
+    }
+
+    [Callable]
+    public static float LoadRed(ReadOnlyTexture2D<Rgba32> texture, int2 xy)
+    {
+        return texture[xy].R;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct ReadOnlyTextureCallableKernel(
+    ReadOnlyTexture2D<Rgba32> texture,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        output[ThreadIds.X] = TextureCallableLibrary.LoadRed(texture, new int2(0, 0));
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct TextureCallableKernel(
+    SampledTexture2D<Rgba32> texture,
+    SamplerState sampler,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        output[ThreadIds.X] = TextureCallableLibrary.SampleRed(texture, sampler, new float2(0.5f, 0.5f));
     }
 }
 

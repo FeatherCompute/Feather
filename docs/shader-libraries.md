@@ -89,7 +89,18 @@ public static class ColorSpace
 
 ## Resource Parameters
 
-On the typed compute path, a callable may take a `ReadOnlyBuffer<T>` parameter when `T` is a supported scalar or vector type. GLSL does not allow a runtime-sized SSBO array as an ordinary function parameter, so Feather specializes the helper to the bound SSBO and emits its buffer reads as direct global-resource accesses. No buffer data is copied and there is no host-side indirection:
+On the typed compute path, callable parameters support the full shader value and resource set:
+
+| Parameter category | Callable support |
+| --- | --- |
+| Scalars, vectors, and matrices | Passed as typed GLSL values |
+| `[GpuStruct]` values | Passed as typed GLSL structs, including instance receivers |
+| `ReadOnlyBuffer<T>` | Specialized to the bound read-only SSBO |
+| `WriteOnlyBuffer<T>` / `ReadWriteBuffer<T>` | Specialized to the bound writable SSBO |
+| Read-only, write-only, and read-write textures | Specialized to the bound storage texture |
+| `SampledTexture2D<T>` / `SamplerState` | Specialized to the bound sampled texture and sampler pair |
+
+GLSL does not allow a runtime-sized SSBO array as an ordinary function parameter, and resource parameters are not portable GLSL function values. Feather therefore keeps every resource parameter typed in FEIR, specializes the helper to the resource bound by the kernel, omits the resource from the emitted GLSL signature, and emits reads, writes, or samples as direct global-resource accesses. No resource data is copied and there is no host-side indirection:
 
 ```csharp
 [ShaderLibrary]
@@ -103,7 +114,7 @@ public static class Sampling
 }
 ```
 
-Within one generated shader module, each callable buffer parameter must resolve to one kernel buffer binding. This first resource-parameter subset does not include `WriteOnlyBuffer<T>` or `ReadWriteBuffer<T>`, buffer parameters on generic interface callables, GPU-struct buffer elements, textures, or samplers. Keep those resources on the kernel and pass loaded values to a callable until their typed callable lowering is supported.
+Within one generated shader module, each callable resource parameter must resolve to one kernel resource binding. Resource parameters may be forwarded through nested `[GpuStruct]` instance callables and monomorphized generic interface callables; the generated specialization follows that callable graph to the original kernel binding. Buffer writes target the caller's SSBO directly and retain ordinary per-invocation statement ordering. Cross-invocation communication still requires the same explicit shader memory barriers as resource access written directly in the kernel.
 
 ## Generic Interface Pattern
 
