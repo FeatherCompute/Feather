@@ -112,25 +112,24 @@ one level up, alongside the texture and raster-target pools. `GetOrLoad` reloads
 moves, so retraining is picked up on the next iteration with no host restart. The cache owns what it hands
 out — callers must not dispose it, and must not call `Load` in a per-frame path.
 
-### The `[Callable]` buffer limitation
+### The `[Callable]` buffer subset
 
-A `[Callable]` cannot take a buffer parameter. The generator's `IsSupportedCallableType` accepts shader
-resource views, but `GPU::IR::Type` has no buffer kind, so `GPU::IR::CallableParameter` cannot represent
-one and the native typed-IR lowerer fails with "section 7 typed IR lowerer failed before EasyGPU module
-creation" — at dispatch, not at compile time. No `[Callable]` in the repo took a buffer before this work,
-so nothing had caught it. `MlpLoweringBoundaryTests` pins the behavior including the failure.
+Typed compute callables can read `ReadOnlyBuffer<T>` parameters for supported scalar and vector element
+types. Feather specializes those reads to the bound global SSBO because GLSL cannot pass a runtime-sized
+SSBO array as an ordinary function parameter. Writable buffers, buffers in generic interface callables,
+GPU-struct buffer elements, textures, and samplers remain outside this callable resource subset.
 
 Consequences:
 
-- `MlpShader` exposes only layout arithmetic — packed size, scratch stride, per-layer offsets. A pass
-  evaluating inline per pixel uses those and writes its own loop.
+- `MlpShader` still exposes only layout arithmetic — packed size, scratch stride, per-layer offsets.
+  Consolidating evaluation behind a shared callable is separate API work rather than a lowering blocker.
 - Batch inference goes through `MlpInference3To1Kernel`, an ordinary kernel that indexes its buffers
   directly.
 - The forward arithmetic is therefore duplicated three times: `MlpLayout.Evaluate3To1` (host),
   `MlpRegression3To1LossKernel.Execute` (training), `MlpInference3To1Kernel.Execute` (inference). Nothing
   but tests keeps them in agreement — the gradient tests pin the first two, `MlpInferenceSmokeTests` pins
-  the third. If EasyGPU's IR gains a resource type, the boundary tests start failing and this collapses
-  into one shared `[Callable]`.
+  the third. The read-only buffer subset now makes a shared `[Callable]` possible, but that consolidation
+  is outside this phase-1 lowering change.
 
 ## Packed weight layout
 

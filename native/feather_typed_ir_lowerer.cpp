@@ -32,7 +32,11 @@ constexpr uint8_t kTypeVector = 2;
 constexpr uint8_t kTypeMatrix = 3;
 constexpr uint8_t kTypeStruct = 4;
 constexpr uint8_t kTypeArray = 5;
+constexpr uint8_t kTypeResourceWrapper = 6;
 constexpr uint8_t kTypeVoid = 7;
+
+constexpr uint32_t kTypeResourceBuffer = 0;
+constexpr uint32_t kTypeResourceRead = 0;
 
 constexpr uint8_t kPrimitiveBool = 0;
 constexpr uint8_t kPrimitiveInt = 1;
@@ -262,7 +266,8 @@ public:
             static_cast<uint32_t>(inputs_.group_z),
             DimensionFor(entry.kind));
 
-        if (!RegisterResources() || !RegisterCallables() || !EmitBoundsCheckGuard(entry.kind) ||
+        if (!RegisterResources() || !ResolveCallableBufferBindings() || !RegisterCallables() ||
+            !EmitBoundsCheckGuard(entry.kind) ||
             !LowerStatement(entry.body_statement_index)) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
             return nullptr;
@@ -405,6 +410,140 @@ private:
         return true;
     }
 
+    bool IsReadOnlyBufferType(uint32_t type_id) const {
+        if (type_id >= typed_.types.size()) {
+            return false;
+        }
+
+        const auto& type = typed_.types[type_id];
+        if (type.kind != kTypeResourceWrapper || type.a != kTypeResourceBuffer || type.c != kTypeResourceRead ||
+            type.b >= typed_.types.size()) {
+            return false;
+        }
+
+        const auto element_type = ToModuleType(type.b);
+        switch (element_type.kind) {
+        case GPU::IR::Type::Kind::Bool:
+        case GPU::IR::Type::Kind::Int:
+        case GPU::IR::Type::Kind::UInt:
+        case GPU::IR::Type::Kind::Float:
+        case GPU::IR::Type::Kind::Bool2:
+        case GPU::IR::Type::Kind::Bool3:
+        case GPU::IR::Type::Kind::Bool4:
+        case GPU::IR::Type::Kind::Int2:
+        case GPU::IR::Type::Kind::Int3:
+        case GPU::IR::Type::Kind::Int4:
+        case GPU::IR::Type::Kind::UInt2:
+        case GPU::IR::Type::Kind::UInt3:
+        case GPU::IR::Type::Kind::UInt4:
+        case GPU::IR::Type::Kind::Float2:
+        case GPU::IR::Type::Kind::Float3:
+        case GPU::IR::Type::Kind::Float4:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    std::optional<GPU::IR::ResourceId> ResolveBufferReference(uint32_t expression_id) const {
+        if (expression_id >= typed_.expressions.size()) {
+            return std::nullopt;
+        }
+
+        const auto& expression = typed_.expressions[expression_id];
+        if (expression.kind != kExpressionLocal && expression.kind != kExpressionParameter) {
+            return std::nullopt;
+        }
+
+        const auto* name = GetString(expression.name_id);
+        if (name == nullptr) {
+            return std::nullopt;
+        }
+
+        if (const auto active = active_buffer_parameters_.find(*name); active != active_buffer_parameters_.end()) {
+            return active->second;
+        }
+
+        const auto resource = resources_by_name_.find(*name);
+        if (resource == resources_by_name_.end()) {
+            return std::nullopt;
+        }
+
+        const auto info = resource_infos_by_name_.find(*name);
+        return info != resource_infos_by_name_.end() && info->second.kind == kResourceKindBuffer &&
+                       info->second.access == kAccessRead
+                   ? std::optional<GPU::IR::ResourceId>{resource->second}
+                   : std::nullopt;
+    }
+
+    bool ResolveCallableBufferBindings() {
+        for (const auto& expression : typed_.expressions) {
+            if (expression.kind != kExpressionCallableCall) {
+                continue;
+            }
+
+            const auto* raw_name = GetString(expression.name_id);
+            const auto callable = raw_name == nullptr ? typed_.callables.end() : typed_.callables.find(*raw_name);
+            if (callable == typed_.callables.end() || callable->second.function_index >= typed_.functions.size()) {
+                return Fail("callable buffer binding references an unknown callable");
+            }
+
+            const auto& function = typed_.functions[callable->second.function_index];
+            if (function.parameter_count != expression.argument_count ||
+                (function.parameter_count > 0 &&
+                 (function.first_parameter == NoIndex || expression.first_argument == NoIndex ||
+                  function.first_parameter > typed_.parameters.size() ||
+                  function.parameter_count > typed_.parameters.size() - function.first_parameter ||
+                  expression.first_argument > typed_.arguments.size() ||
+                  expression.argument_count > typed_.arguments.size() - expression.first_argument))) {
+                return Fail("callable buffer binding has an invalid parameter or argument range");
+            }
+
+            for (uint32_t i = 0; i < function.parameter_count; ++i) {
+                const auto& parameter = typed_.parameters[function.first_parameter + i];
+                if (parameter.type_id >= typed_.types.size() ||
+                    typed_.types[parameter.type_id].kind != kTypeResourceWrapper) {
+                    continue;
+                }
+                if (!IsReadOnlyBufferType(parameter.type_id) || parameter.direction != 0) {
+                    return Fail("callable resource parameters support only input ReadOnlyBuffer<T> with scalar or "
+                                "vector elements");
+                }
+
+                const auto argument_id = typed_.arguments[expression.first_argument + i];
+                const auto resource = ResolveBufferReference(argument_id);
+                if (!resource.has_value()) {
+                    continue;
+                }
+
+                auto& bindings = callable_buffer_bindings_[*raw_name];
+                const auto existing = bindings.find(i);
+                if (existing != bindings.end() && existing->second != *resource) {
+                    return Fail("a read-only buffer callable parameter is called with multiple buffer bindings");
+                }
+                bindings[i] = *resource;
+            }
+        }
+
+        for (const auto& callable : typed_.callables) {
+            if (callable.second.function_index >= typed_.functions.size()) {
+                return false;
+            }
+            const auto& function = typed_.functions[callable.second.function_index];
+            for (uint32_t i = 0; i < function.parameter_count; ++i) {
+                const auto& parameter = typed_.parameters[function.first_parameter + i];
+                if (parameter.type_id < typed_.types.size() &&
+                    typed_.types[parameter.type_id].kind == kTypeResourceWrapper &&
+                    callable_buffer_bindings_[callable.first].find(i) ==
+                        callable_buffer_bindings_[callable.first].end()) {
+                    return Fail("read-only buffer callable parameters must resolve to a kernel buffer binding");
+                }
+            }
+        }
+
+        return true;
+    }
+
     bool RegisterCallables() {
         // Callable bodies can reference callables declared later in the C# struct.
         // Register every mangled symbol before lowering any body so nested calls are
@@ -450,12 +589,12 @@ private:
             auto previous_declared_locals = declared_locals_;
             auto previous_local_glsl_names = local_glsl_names_;
             auto previous_shared_values = shared_values_;
+            auto previous_active_buffer_parameters = active_buffer_parameters_;
             std::vector<GPU::IR::CallableParameter> parameters;
             parameters.reserve(function.parameter_count);
 
             if (function.parameter_count > 0) {
-                if (function.first_parameter == NoIndex ||
-                    function.first_parameter > typed_.parameters.size() ||
+                if (function.first_parameter == NoIndex || function.first_parameter > typed_.parameters.size() ||
                     function.parameter_count > typed_.parameters.size() - function.first_parameter) {
                     return false;
                 }
@@ -464,6 +603,19 @@ private:
             for (uint32_t i = 0; i < function.parameter_count; ++i) {
                 const auto& parameter = typed_.parameters[function.first_parameter + i];
                 const auto* parameter_name = GetString(parameter.name_id);
+                if (parameter.type_id < typed_.types.size() &&
+                    typed_.types[parameter.type_id].kind == kTypeResourceWrapper) {
+                    const auto binding = callable_buffer_bindings_[*raw_name].find(i);
+                    if (parameter_name == nullptr || parameter_name->empty() ||
+                        !IsReadOnlyBufferType(parameter.type_id) || parameter.direction != 0 ||
+                        binding == callable_buffer_bindings_[*raw_name].end()) {
+                        return false;
+                    }
+
+                    active_buffer_parameters_[*parameter_name] = binding->second;
+                    continue;
+                }
+
                 const auto parameter_type = ToModuleType(parameter.type_id);
                 const auto parameter_direction = ToCallableParameterDirection(parameter.direction);
                 if (parameter_name == nullptr || parameter_name->empty() || !parameter_type.IsValid() ||
@@ -476,11 +628,8 @@ private:
                     return false;
                 }
 
-                parameters.push_back(GPU::IR::CallableParameter{
-                    sanitized_parameter_name,
-                    parameter_type,
-                    *parameter_direction
-                });
+                parameters.push_back(
+                    GPU::IR::CallableParameter{sanitized_parameter_name, parameter_type, *parameter_direction});
                 local_values_[*parameter_name] = builder_.LocalVariable(parameter_type, sanitized_parameter_name);
                 declared_locals_[*parameter_name] = parameter_type;
                 local_glsl_names_[*parameter_name] = sanitized_parameter_name;
@@ -491,12 +640,13 @@ private:
             declared_locals_ = std::move(previous_declared_locals);
             local_glsl_names_ = std::move(previous_local_glsl_names);
             shared_values_ = std::move(previous_shared_values);
+            active_buffer_parameters_ = std::move(previous_active_buffer_parameters);
             if (!body.has_value()) {
                 return false;
             }
 
-            const auto callable_id = builder_.AddCallable(
-                name, return_type, std::move(parameters), std::move(body->statements), std::move(body->blocks));
+            const auto callable_id = builder_.AddCallable(name, return_type, std::move(parameters),
+                                                          std::move(body->statements), std::move(body->blocks));
             if (callable_id == GPU::IR::InvalidFunctionId) {
                 return false;
             }
@@ -1839,12 +1989,46 @@ private:
             return GPU::IR::InvalidValueId;
         }
 
-        auto arguments = BuildArguments(expression);
-        if (!arguments.has_value()) {
+        const auto callable = typed_.callables.find(*raw_name);
+        if (callable == typed_.callables.end() || callable->second.function_index >= typed_.functions.size()) {
             return GPU::IR::InvalidValueId;
         }
 
-        return builder_.Call(mapped->second, result_type, *arguments);
+        const auto& function = typed_.functions[callable->second.function_index];
+        if (function.parameter_count != expression.argument_count ||
+            (function.parameter_count > 0 &&
+             (function.first_parameter == NoIndex || expression.first_argument == NoIndex ||
+              function.first_parameter > typed_.parameters.size() ||
+              function.parameter_count > typed_.parameters.size() - function.first_parameter ||
+              expression.first_argument > typed_.arguments.size() ||
+              expression.argument_count > typed_.arguments.size() - expression.first_argument))) {
+            return GPU::IR::InvalidValueId;
+        }
+
+        std::vector<GPU::IR::ValueId> arguments;
+        arguments.reserve(expression.argument_count);
+        for (uint32_t i = 0; i < expression.argument_count; ++i) {
+            const auto argument_id = typed_.arguments[expression.first_argument + i];
+            const auto& parameter = typed_.parameters[function.first_parameter + i];
+            if (parameter.type_id < typed_.types.size() &&
+                typed_.types[parameter.type_id].kind == kTypeResourceWrapper) {
+                const auto resource = ResolveBufferReference(argument_id);
+                const auto binding = callable_buffer_bindings_[*raw_name].find(i);
+                if (!resource.has_value() || binding == callable_buffer_bindings_[*raw_name].end() ||
+                    *resource != binding->second) {
+                    return GPU::IR::InvalidValueId;
+                }
+                continue;
+            }
+
+            const auto argument = BuildExpression(argument_id);
+            if (argument == GPU::IR::InvalidValueId) {
+                return GPU::IR::InvalidValueId;
+            }
+            arguments.push_back(argument);
+        }
+
+        return builder_.Call(mapped->second, result_type, arguments);
     }
 
     GPU::IR::ValueId BuildAtomic(const Expression& expression) {
@@ -1923,10 +2107,18 @@ private:
     }
 
     GPU::IR::ValueId BuildIndexAccess(const Expression& expression) {
-        const auto instance = BuildExpression(expression.a);
         const auto index = BuildExpression(expression.b);
         const auto result_type = ToModuleType(expression.type_id);
-        if (instance == GPU::IR::InvalidValueId || index == GPU::IR::InvalidValueId || !result_type.IsValid()) {
+        if (index == GPU::IR::InvalidValueId || !result_type.IsValid()) {
+            return GPU::IR::InvalidValueId;
+        }
+
+        if (const auto resource = ResolveBufferReference(expression.a); resource.has_value()) {
+            return builder_.ResourceElement(*resource, index);
+        }
+
+        const auto instance = BuildExpression(expression.a);
+        if (instance == GPU::IR::InvalidValueId) {
             return GPU::IR::InvalidValueId;
         }
 
@@ -2848,6 +3040,8 @@ private:
     std::unordered_map<std::string, std::string> local_glsl_names_;
     std::unordered_set<std::string> used_glsl_names_;
     std::unordered_map<std::string, std::string> callable_names_;
+    std::unordered_map<std::string, std::unordered_map<uint32_t, GPU::IR::ResourceId>> callable_buffer_bindings_;
+    std::unordered_map<std::string, GPU::IR::ResourceId> active_buffer_parameters_;
     struct SharedMemoryInfo {
         GPU::IR::Type type;
         std::string glsl_name;

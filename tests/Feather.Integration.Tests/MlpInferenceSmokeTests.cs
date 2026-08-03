@@ -13,12 +13,11 @@ namespace Feather.Integration.Tests;
 /// <see cref="MlpInference3To1Kernel" />.
 /// </summary>
 /// <remarks>
-/// The forward arithmetic exists in three places — the host mirror in <see cref="MlpLayout" />, the
-/// training kernel's <c>Execute</c>, and the inference kernel's — because a <c>[Callable]</c> cannot take
-/// a buffer parameter, so no shared helper can read weights out of one. See
-/// <see cref="MlpLoweringBoundaryTests" /> for the boundary and <see cref="MlpShader" /> for what is left
-/// shareable. Nothing but a test keeps the three in agreement: the gradient tests pin the first two
-/// against each other, and this pins the third against the host mirror.
+/// The forward arithmetic currently exists in three places — the host mirror in <see cref="MlpLayout" />,
+/// the training kernel's <c>Execute</c>, and the inference kernel's. Read-only buffer callables now make
+/// consolidation possible, but that public API change is separate from the phase-1 lowering work. Until
+/// then, the gradient tests pin the first two against each other and this pins the third against the host
+/// mirror. See <see cref="MlpLoweringBoundaryTests" /> for the remaining resource boundary.
 ///
 /// The offsets <see cref="MlpShader" /> exposes are checked against <see cref="MlpLayout" /> here too,
 /// since an inline pass evaluating per pixel indexes weights through those rather than through the kernel.

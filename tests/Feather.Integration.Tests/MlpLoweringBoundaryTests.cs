@@ -6,18 +6,13 @@ using Feather.Resources;
 namespace Feather.Integration.Tests;
 
 /// <summary>
-/// Pins the <c>[Callable]</c> parameter-type boundary that shapes how MLP inference is exposed.
+/// Pins the <c>[Callable]</c> resource-parameter boundary that shapes how MLP inference is exposed.
 /// </summary>
 /// <remarks>
-/// The generator's <c>IsSupportedCallableType</c> accepts shader resource views as <c>[Callable]</c>
-/// parameters, but <c>GPU::IR::Type</c> has no buffer kind, so <c>GPU::IR::CallableParameter</c> cannot
-/// represent one and the native typed-IR lowerer fails at dispatch rather than at compile time. That
-/// disagreement is why <c>MlpShader</c> exposes only layout arithmetic and inference ships as
-/// <see cref="Feather.NN.MlpInference3To1Kernel" />.
-///
-/// These tests assert the current behavior, including the failure. If a future EasyGPU release gains a
-/// resource type in its IR, the buffer cases here start passing and this file is the signal that
-/// <c>MlpShader</c> can be given a real <c>Evaluate3To1</c> and the duplicated arithmetic collapsed.
+/// Read-only scalar and vector buffers lower by specializing the callable's resource access to the bound
+/// SSBO. Writable buffers remain outside the phase-1 subset. <c>MlpShader</c> still exposes layout
+/// arithmetic and inference still ships as <see cref="Feather.NN.MlpInference3To1Kernel" /> until that
+/// API is deliberately consolidated.
 /// </remarks>
 public class MlpLoweringBoundaryTests
 {
@@ -31,13 +26,13 @@ public class MlpLoweringBoundaryTests
     }
 
     [Fact]
-    public void ReadOnlyBufferCallableParametersDoNotLower()
+    public void ReadOnlyBufferCallableParametersLowerAsGlobalResourceAccessors()
     {
-        // Accepted by the generator, rejected by the native lowerer. Documented here because the failure
-        // is opaque and arrives at dispatch time.
-        var ex = Assert.Throws<FeatherNativeException>(ShaderInspection.GetGLSL<CallableReadOnlyBufferProbeKernel>);
+        var glsl = ShaderInspection.GetGLSL<CallableReadOnlyBufferProbeKernel>();
 
-        Assert.Contains("typed IR", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("FromReadOnlyBuffer", glsl, StringComparison.Ordinal);
+        Assert.Contains("(int index)", glsl, StringComparison.Ordinal);
+        Assert.Contains("fe_0[", glsl, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -61,7 +56,7 @@ public static class CallableBoundaryProbeLibrary
         return value * 2;
     }
 
-    /// <summary>A callable taking a read-only buffer, which does not lower.</summary>
+    /// <summary>A callable taking a read-only buffer, lowered as a global resource accessor.</summary>
     /// <param name="source">The buffer to read.</param>
     /// <param name="index">The element to read.</param>
     [Callable]

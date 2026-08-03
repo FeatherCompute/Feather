@@ -11,13 +11,9 @@ namespace Feather.Shaders;
 /// <c>Feather.NN.MlpRegression3To1LossKernel</c>, mirroring <c>Feather.NN.MlpLayout</c> so a hand-written
 /// inference pass does not keep its own copy of the layout in sync with the trainer's by hand.
 ///
-/// It is only the arithmetic, not the evaluation, and that is a platform limitation rather than a choice.
-/// A <c>[Callable]</c> cannot take a buffer parameter: the generator's <c>IsSupportedCallableType</c>
-/// accepts shader resource views, but <c>GPU::IR::Type</c> has no buffer kind, so
-/// <c>GPU::IR::CallableParameter</c> cannot represent one and the native typed-IR lowerer fails with
-/// "section 7 typed IR lowerer failed before EasyGPU module creation" at dispatch rather than at compile
-/// time. <c>MlpLoweringBoundaryTests</c> pins that behavior. Until the IR gains a resource type, a shared
-/// helper that reads weights out of a buffer is not expressible.
+/// It currently contains layout arithmetic rather than evaluation. Typed compute callables can now read
+/// supported scalar and vector <c>ReadOnlyBuffer&lt;T&gt;</c> parameters, but consolidating the existing MLP
+/// host, training, and inference implementations behind a new public helper is separate API work.
 ///
 /// So there are two routes to inference, and neither is this class:
 ///

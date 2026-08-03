@@ -1664,6 +1664,39 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void DispatchExecutesShaderLibraryCallableWithReadOnlyBufferParameterThroughTypedEasyGpu()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            using var weights = GPU.CreateBuffer<float4>(
+            [
+                new float4(1, 2, 3, 4),
+                new float4(5, 6, 7, 8),
+                new float4(-1, -2, -3, -4),
+                new float4(10, 20, 30, 40)
+            ]);
+            using var output = GPU.CreateBuffer<float>(4);
+
+            var glsl = ShaderInspection.GetGLSL<ReadOnlyBufferCallableKernel>();
+            var path = DispatchAndGetPath(
+                new ReadOnlyBufferCallableKernel(weights.AsReadOnly(), output.AsReadWrite()),
+                4);
+
+            Assert.Contains("GatherWeight", glsl, StringComparison.Ordinal);
+            Assert.Contains("int index)", glsl, StringComparison.Ordinal);
+            Assert.Contains("fe_0[", glsl, StringComparison.Ordinal);
+            Assert.DoesNotContain("vec4 weights[]", glsl, StringComparison.Ordinal);
+            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal([10, 26, -10, 100], output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void DispatchExecutesCallableWithControlFlowFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -5399,6 +5432,30 @@ public readonly partial struct TypedCallableKernel(ReadOnlyBuffer<float> input, 
     private static float Twice(float value)
     {
         return value * 2;
+    }
+}
+
+[ShaderLibrary]
+public static class ReadOnlyBufferCallableLibrary
+{
+    [Callable]
+    public static float GatherWeight(int index, ReadOnlyBuffer<float4> weights)
+    {
+        float4 weight = weights[index];
+        return weight.X + weight.Y + weight.Z + weight.W;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct ReadOnlyBufferCallableKernel(
+    ReadOnlyBuffer<float4> weights,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        output[i] = ReadOnlyBufferCallableLibrary.GatherWeight(i, weights);
     }
 }
 

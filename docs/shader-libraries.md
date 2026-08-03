@@ -87,6 +87,24 @@ public static class ColorSpace
 - Parameters and return values must use supported shader types: scalars, Feather vectors/matrices, supported GPU structs, and supported shader resource wrappers where the backend allows them.
 - Overloads are supported; Feather binds by Roslyn symbol identity and emits a generated mangled function name.
 
+## Resource Parameters
+
+On the typed compute path, a callable may take a `ReadOnlyBuffer<T>` parameter when `T` is a supported scalar or vector type. GLSL does not allow a runtime-sized SSBO array as an ordinary function parameter, so Feather specializes the helper to the bound SSBO and emits its buffer reads as direct global-resource accesses. No buffer data is copied and there is no host-side indirection:
+
+```csharp
+[ShaderLibrary]
+public static class Sampling
+{
+    [Callable]
+    public static float GatherWeight(int index, ReadOnlyBuffer<float4> weights)
+    {
+        return weights[index].W;
+    }
+}
+```
+
+Within one generated shader module, each callable buffer parameter must resolve to one kernel buffer binding. This first resource-parameter subset does not include `WriteOnlyBuffer<T>` or `ReadWriteBuffer<T>`, buffer parameters on generic interface callables, GPU-struct buffer elements, textures, or samplers. Keep those resources on the kernel and pass loaded values to a callable until their typed callable lowering is supported.
+
 ## Generic Interface Pattern
 
 Generic shader-library callables can express a small object-style pattern without runtime dispatch:
