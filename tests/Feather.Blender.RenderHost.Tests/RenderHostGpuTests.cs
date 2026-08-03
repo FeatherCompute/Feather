@@ -8,6 +8,35 @@ public sealed class RenderHostGpuTests
 {
     private const string HotReloadPassType = "HotReloadProject.Passes.MinimalRasterPass";
 
+    /// <summary>
+    /// C-class test assertion deadline. The product RenderHost has no render-completion
+    /// timeout; slower test machines can override this build guard with
+    /// FEATHER_RENDER_HOST_TEST_TIMEOUT_SECONDS (default 120 seconds).
+    /// </summary>
+    private static TimeSpan TestTimeout
+    {
+        get
+        {
+            const string name = "FEATHER_RENDER_HOST_TEST_TIMEOUT_SECONDS";
+            var value = Environment.GetEnvironmentVariable(name);
+            if (value is null)
+            {
+                return TimeSpan.FromSeconds(120);
+            }
+            if (!double.TryParse(
+                    value,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var seconds) ||
+                !double.IsFinite(seconds) ||
+                seconds <= 0)
+            {
+                throw new InvalidOperationException($"{name} must be a positive number of seconds.");
+            }
+            return TimeSpan.FromSeconds(seconds);
+        }
+    }
+
     [Theory]
     [Trait("Category", "Gpu")]
     [InlineData(1)]
@@ -211,7 +240,7 @@ public sealed class RenderHostGpuTests
                 ?? throw new InvalidOperationException("Unable to start the hot-reload project build.");
             var standardOutput = process.StandardOutput.ReadToEndAsync();
             var standardError = process.StandardError.ReadToEndAsync();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            using var timeout = new CancellationTokenSource(TestTimeout);
             try
             {
                 await process.WaitForExitAsync(timeout.Token);

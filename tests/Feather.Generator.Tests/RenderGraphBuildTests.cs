@@ -5,6 +5,31 @@ namespace Feather.Generator.Tests;
 
 public class RenderGraphBuildTests
 {
+    /// <summary>C-class build assertion deadline; defaults to 120 seconds.</summary>
+    private static TimeSpan TestTimeout
+    {
+        get
+        {
+            const string name = "FEATHER_GENERATOR_TEST_TIMEOUT_SECONDS";
+            var value = Environment.GetEnvironmentVariable(name);
+            if (value is null)
+            {
+                return TimeSpan.FromSeconds(120);
+            }
+            if (!double.TryParse(
+                    value,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var seconds) ||
+                !double.IsFinite(seconds) ||
+                seconds <= 0)
+            {
+                throw new InvalidOperationException($"{name} must be a positive number of seconds.");
+            }
+            return TimeSpan.FromSeconds(seconds);
+        }
+    }
+
     [Fact]
     public async Task LocalProjectReferenceSampleBuildsAndExportsManifest()
     {
@@ -114,7 +139,7 @@ public class RenderGraphBuildTests
             ?? throw new InvalidOperationException("Unable to start dotnet build.");
         var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        using var timeout = new CancellationTokenSource(TestTimeout);
         try
         {
             await process.WaitForExitAsync(timeout.Token);
