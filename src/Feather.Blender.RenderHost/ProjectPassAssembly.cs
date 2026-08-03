@@ -303,7 +303,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             inverseViewProjection,
             cameraPosition,
             purpose,
-            graph.ExecutionMode is RenderExecutionMode.Progressive or RenderExecutionMode.Offline,
+            graph.ExecutionMode == RenderExecutionMode.Progressive,
             viewState.Iteration,
             viewState.AccumulatedSamples,
             graph.SamplesPerIteration,

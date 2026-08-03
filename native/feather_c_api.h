@@ -306,8 +306,6 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
 FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint32_t y, uint32_t z, uint32_t width,
                                       uint32_t height, uint32_t depth, void* out_data);
 FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture);
-FE_API FeResult fe_bilinear_upscale_rgba8(const uint8_t* source, uint32_t source_width, uint32_t source_height,
-                                          uint8_t* destination, uint32_t width, uint32_t height);
 
 FE_API FeResult fe_sampler_create(FeContextHandle context, const FeSamplerDesc* desc, FeSamplerHandle* out_sampler);
 FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler);
