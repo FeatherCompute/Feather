@@ -8,7 +8,8 @@ internal sealed record RenderSceneResources(
     SceneMaterialTable Materials,
     SceneTextureTable Textures,
     SceneLightTable Lights,
-    RenderTime Time);
+    RenderTime Time,
+    IReadOnlyList<RenderHostDiagnostic> Diagnostics);
 
 internal static class SceneResourceBuilder
 {
@@ -19,7 +20,8 @@ internal static class SceneResourceBuilder
         ArgumentNullException.ThrowIfNull(snapshot);
 
         var (textures, textureIndices) = BuildTextures(snapshot);
-        var (materials, materialIndices) = BuildMaterials(snapshot, textureIndices, textures);
+        var (materials, materialIndices, diagnosticNodeGuids) = BuildMaterials(
+            snapshot, textureIndices, textures);
         var geometry = SceneGeometryBuilder.BuildResolved(
             snapshot,
             materialIndices,
@@ -29,7 +31,32 @@ internal static class SceneResourceBuilder
             materials,
             textures,
             BuildLights(snapshot.Metadata.Lights),
-            BuildTime(snapshot.Metadata.Frame, snapshot.Metadata.Subframe));
+            BuildTime(snapshot.Metadata.Frame, snapshot.Metadata.Subframe),
+            BuildMaterialDiagnostics(snapshot, materials, diagnosticNodeGuids));
+    }
+
+    private static IReadOnlyList<RenderHostDiagnostic> BuildMaterialDiagnostics(
+        SceneSnapshot snapshot,
+        SceneMaterialTable materials,
+        IReadOnlyDictionary<string, string> diagnosticNodeGuids)
+    {
+        var metadata = snapshot.Metadata.Materials ?? [];
+        var diagnostics = new List<RenderHostDiagnostic>();
+        for (var index = 0; index < metadata.Length && index < materials.Materials.Length; index++)
+        {
+            var material = materials.Materials.Span[index];
+            var item = metadata[index];
+            if (item is null || material.Status != SceneMaterialStatus.Fallback)
+            {
+                continue;
+            }
+            diagnostics.Add(RenderHostDiagnostic.ForMaterial(
+                item,
+                material.Diagnostic ?? "The Blender material graph is unsupported.",
+                diagnosticNodeGuids.GetValueOrDefault(
+                    item.MaterialId, item.DiagnosticNodeGuid ?? "")));
+        }
+        return diagnostics;
     }
 
     private static (SceneTextureTable Table, Dictionary<string, int> Indices) BuildTextures(
@@ -107,7 +134,10 @@ internal static class SceneResourceBuilder
         return (new SceneTextureTable(textures), indices);
     }
 
-    private static (SceneMaterialTable Table, Dictionary<string, int> Indices) BuildMaterials(
+    private static (
+        SceneMaterialTable Table,
+        Dictionary<string, int> Indices,
+        Dictionary<string, string> DiagnosticNodeGuids) BuildMaterials(
         SceneSnapshot snapshot,
         IReadOnlyDictionary<string, int> textureIndices,
         SceneTextureTable textures)
@@ -116,6 +146,8 @@ internal static class SceneResourceBuilder
             ?? throw new InvalidDataException("Scene metadata materials are missing.");
         var materials = new List<SceneMaterial>(metadata.Length + 1);
         var indices = new Dictionary<string, int>(metadata.Length, StringComparer.Ordinal);
+        var diagnosticNodeGuids = new Dictionary<string, string>(
+            metadata.Length, StringComparer.Ordinal);
         foreach (var item in metadata)
         {
             if (item is null)
@@ -138,6 +170,10 @@ internal static class SceneResourceBuilder
                 : ReadColor(item.EmissionColor, null, $"Material '{item.MaterialId}' emissionColor");
             var status = SceneMaterialStatus.Supported;
             var diagnostic = item.Diagnostic;
+            if (!string.IsNullOrWhiteSpace(item.DiagnosticNodeGuid))
+            {
+                diagnosticNodeGuids[item.MaterialId] = item.DiagnosticNodeGuid;
+            }
             if (string.IsNullOrWhiteSpace(item.GraphStatus))
             {
                 if (snapshot.Metadata.SchemaVersion >= 2)
@@ -169,7 +205,8 @@ internal static class SceneResourceBuilder
                     status = SceneMaterialStatus.Fallback;
                     diagnostic = MergeDiagnostic(
                         diagnostic,
-                        $"Base color texture '{item.BaseColorTextureId}' is missing.");
+                        $"RESOURCE_BINDING_ERROR: base color texture " +
+                        $"'{item.BaseColorTextureId}' is missing.");
                     textureIndex = SceneMaterial.NoTexture;
                 }
             }
@@ -194,15 +231,21 @@ internal static class SceneResourceBuilder
                             if ((uint)textureBinding >= (uint)textures.Textures.Length)
                             {
                                 throw new InvalidDataException(
-                                    "MATERIAL_EXPRESSION_UNSUPPORTED: resolved texture table index is invalid");
+                                    "RESOURCE_BINDING_ERROR: resolved texture table index is invalid");
                             }
                         }
                     }
                 }
-                catch (InvalidDataException exception)
+                catch (Exception exception) when (exception is
+                    InvalidDataException or MaterialExpressionException)
                 {
                     status = SceneMaterialStatus.Fallback;
                     diagnostic = MergeDiagnostic(diagnostic, exception.Message);
+                    if (exception is MaterialExpressionException materialException &&
+                        !string.IsNullOrWhiteSpace(materialException.NodeGuid))
+                    {
+                        diagnosticNodeGuids[item.MaterialId] = materialException.NodeGuid;
+                    }
                 }
             }
 
@@ -297,7 +340,10 @@ internal static class SceneResourceBuilder
             0.5f,
             new float4(0.0f, 0.0f, 0.0f, 1.0f),
             1.0f));
-        return (new SceneMaterialTable(materials.ToArray(), defaultMaterialIndex, textures), indices);
+        return (
+            new SceneMaterialTable(materials.ToArray(), defaultMaterialIndex, textures),
+            indices,
+            diagnosticNodeGuids);
     }
 
     private static void ValidatePrincipledRange(

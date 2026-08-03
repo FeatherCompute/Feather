@@ -43,7 +43,8 @@ public enum SceneMaterialExpressionOp
     LayerWeight = 21,
     MixShader = 22,
     AddShader = 23,
-    Bump = 24
+    Bump = 24,
+    BumpEvaluated = 25
 }
 
 /// <summary>

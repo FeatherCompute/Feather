@@ -125,7 +125,8 @@ internal sealed class RenderHostRunner : IDisposable
             passExecutionMilliseconds,
             gpuReadbackMilliseconds,
             frameWriteMilliseconds,
-            started.Elapsed.TotalMilliseconds);
+            started.Elapsed.TotalMilliseconds,
+            scene.Diagnostics);
     }
 
     public void Dispose()
@@ -164,4 +165,5 @@ internal sealed record RenderHostResult(
     double PassExecutionMilliseconds,
     double GpuReadbackMilliseconds,
     double FrameWriteMilliseconds,
-    double TotalMilliseconds);
+    double TotalMilliseconds,
+    IReadOnlyList<RenderHostDiagnostic> Diagnostics);

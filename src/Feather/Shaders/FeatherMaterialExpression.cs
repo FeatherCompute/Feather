@@ -272,7 +272,8 @@ public static class FeatherMaterialExpression
         var e = Get(registers, instruction.E);
         var f = Get(registers, instruction.F);
         var result = instruction.Value;
-        if (instruction.Op == 1) result = new float4(uv, 0.0f, 1.0f);
+        if (instruction.Op == 1)
+            result = new float4(uv + instruction.Parameters.ZW, 0.0f, 1.0f);
         else if (instruction.Op == 4)
         {
             var p = a.XYZ * b.X;
@@ -296,17 +297,38 @@ public static class FeatherMaterialExpression
         else if (instruction.Op == 5)
         {
             var p = a.XYZ * b.X; var cell = ShaderMath.Floor(p);
-            var nearest = 1000.0f; var selected = float3.Zero;
+            var nearest = 1000.0f; var second = 1000.0f; var selected = float3.Zero;
+            for (var z = -1; z <= 1; z++)
             for (var y = -1; y <= 1; y++) for (var x = -1; x <= 1; x++)
             {
-                var candidate = cell + new float3((float)x, (float)y, 0.0f);
-                var jitter = new float3(Hash(candidate), Hash(candidate + new float3(7.0f)), 0.0f) * c.X;
-                var distance = ShaderMath.Length((candidate + jitter) - p);
-                if (distance < nearest) { nearest = distance; selected = candidate; }
+                var candidate = cell + new float3((float)x, (float)y, (float)z);
+                var jitter = new float3(
+                    Hash(candidate), Hash(candidate + new float3(7.0f)),
+                    Hash(candidate + new float3(17.0f))) * c.X;
+                var difference = ShaderMath.Abs((candidate + jitter) - p);
+                var distance = ShaderMath.Length(difference);
+                if (instruction.Parameters.Z == 1.0f)
+                    distance = difference.X + difference.Y + difference.Z;
+                else if (instruction.Parameters.Z == 2.0f)
+                    distance = ShaderMath.Max(difference.X, ShaderMath.Max(difference.Y, difference.Z));
+                else if (instruction.Parameters.Z == 3.0f)
+                {
+                    var exponent = ShaderMath.Max(d.X, 1e-3f);
+                    distance = ShaderMath.Pow(
+                        ShaderMath.Pow(difference.X, exponent) +
+                        ShaderMath.Pow(difference.Y, exponent) +
+                        ShaderMath.Pow(difference.Z, exponent),
+                        1.0f / exponent);
+                }
+                if (distance < nearest)
+                {
+                    second = nearest; nearest = distance; selected = candidate;
+                }
+                else if (distance < second) second = distance;
             }
             result = instruction.Parameters.X > 0.5f
                 ? new float4(Hash(selected), Hash(selected + new float3(13.0f)), Hash(selected + new float3(29.0f)), 1.0f)
-                : new float4(nearest);
+                : new float4(instruction.Parameters.Y > 0.5f ? second : nearest);
         }
         else if (instruction.Op == 6)
         {
@@ -345,6 +367,16 @@ public static class FeatherMaterialExpression
         {
             var t = (a.X - b.X) / ShaderMath.Max(c.X - b.X, 1e-6f);
             if (instruction.Parameters.X > 0.5f) t = ShaderMath.Saturate(t);
+            if (instruction.Parameters.Y == 1.0f)
+            {
+                t = ShaderMath.Saturate(t);
+                t = t * t * (3.0f - (2.0f * t));
+            }
+            else if (instruction.Parameters.Y == 2.0f)
+            {
+                t = ShaderMath.Saturate(t);
+                t = t * t * t * (t * ((t * 6.0f) - 15.0f) + 10.0f);
+            }
             result = new float4(ShaderMath.Lerp(d.X, e.X, t));
         }
         else if (instruction.Op == 14)
@@ -390,7 +422,7 @@ public static class FeatherMaterialExpression
             result = new float4(value);
         }
         else if (instruction.Op == 23) result = (a + b) * 0.5f;
-        else if (instruction.Op == 24)
+        else if (instruction.Op == 24 || instruction.Op == 25)
         {
             var baseNormal = ShaderMath.Dot(d.XYZ, d.XYZ) > 1e-6f
                 ? ShaderMath.Normalize(d.XYZ)

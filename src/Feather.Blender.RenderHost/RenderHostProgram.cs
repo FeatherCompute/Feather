@@ -63,7 +63,7 @@ internal static class RenderHostProgram
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            WriteError(exception);
+            WriteError(WithGraphContext(exception, options.RequestPath!));
             return 1;
         }
         finally
@@ -125,7 +125,7 @@ internal static class RenderHostProgram
                     pending = null;
                     failed = null;
                     failureCount = 0;
-                    WriteError(exception);
+                    WriteError(WithGraphContext(exception, options.RequestPath!));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -135,7 +135,7 @@ internal static class RenderHostProgram
                     var exponent = System.Math.Min(failureCount - 1, 5);
                     var retryMilliseconds = System.Math.Min(2000, 100 * (1 << exponent));
                     retryAfter = DateTimeOffset.UtcNow.AddMilliseconds(retryMilliseconds);
-                    WriteError(exception);
+                    WriteError(WithGraphContext(exception, options.RequestPath!));
                 }
             }
 
@@ -162,12 +162,43 @@ internal static class RenderHostProgram
         => Console.WriteLine(JsonSerializer.Serialize(new { @event = eventName, value }, ProtocolJson.Options));
 
     private static void WriteRenderResult(RenderHostResult result)
-        => WriteEvent(result.FramePublished ? "frame" : "progress", result);
+    {
+        foreach (var diagnostic in result.Diagnostics)
+        {
+            WriteEvent("diagnostic", diagnostic);
+        }
+        WriteEvent(result.FramePublished ? "frame" : "progress", result);
+    }
 
     private static void WriteError(Exception exception)
         => Console.Error.WriteLine(JsonSerializer.Serialize(
-            new { @event = "error", error = exception.GetType().Name, message = exception.Message },
+            new { @event = "diagnostic", value = RenderHostDiagnostic.FromException(exception) },
             ProtocolJson.Options));
+
+    private static Exception WithGraphContext(Exception exception, string requestPath)
+    {
+        if (exception is MaterialExpressionException or OutOfMemoryException)
+        {
+            return exception;
+        }
+        try
+        {
+            var request = RenderRequest.Load(requestPath);
+            var graph = RenderGraphDocument.Load(request.GraphPath);
+            var pass = graph.Passes.FirstOrDefault(
+                item => string.Equals(
+                    item.NodeId, graph.ResolvedOutput.NodeId, StringComparison.Ordinal))
+                ?? graph.Passes.LastOrDefault();
+            return pass is null
+                ? exception
+                : new RenderHostExecutionException(
+                    exception, pass.PassGuid, pass.NodeId);
+        }
+        catch (Exception contextException) when (contextException is not OperationCanceledException)
+        {
+            return exception;
+        }
+    }
 
     private sealed record FileSignature(long Length, long LastWriteTicks)
     {

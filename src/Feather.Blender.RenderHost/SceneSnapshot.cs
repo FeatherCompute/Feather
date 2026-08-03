@@ -260,6 +260,7 @@ internal sealed class SceneMaterialMetadata
     public JsonElement? MaterialExpression { get; init; }
     public string? GraphStatus { get; init; }
     public string? Diagnostic { get; init; }
+    public string? DiagnosticNodeGuid { get; init; }
     public bool UseNodes { get; init; }
     public string? NodeTree { get; init; }
 }

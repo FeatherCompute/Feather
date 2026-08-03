@@ -23,8 +23,15 @@ internal static class MaterialExpressionCompiler
         Require(hash.Length == 64, "materialExpression hash must contain 64 characters");
         var nodes = Required(root, "nodes");
         Require(nodes.ValueKind == JsonValueKind.Array, "materialExpression nodes must be an array");
-        Require(nodes.GetArrayLength() is > 0 and <= SceneMaterialExpression.MaxInstructions,
-            $"materialExpression must contain 1-{SceneMaterialExpression.MaxInstructions} nodes");
+        Require(nodes.GetArrayLength() > 0, "materialExpression must contain at least one node");
+        if (nodes.GetArrayLength() > SceneMaterialExpression.MaxInstructions)
+        {
+            var lastNode = nodes[nodes.GetArrayLength() - 1];
+            throw new MaterialExpressionException(
+                $"MATERIAL_INSTRUCTION_LIMIT: materialExpression contains {nodes.GetArrayLength()} " +
+                $"source instructions; the VM limit is {SceneMaterialExpression.MaxInstructions}",
+                ReadOptionalString(lastNode, "nodeGuid", ""));
+        }
 
         var expressionTextureIds = new List<string>();
         var expressionTextureIndices = new List<int>();
@@ -41,8 +48,11 @@ internal static class MaterialExpressionCompiler
                     "materialExpression texture table entries cannot be empty");
                 Require(!expressionTextureIds.Contains(id, StringComparer.Ordinal),
                     $"materialExpression texture table contains duplicate texture '{id}'");
-                Require(textureIndices.TryGetValue(id, out var resolvedTexture),
-                    $"materialExpression references missing texture '{id}'");
+                if (!textureIndices.TryGetValue(id, out var resolvedTexture))
+                {
+                    throw new MaterialExpressionException(
+                        $"RESOURCE_BINDING_ERROR: materialExpression references missing texture '{id}'");
+                }
                 expressionTextureIds.Add(id);
                 expressionTextureIndices.Add(resolvedTexture);
             }
@@ -50,22 +60,33 @@ internal static class MaterialExpressionCompiler
 
         var indices = new Dictionary<string, int>(nodes.GetArrayLength(), StringComparer.Ordinal);
         var instructions = new List<SceneMaterialExpressionInstruction>(nodes.GetArrayLength());
+        var nodeGuids = new List<string>(nodes.GetArrayLength());
         var parameters = new List<float4>();
         foreach (var node in nodes.EnumerateArray())
         {
             Require(node.ValueKind == JsonValueKind.Object, "materialExpression node must be an object");
             var id = ReadString(node, "id");
             Require(!indices.ContainsKey(id), $"materialExpression contains duplicate node ID '{id}'");
-            var instruction = CompileNode(
-                node,
-                indices,
-                parameters,
-                textureIndices,
-                expressionTextureIds,
-                expressionTextureIndices);
+            var nodeGuid = ReadOptionalString(node, "nodeGuid", "");
+            SceneMaterialExpressionInstruction instruction;
+            try
+            {
+                instruction = CompileNode(
+                    node,
+                    indices,
+                    parameters,
+                    textureIndices,
+                    expressionTextureIds,
+                    expressionTextureIndices);
+            }
+            catch (InvalidDataException exception)
+            {
+                throw new MaterialExpressionException(exception.Message, nodeGuid);
+            }
             Require(indices.TryAdd(id, instructions.Count),
                 $"materialExpression contains duplicate node ID '{id}'");
             instructions.Add(instruction);
+            nodeGuids.Add(nodeGuid);
         }
         var outputs = Required(root, "outputs");
         Require(outputs.ValueKind == JsonValueKind.Object, "materialExpression outputs must be an object");
@@ -85,7 +106,7 @@ internal static class MaterialExpressionCompiler
             Output("emissionStrength"),
             Output("alpha"),
             Output("normal"));
-        LowerBump(instructions, ref expressionOutputs);
+        LowerBump(instructions, nodeGuids, ref expressionOutputs);
         var compiledProgram = CompileCanonical(instructions, parameters, expressionOutputs);
         return new SceneMaterialExpression(
             hash,
@@ -640,17 +661,21 @@ internal static class MaterialExpressionCompiler
 
     private static void LowerBump(
         List<SceneMaterialExpressionInstruction> instructions,
+        IReadOnlyList<string> nodeGuids,
         ref SceneMaterialExpressionOutputs outputs)
     {
         var original = instructions.ToArray();
         var remapped = new int[original.Length];
+        var dependsOnUv = new bool?[original.Length];
         instructions.Clear();
+        var expandedBumpGuid = "";
 
         for (var index = 0; index < original.Length; index++)
         {
             var instruction = RemapInputs(original[index], remapped);
             if (instruction.Op == (int)SceneMaterialExpressionOp.Bump)
             {
+                expandedBumpGuid = nodeGuids[index];
                 var height = original[original[index].A];
                 if (height.Op is (int)SceneMaterialExpressionOp.ImageColor
                     or (int)SceneMaterialExpressionOp.ImageAlpha)
@@ -668,13 +693,37 @@ internal static class MaterialExpressionCompiler
                     instruction.Parameters = new float4(
                         instruction.Parameters.X, 1.0f, 0.0f, 0.0f);
                 }
+                else if (DependsOnUv(original, original[index].A, dependsOnUv))
+                {
+                    var left = CloneHeightAtOffset(
+                        instructions, original, remapped, original[index].A, -1.0f / 256.0f, 0.0f);
+                    var right = CloneHeightAtOffset(
+                        instructions, original, remapped, original[index].A, 1.0f / 256.0f, 0.0f);
+                    var down = CloneHeightAtOffset(
+                        instructions, original, remapped, original[index].A, 0.0f, -1.0f / 256.0f);
+                    var up = CloneHeightAtOffset(
+                        instructions, original, remapped, original[index].A, 0.0f, 1.0f / 256.0f);
+                    var derivatives = AddCombine(instructions, left, right, down);
+                    var controls = AddCombine(instructions, up, instruction.B, instruction.C);
+                    instruction.E = derivatives;
+                    instruction.F = controls;
+                    instruction.Op = (int)SceneMaterialExpressionOp.BumpEvaluated;
+                    instruction.Parameters = new float4(
+                        instruction.Parameters.X, 1.0f, 0.0f, 0.0f);
+                }
             }
             remapped[index] = instructions.Count;
             instructions.Add(instruction);
         }
 
-        Require(instructions.Count <= SceneMaterialExpression.MaxInstructions,
-            $"lowered materialExpression exceeds {SceneMaterialExpression.MaxInstructions} instructions");
+        if (instructions.Count > SceneMaterialExpression.MaxInstructions)
+        {
+            throw new MaterialExpressionException(
+                $"MATERIAL_INSTRUCTION_LIMIT: Bump derivative lowering expanded the program to " +
+                $"{instructions.Count} instructions; the VM limit is " +
+                $"{SceneMaterialExpression.MaxInstructions}",
+                expandedBumpGuid);
+        }
         outputs.BaseColor = remapped[outputs.BaseColor];
         outputs.Metallic = remapped[outputs.Metallic];
         outputs.Roughness = remapped[outputs.Roughness];
@@ -690,6 +739,94 @@ internal static class MaterialExpressionCompiler
         outputs.Alpha = remapped[outputs.Alpha];
         outputs.Normal = remapped[outputs.Normal];
     }
+
+    private static bool DependsOnUv(
+        IReadOnlyList<SceneMaterialExpressionInstruction> instructions,
+        int index,
+        bool?[] cache)
+    {
+        if (index < 0)
+        {
+            return false;
+        }
+        if (cache[index].HasValue)
+        {
+            return cache[index]!.Value;
+        }
+        var instruction = instructions[index];
+        if (instruction.Op == (int)SceneMaterialExpressionOp.Uv)
+        {
+            cache[index] = true;
+            return true;
+        }
+        cache[index] = false;
+        var result = InputIndices(instruction).Any(
+            input => DependsOnUv(instructions, input, cache));
+        cache[index] = result;
+        return result;
+    }
+
+    private static int CloneHeightAtOffset(
+        List<SceneMaterialExpressionInstruction> destination,
+        IReadOnlyList<SceneMaterialExpressionInstruction> source,
+        int[] remapped,
+        int heightIndex,
+        float offsetX,
+        float offsetY)
+    {
+        var clones = new Dictionary<int, int>();
+        return Clone(heightIndex);
+
+        int Clone(int index)
+        {
+            if (index < 0)
+            {
+                return index;
+            }
+            if (clones.TryGetValue(index, out var cloned))
+            {
+                return cloned;
+            }
+            var instruction = source[index];
+            if (instruction.Op == (int)SceneMaterialExpressionOp.Constant)
+            {
+                return remapped[index];
+            }
+            if (instruction.Op is (int)SceneMaterialExpressionOp.Bump or
+                (int)SceneMaterialExpressionOp.BumpEvaluated)
+            {
+                throw new MaterialExpressionException(
+                    "MATERIAL_EXPRESSION_UNSUPPORTED: a Bump Normal output cannot be reused as " +
+                    "another Bump node's Height input; connect it to Normal instead");
+            }
+            instruction.A = Clone(instruction.A);
+            instruction.B = Clone(instruction.B);
+            instruction.C = Clone(instruction.C);
+            instruction.D = Clone(instruction.D);
+            instruction.E = Clone(instruction.E);
+            instruction.F = Clone(instruction.F);
+            instruction.G = Clone(instruction.G);
+            instruction.H = Clone(instruction.H);
+            if (instruction.Op == (int)SceneMaterialExpressionOp.Uv)
+            {
+                instruction.Parameters = new float4(
+                    instruction.Parameters.X,
+                    instruction.Parameters.Y,
+                    instruction.Parameters.Z + offsetX,
+                    instruction.Parameters.W + offsetY);
+            }
+            destination.Add(instruction);
+            cloned = destination.Count - 1;
+            clones.Add(index, cloned);
+            return cloned;
+        }
+    }
+
+    private static int[] InputIndices(SceneMaterialExpressionInstruction instruction) =>
+    [
+        instruction.A, instruction.B, instruction.C, instruction.D,
+        instruction.E, instruction.F, instruction.G, instruction.H
+    ];
 
     private static SceneMaterialExpressionInstruction RemapInputs(
         SceneMaterialExpressionInstruction instruction,
@@ -839,11 +976,12 @@ internal static class MaterialExpressionCompiler
                 instruction.A = Input("Vector");
                 instruction.B = Input("Scale");
                 instruction.C = Input("Randomness");
-                instruction.Parameters = new float4(output == "Color" ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-                Require(ReadOptionalString(nodeParameters, "feature", "F1") == "F1",
-                    "only Voronoi F1 is supported by raster evaluation");
-                Require(ReadOptionalString(nodeParameters, "distance", "EUCLIDEAN") == "EUCLIDEAN",
-                    "only Euclidean Voronoi distance is supported by raster evaluation");
+                instruction.D = inputs.TryGetProperty("Exponent", out _) ? Input("Exponent") : instruction.B;
+                instruction.Parameters = new float4(
+                    output == "Color" ? 1.0f : 0.0f,
+                    VoronoiFeatureCode(ReadOptionalString(nodeParameters, "feature", "F1")),
+                    VoronoiDistanceCode(ReadOptionalString(nodeParameters, "distance", "EUCLIDEAN")),
+                    0.0f);
                 break;
             case "gradient_texture":
                 instruction.Op = (int)SceneMaterialExpressionOp.Gradient;
@@ -874,6 +1012,9 @@ internal static class MaterialExpressionCompiler
                 instruction.A = Input("Factor");
                 instruction.ParameterOffset = parameters.Count;
                 var rampInterpolation = RampInterpolationCode(ReadString(nodeParameters, "interpolation"));
+                Require(ReadOptionalString(nodeParameters, "color_mode", "RGB") == "RGB",
+                    $"ColorRamp color mode '{ReadOptionalString(nodeParameters, "color_mode", "RGB")}' " +
+                    "is unsupported; RGB ramps support CONSTANT, LINEAR, and EASE interpolation");
                 var elements = Required(nodeParameters, "elements");
                 Require(elements.ValueKind == JsonValueKind.Array && elements.GetArrayLength() >= 2,
                     "ColorRamp must contain at least two elements");
@@ -941,12 +1082,12 @@ internal static class MaterialExpressionCompiler
                 instruction.C = Input("From Max");
                 instruction.D = Input("To Min");
                 instruction.E = Input("To Max");
-                Require(ReadOptionalString(nodeParameters, "data_type", "FLOAT") == "FLOAT" &&
-                        ReadOptionalString(nodeParameters, "interpolation_type", "LINEAR") == "LINEAR",
-                    "only linear float Map Range is supported by raster evaluation");
+                Require(ReadOptionalString(nodeParameters, "data_type", "FLOAT") == "FLOAT",
+                    "only float Map Range is supported by raster evaluation");
                 instruction.Parameters = new float4(
                     ReadOptionalBool(nodeParameters, "clamp", true) ? 1.0f : 0.0f,
-                    0.0f,
+                    MapRangeInterpolationCode(ReadOptionalString(
+                        nodeParameters, "interpolation_type", "LINEAR")),
                     0.0f,
                     0.0f);
                 break;
@@ -1092,6 +1233,32 @@ internal static class MaterialExpressionCompiler
         "QUADRATIC_SPHERE" => 5,
         "RADIAL" => 6,
         _ => throw Error($"Gradient Texture mode '{value}' is unsupported by raster evaluation")
+    };
+
+    private static int VoronoiFeatureCode(string value) => value switch
+    {
+        "F1" => 0,
+        "F2" => 1,
+        _ => throw Error($"Voronoi feature '{value}' is unsupported; supported features are F1 and F2")
+    };
+
+    private static int VoronoiDistanceCode(string value) => value switch
+    {
+        "EUCLIDEAN" => 0,
+        "MANHATTAN" => 1,
+        "CHEBYCHEV" => 2,
+        "MINKOWSKI" => 3,
+        _ => throw Error($"Voronoi distance '{value}' is unsupported")
+    };
+
+    private static int MapRangeInterpolationCode(string value) => value switch
+    {
+        "LINEAR" => 0,
+        "SMOOTHSTEP" => 1,
+        "SMOOTHERSTEP" => 2,
+        _ => throw Error(
+            $"Map Range interpolation '{value}' is unsupported; supported modes are " +
+            "LINEAR, SMOOTHSTEP, and SMOOTHERSTEP")
     };
 
     private static bool IsUnaryMath(string value) => value is
