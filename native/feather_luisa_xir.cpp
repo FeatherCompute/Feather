@@ -23,7 +23,10 @@ using namespace luisa::compute;
 using namespace luisa::compute::xir;
 
 constexpr uint8_t kResourceBuffer = 1;
+constexpr uint8_t kResourceTexture2D = 2;
+constexpr uint8_t kResourceSampler = 3;
 constexpr uint8_t kResourcePushConstant = 5;
+constexpr uint8_t kResourceTexture3D = 6;
 constexpr uint8_t kAccessWrite = 2;
 constexpr uint8_t kAccessReadWrite = 3;
 
@@ -34,6 +37,12 @@ constexpr uint8_t kTypeStruct = 4;
 constexpr uint8_t kTypeArray = 5;
 constexpr uint8_t kTypeResourceWrapper = 6;
 constexpr uint8_t kTypeVoid = 7;
+constexpr uint32_t kTypeResourceBuffer = 0;
+constexpr uint32_t kTypeResourceTexture2D = 1;
+constexpr uint32_t kTypeResourceTexture3D = 2;
+constexpr uint32_t kTypeResourceSampler = 3;
+
+constexpr uint8_t kFunctionCallable = 5;
 
 constexpr uint8_t kStatementBlock = 1;
 constexpr uint8_t kStatementLocalDeclaration = 2;
@@ -114,7 +123,7 @@ class Lowerer {
         kernel_->set_block_size(luisa::make_uint3(block_x, static_cast<uint32_t>(inputs_.group_y),
                                                   static_cast<uint32_t>(inputs_.group_z)));
 
-        if (!register_resources()) return nullptr;
+        if (!register_resources() || !stage_callables() || !lower_callable_bodies()) return nullptr;
         builder_.set_insertion_point(kernel_->create_body_block());
         if (!emit_bounds_guard(entry.kind) || !lower_statement(entry.body_statement_index)) return nullptr;
         if (!builder_.is_insertion_point_terminator()) builder_.return_void();
@@ -128,6 +137,24 @@ class Lowerer {
         uint32_t binding = 0;
         uint8_t kind = 0;
         uint8_t access = 0;
+    };
+
+    struct Sampler {
+        Value* filter = nullptr;
+        Value* address = nullptr;
+    };
+
+    struct CallableParameter {
+        Argument* argument = nullptr;
+        Argument* sampler_address = nullptr;
+        uint32_t type_id = TypedIR::NoIndex;
+        uint8_t direction = 0;
+    };
+
+    struct CallableRecord {
+        CallableFunction* function = nullptr;
+        uint32_t function_id = TypedIR::NoIndex;
+        std::vector<CallableParameter> parameters;
     };
 
     struct Address {
@@ -266,13 +293,34 @@ class Lowerer {
         struct_visiting_.resize(module_.structs.size());
         for (const auto& source : inputs_.resources) {
             if (source.kind == kResourcePushConstant) continue;
-            if (source.kind != kResourceBuffer)
-                return fail("Luisa XIR buffer translator received a non-buffer resource");
-            auto* element = type_from_name(source.element_type);
-            if (element == nullptr) return fail("Luisa cannot resolve FEIR buffer element type '" + source.element_type + "'");
-            auto* argument = kernel_->create_resource_argument(Type::buffer(element));
+            if (source.kind == kResourceSampler) {
+                if (source.sampler_min_filter > 1u || source.sampler_mag_filter > 1u ||
+                    source.sampler_mipmap_mode > 1u || source.sampler_address_u > 3u ||
+                    source.sampler_address_v > 3u || source.sampler_address_w > 3u)
+                    return fail("Luisa received an invalid Feather sampler descriptor");
+                if (source.sampler_min_filter != source.sampler_mag_filter)
+                    return fail("Luisa XIR cannot represent different minification and magnification filters");
+                if (source.sampler_address_u != source.sampler_address_v ||
+                    source.sampler_address_u != source.sampler_address_w)
+                    return fail("Luisa XIR cannot represent different per-axis sampler address modes");
+                const auto filter = source.sampler_anisotropy ? 3u
+                                    : source.sampler_min_filter == 0u ? 0u
+                                    : source.sampler_mipmap_mode == 0u ? 1u : 2u;
+                const uint32_t addresses[]{0u, 1u, 2u, 3u};
+                samplers_.emplace(source.name,
+                                  Sampler{index_constant(filter), index_constant(addresses[source.sampler_address_u])});
+                continue;
+            }
+            const auto texture = source.kind == kResourceTexture2D || source.kind == kResourceTexture3D;
+            if (source.kind != kResourceBuffer && !texture)
+                return fail("Luisa XIR received an unsupported forward resource");
+            auto* element = texture ? Type::vector(Type::of<float>(), 4u) : type_from_name(source.element_type);
+            if (element == nullptr) return fail("Luisa cannot resolve FEIR resource element type '" + source.element_type + "'");
+            auto* resource_type = texture ? Type::texture(Type::of<float>(), source.kind == kResourceTexture2D ? 2u : 3u)
+                                          : Type::buffer(element);
+            auto* argument = kernel_->create_resource_argument(resource_type);
             resources_.emplace(source.name, Resource{argument, element, source.binding, source.kind, source.access});
-            if (buffer_layouts_ != nullptr) {
+            if (!texture && buffer_layouts_ != nullptr) {
                 auto source_type = TypedIR::NoIndex;
                 for (uint32_t i = 0; i < module_.types.size(); ++i) {
                     if (type(i) == element) { source_type = i; break; }
@@ -281,6 +329,117 @@ class Lowerer {
                     return fail("Luisa cannot match a buffer element to its FEIR type record");
                 buffer_layouts_->push_back(BufferLayout{source.binding, source_type, element});
             }
+        }
+        return true;
+    }
+
+    bool is_void_type(uint32_t id) const {
+        return id < module_.types.size() && module_.types[id].kind == kTypeVoid;
+    }
+
+    bool stage_callables() {
+        for (uint32_t function_id = 0; function_id < module_.functions.size(); ++function_id) {
+            const auto& source = module_.functions[function_id];
+            if (source.kind != kFunctionCallable) continue;
+            if ((!is_void_type(source.return_type_id) && type(source.return_type_id) == nullptr) ||
+                source.body_statement_index >= module_.statements.size() ||
+                (source.parameter_count != 0u &&
+                 (source.first_parameter == TypedIR::NoIndex || source.first_parameter > module_.parameters.size() ||
+                  source.parameter_count > module_.parameters.size() - source.first_parameter)))
+                return fail("FEIR callable has an invalid return type, body, or parameter range");
+            auto name = std::string{string(source.mangled_name_id)};
+            if (name.empty() || callables_.contains(name)) return fail("FEIR callable name is missing or duplicated");
+            auto* callable = xir_module_.create_callable(is_void_type(source.return_type_id) ? nullptr
+                                                                                              : type(source.return_type_id));
+            callable->set_name(name);
+            CallableRecord record{.function = callable, .function_id = function_id};
+            record.parameters.reserve(source.parameter_count);
+            for (uint32_t i = 0; i < source.parameter_count; ++i) {
+                const auto& parameter = module_.parameters[source.first_parameter + i];
+                if (parameter.type_id >= module_.types.size()) return fail("FEIR callable parameter type is out of range");
+                const auto& parameter_type = module_.types[parameter.type_id];
+                CallableParameter lowered{.type_id = parameter.type_id, .direction = parameter.direction};
+                if (parameter_type.kind == kTypeResourceWrapper) {
+                    if (parameter.direction != 0u) return fail("FEIR callable resource parameters must be inputs");
+                    if (parameter_type.a == kTypeResourceSampler) {
+                        lowered.argument = callable->create_value_argument(Type::of<uint32_t>());
+                        lowered.sampler_address = callable->create_value_argument(Type::of<uint32_t>());
+                    } else {
+                        auto* element = type(parameter_type.b);
+                        if (element == nullptr) return fail("FEIR callable resource element type is unsupported");
+                        const Type* resource_type = nullptr;
+                        if (parameter_type.a == kTypeResourceBuffer) resource_type = Type::buffer(element);
+                        else if (parameter_type.a == kTypeResourceTexture2D)
+                            resource_type = Type::texture(Type::of<float>(), 2u);
+                        else if (parameter_type.a == kTypeResourceTexture3D)
+                            resource_type = Type::texture(Type::of<float>(), 3u);
+                        else return fail("FEIR callable resource kind is unsupported");
+                        lowered.argument = callable->create_resource_argument(resource_type);
+                    }
+                } else {
+                    auto* parameter_value_type = type(parameter.type_id);
+                    if (parameter_value_type == nullptr) return fail("FEIR callable value parameter type is unsupported");
+                    lowered.argument = parameter.direction == 0u
+                                           ? static_cast<Argument*>(callable->create_value_argument(parameter_value_type))
+                                           : static_cast<Argument*>(callable->create_reference_argument(parameter_value_type));
+                }
+                record.parameters.push_back(lowered);
+            }
+            callables_.emplace(std::move(name), std::move(record));
+        }
+        return true;
+    }
+
+    bool lower_callable_bodies() {
+        for (auto& [name, callable] : callables_) {
+            const auto& source = module_.functions[callable.function_id];
+            auto saved_locals = std::move(locals_);
+            auto saved_resources = std::move(resources_);
+            auto saved_samplers = std::move(samplers_);
+            auto saved_shared = std::move(shared_);
+            auto saved_loops = std::move(loops_);
+            locals_.clear();
+            resources_.clear();
+            samplers_.clear();
+            shared_.clear();
+            loops_.clear();
+            builder_.set_insertion_point(callable.function->create_body_block());
+            for (uint32_t i = 0; i < source.parameter_count; ++i) {
+                const auto& parameter = module_.parameters[source.first_parameter + i];
+                const auto& lowered = callable.parameters[i];
+                const auto parameter_name = std::string{string(parameter.name_id)};
+                const auto& parameter_type = module_.types[parameter.type_id];
+                if (parameter_name.empty()) return fail("FEIR callable parameter name is missing");
+                if (parameter_type.kind == kTypeResourceWrapper) {
+                    if (parameter_type.a == kTypeResourceSampler) {
+                        samplers_.emplace(parameter_name, Sampler{lowered.argument, lowered.sampler_address});
+                    } else {
+                        const uint8_t kind = parameter_type.a == kTypeResourceBuffer ? kResourceBuffer
+                                             : parameter_type.a == kTypeResourceTexture2D ? kResourceTexture2D
+                                                                                         : kResourceTexture3D;
+                        const uint8_t access = parameter_type.c == 0u ? 1u : parameter_type.c == 1u ? 2u
+                                               : parameter_type.c == 2u ? 3u : 4u;
+                        resources_.emplace(parameter_name,
+                            Resource{static_cast<ResourceArgument*>(lowered.argument), type(parameter_type.b), 0u, kind, access});
+                    }
+                } else if (parameter.direction == 0u) {
+                    auto* storage = builder_.alloca_local(type(parameter.type_id));
+                    builder_.store(storage, lowered.argument);
+                    locals_.emplace(parameter_name, storage);
+                } else {
+                    locals_.emplace(parameter_name, lowered.argument);
+                }
+            }
+            if (!lower_statement(source.body_statement_index)) return false;
+            if (!builder_.is_insertion_point_terminator()) {
+                if (is_void_type(source.return_type_id)) builder_.return_void();
+                else return fail("non-void FEIR callable does not terminate with a return");
+            }
+            locals_ = std::move(saved_locals);
+            resources_ = std::move(saved_resources);
+            samplers_ = std::move(saved_samplers);
+            shared_ = std::move(saved_shared);
+            loops_ = std::move(saved_loops);
         }
         return true;
     }
@@ -347,6 +506,24 @@ class Lowerer {
         return builder_.call(result_type, ArithmeticOp::EXTRACT, indices);
     }
 
+    Value* convert(Value* value, const Type* result_type) {
+        if (value == nullptr || result_type == nullptr) return nullptr;
+        if (value->type() == result_type) return value;
+        if (value->type()->is_scalar() && result_type->is_scalar())
+            return builder_.static_cast_if_necessary(result_type, value);
+        if (value->type()->is_vector() && result_type->is_vector() &&
+            value->type()->dimension() == result_type->dimension()) {
+            std::vector<Value*> components;
+            components.reserve(result_type->dimension());
+            for (uint32_t i = 0; i < result_type->dimension(); ++i) {
+                auto* component = extract(value, value->type()->element(), {index_constant(i)});
+                components.push_back(builder_.static_cast_if_necessary(result_type->element(), component));
+            }
+            return builder_.call(result_type, ArithmeticOp::AGGREGATE, components);
+        }
+        return fail("unsupported FEIR numeric conversion"), nullptr;
+    }
+
     Value* matrix_multiply(Value* left, Value* right, const Type* result_type) {
         auto scalar = [](const Type* value) { return value->is_matrix() ? value->element() : value->element(); };
         const auto* element = scalar(result_type);
@@ -403,7 +580,8 @@ class Lowerer {
         if (id >= module_.expressions.size()) return fail("FEIR expression index is out of range"), nullptr;
         const auto& expression = module_.expressions[id];
         auto* result_type = type(expression.type_id);
-        if (result_type == nullptr) return fail("FEIR expression has an unsupported XIR type"), nullptr;
+        if (result_type == nullptr && !(expression.kind == kExpressionCallableCall && is_void_type(expression.type_id)))
+            return fail("FEIR expression has an unsupported XIR type"), nullptr;
         switch (expression.kind) {
         case kExpressionLiteral:
             return literal(expression, result_type);
@@ -416,7 +594,17 @@ class Lowerer {
         case kExpressionResourceElement: {
             const auto found = resources_.find(std::string{string(expression.name_id)});
             auto* index = lower_expression(expression.a);
-            if (found == resources_.end() || index == nullptr) return fail("FEIR buffer read is invalid"), nullptr;
+            if (found == resources_.end() || index == nullptr) return fail("FEIR resource read is invalid"), nullptr;
+            if (found->second.kind == kResourceTexture2D || found->second.kind == kResourceTexture3D) {
+                const auto dimension = found->second.kind == kResourceTexture2D ? 2u : 3u;
+                auto* coord_type = Type::vector(Type::of<uint32_t>(), dimension);
+                index = convert(index, coord_type);
+                auto* texture_value = builder_.call(found->second.element_type,
+                    dimension == 2u ? ResourceReadOp::TEXTURE2D_READ : ResourceReadOp::TEXTURE3D_READ,
+                    {found->second.argument, index});
+                return texture_value->type() == result_type ? texture_value
+                                                            : builder_.bit_cast_if_necessary(result_type, texture_value);
+            }
             index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
             return builder_.call(result_type, ResourceReadOp::BUFFER_READ, {found->second.argument, index});
         }
@@ -463,7 +651,7 @@ class Lowerer {
         }
         case kExpressionConversion: {
             auto* value = lower_expression(expression.a);
-            return value == nullptr ? nullptr : builder_.static_cast_if_necessary(result_type, value);
+            return convert(value, result_type);
         }
         case kExpressionConstructor: {
             auto values = arguments(expression);
@@ -490,6 +678,26 @@ class Lowerer {
                          : (fail("FEIR member name is not present in its aggregate type"), nullptr);
         }
         case kExpressionIndexAccess: {
+            if (expression.a < module_.expressions.size()) {
+                const auto& base_expression = module_.expressions[expression.a];
+                if (base_expression.kind == kExpressionLocal || base_expression.kind == kExpressionParameter) {
+                    const auto resource = resources_.find(std::string{string(base_expression.name_id)});
+                    if (resource != resources_.end()) {
+                        auto* index = lower_expression(expression.b);
+                        if (index == nullptr) return nullptr;
+                        if (resource->second.kind == kResourceTexture2D || resource->second.kind == kResourceTexture3D) {
+                            const auto dimension = resource->second.kind == kResourceTexture2D ? 2u : 3u;
+                            index = convert(index, Type::vector(Type::of<uint32_t>(), dimension));
+                            return builder_.call(result_type,
+                                dimension == 2u ? ResourceReadOp::TEXTURE2D_READ : ResourceReadOp::TEXTURE3D_READ,
+                                {resource->second.argument, index});
+                        }
+                        index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
+                        return builder_.call(result_type, ResourceReadOp::BUFFER_READ,
+                                             {resource->second.argument, index});
+                    }
+                }
+            }
             auto* base = lower_expression(expression.a);
             auto* index = lower_expression(expression.b);
             return base == nullptr || index == nullptr ? nullptr : extract(base, result_type, {index});
@@ -529,11 +737,11 @@ class Lowerer {
         case kExpressionIntrinsic:
             return lower_intrinsic(expression, result_type);
         case kExpressionCallableCall:
-            return fail("FEIR callable translation is staged for the callable batch"), nullptr;
+            return lower_callable_call(expression, result_type);
         case kExpressionAtomic:
             return lower_atomic(expression, result_type);
         case kExpressionTextureSample:
-            return fail("FEIR texture sampling is staged for the texture batch"), nullptr;
+            return lower_texture_sample(expression, result_type);
         default:
             return fail("unsupported FEIR expression kind " + std::to_string(expression.kind)), nullptr;
         }
@@ -579,6 +787,87 @@ class Lowerer {
         if (found == nullptr || found->data == nullptr || found->size < result_type->size())
             return fail("FEIR push constant is missing or has the wrong layout"), nullptr;
         return xir_module_.create_constant(result_type, found->data);
+    }
+
+    Value* lower_callable_call(const TypedIR::Expression& expression, const Type* result_type) {
+        const auto found = callables_.find(std::string{string(expression.name_id)});
+        if (found == callables_.end() || !argument_range(expression) ||
+            expression.argument_count != found->second.parameters.size())
+            return fail("FEIR callable call has an unknown target or invalid argument range"), nullptr;
+        std::vector<Value*> values;
+        for (uint32_t i = 0; i < expression.argument_count; ++i) {
+            const auto expression_id = module_.arguments[expression.first_argument + i];
+            const auto& parameter = found->second.parameters[i];
+            const auto& parameter_type = module_.types[parameter.type_id];
+            if (parameter_type.kind == kTypeResourceWrapper) {
+                if (expression_id >= module_.expressions.size())
+                    return fail("FEIR callable resource argument is out of range"), nullptr;
+                const auto& argument = module_.expressions[expression_id];
+                if (argument.kind != kExpressionLocal && argument.kind != kExpressionParameter)
+                    return fail("FEIR callable resource argument is not a direct resource reference"), nullptr;
+                const auto name = std::string{string(argument.name_id)};
+                if (parameter_type.a == kTypeResourceSampler) {
+                    const auto sampler = samplers_.find(name);
+                    if (sampler == samplers_.end()) return fail("FEIR callable sampler argument is unknown"), nullptr;
+                    values.push_back(sampler->second.filter);
+                    values.push_back(sampler->second.address);
+                } else {
+                    const auto resource = resources_.find(name);
+                    if (resource == resources_.end()) return fail("FEIR callable resource argument is unknown"), nullptr;
+                    values.push_back(resource->second.argument);
+                }
+            } else {
+                auto* value = lower_expression(expression_id);
+                if (value == nullptr) return nullptr;
+                values.push_back(value);
+            }
+        }
+        return builder_.call(result_type, found->second.function, values);
+    }
+
+    Value* lower_texture_sample(const TypedIR::Expression& expression, const Type* result_type) {
+        const uint32_t expected_count = expression.op == 0u ? 3u : expression.op == 1u ? 4u :
+                                        expression.op == 2u ? 5u : 0u;
+        if (expected_count == 0u || expression.argument_count != expected_count || !argument_range(expression))
+            return fail("FEIR texture sample has an invalid operation or argument range"), nullptr;
+        const auto texture_id = module_.arguments[expression.first_argument];
+        const auto sampler_id = module_.arguments[expression.first_argument + 1u];
+        if (texture_id >= module_.expressions.size() || sampler_id >= module_.expressions.size())
+            return fail("FEIR texture sample resource reference is out of range"), nullptr;
+        const auto& texture_expression = module_.expressions[texture_id];
+        const auto& sampler_expression = module_.expressions[sampler_id];
+        if ((texture_expression.kind != kExpressionLocal && texture_expression.kind != kExpressionParameter) ||
+            (sampler_expression.kind != kExpressionLocal && sampler_expression.kind != kExpressionParameter))
+            return fail("FEIR texture sampling requires direct resource references"), nullptr;
+        const auto texture = resources_.find(std::string{string(texture_expression.name_id)});
+        const auto sampler = samplers_.find(std::string{string(sampler_expression.name_id)});
+        if (texture == resources_.end() || texture->second.kind != kResourceTexture2D || sampler == samplers_.end())
+            return fail("FEIR texture sample references an unknown sampled texture or sampler"), nullptr;
+
+        auto* uv = lower_expression(module_.arguments[expression.first_argument + 2u]);
+        if (uv == nullptr || uv->type() != Type::vector(Type::of<float>(), 2u))
+            return fail("FEIR texture sample requires float2 coordinates"), nullptr;
+        std::vector<Value*> operands{texture->second.argument, uv};
+        ResourceQueryOp op = ResourceQueryOp::TEXTURE2D_SAMPLE;
+        if (expression.op == 1u) {
+            auto* lod = lower_expression(module_.arguments[expression.first_argument + 3u]);
+            if (lod == nullptr || lod->type() != Type::of<float>())
+                return fail("FEIR texture SampleLevel requires a float LOD"), nullptr;
+            operands.push_back(lod);
+            op = ResourceQueryOp::TEXTURE2D_SAMPLE_LEVEL;
+        } else if (expression.op == 2u) {
+            auto* ddx = lower_expression(module_.arguments[expression.first_argument + 3u]);
+            auto* ddy = lower_expression(module_.arguments[expression.first_argument + 4u]);
+            if (ddx == nullptr || ddy == nullptr || ddx->type() != uv->type() || ddy->type() != uv->type())
+                return fail("FEIR texture SampleGrad requires float2 gradients"), nullptr;
+            operands.push_back(ddx);
+            operands.push_back(ddy);
+            op = ResourceQueryOp::TEXTURE2D_SAMPLE_GRAD;
+        }
+        operands.push_back(sampler->second.filter);
+        operands.push_back(sampler->second.address);
+        auto* sampled = builder_.call(Type::vector(Type::of<float>(), 4u), op, operands);
+        return sampled->type() == result_type ? sampled : builder_.bit_cast_if_necessary(result_type, sampled);
     }
 
     Value* shared_index(Value* logical_index, uint32_t length) {
@@ -633,7 +922,10 @@ class Lowerer {
         if (id >= module_.lvalues.size()) return fail("FEIR l-value index is out of range"), std::nullopt;
         const auto& lvalue = module_.lvalues[id];
         if (lvalue.kind == kLValueLocal || lvalue.kind == kLValueParameter) {
-            auto found = locals_.find(std::string{string(lvalue.name_id)});
+            const auto name = std::string{string(lvalue.name_id)};
+            if (auto resource = resources_.find(name); resource != resources_.end())
+                return Address{.resource = &resource->second, .root_type = resource->second.element_type};
+            auto found = locals_.find(name);
             if (found == locals_.end()) return fail("FEIR l-value names an unknown local"), std::nullopt;
             return Address{.pointer = found->second, .root_type = found->second->type()};
         }
@@ -641,7 +933,11 @@ class Lowerer {
             auto found = resources_.find(std::string{string(lvalue.name_id)});
             auto* index = lower_expression(lvalue.a);
             if (found == resources_.end() || index == nullptr) return fail("invalid FEIR buffer l-value"), std::nullopt;
-            return Address{.resource = &found->second, .resource_index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index),
+            if (found->second.kind == kResourceTexture2D || found->second.kind == kResourceTexture3D) {
+                const auto dimension = found->second.kind == kResourceTexture2D ? 2u : 3u;
+                index = convert(index, Type::vector(Type::of<uint32_t>(), dimension));
+            } else index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
+            return Address{.resource = &found->second, .resource_index = index,
                            .root_type = found->second.element_type};
         }
         if (lvalue.kind == kLValueSharedMemoryElement) {
@@ -658,7 +954,13 @@ class Lowerer {
             if (lvalue.kind == kLValueIndexAccess) {
                 auto* index = lower_expression(lvalue.b);
                 if (index == nullptr) return std::nullopt;
-                base->indices.push_back(index);
+                if (base->resource != nullptr && base->resource_index == nullptr) {
+                    if (base->resource->kind == kResourceTexture2D || base->resource->kind == kResourceTexture3D) {
+                        const auto dimension = base->resource->kind == kResourceTexture2D ? 2u : 3u;
+                        index = convert(index, Type::vector(Type::of<uint32_t>(), dimension));
+                    } else index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
+                    base->resource_index = index;
+                } else base->indices.push_back(index);
             } else {
                 auto field = field_index(module_.lvalues[lvalue.a].type_id, string(lvalue.name_id));
                 if (!field) return fail("invalid FEIR aggregate l-value member"), std::nullopt;
@@ -675,8 +977,15 @@ class Lowerer {
                                                     : builder_.gep(result_type, address.pointer, address.indices);
             return builder_.load(result_type, pointer);
         }
-        auto* root = builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
-                                   {address.resource->argument, address.resource_index});
+        if (address.resource_index == nullptr) return fail("FEIR resource l-value is missing an element index"), nullptr;
+        Value* root = nullptr;
+        if (address.resource->kind == kResourceTexture2D || address.resource->kind == kResourceTexture3D) {
+            root = builder_.call(address.root_type,
+                                 address.resource->kind == kResourceTexture2D ? ResourceReadOp::TEXTURE2D_READ
+                                                                             : ResourceReadOp::TEXTURE3D_READ,
+                                 {address.resource->argument, address.resource_index});
+        } else root = builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
+                                    {address.resource->argument, address.resource_index});
         return address.indices.empty() ? root : extract(root, result_type, address.indices);
     }
 
@@ -687,8 +996,16 @@ class Lowerer {
             builder_.store(pointer, value);
             return true;
         }
+        if (address.resource_index == nullptr) return fail("FEIR resource l-value is missing an element index");
         if (address.resource->access != kAccessWrite && address.resource->access != kAccessReadWrite)
             return fail("FEIR writes a read-only buffer");
+        if (address.resource->kind == kResourceTexture2D || address.resource->kind == kResourceTexture3D) {
+            if (!address.indices.empty()) return fail("nested texture-element l-values are unsupported");
+            builder_.call(address.resource->kind == kResourceTexture2D ? ResourceWriteOp::TEXTURE2D_WRITE
+                                                                       : ResourceWriteOp::TEXTURE3D_WRITE,
+                          {address.resource->argument, address.resource_index, value});
+            return true;
+        }
         if (!address.indices.empty()) {
             auto* root = builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
                                        {address.resource->argument, address.resource_index});
@@ -899,6 +1216,8 @@ class Lowerer {
     std::unordered_map<uint32_t, const Type*> struct_types_;
     std::vector<bool> struct_visiting_;
     std::unordered_map<std::string, Resource> resources_;
+    std::unordered_map<std::string, Sampler> samplers_;
+    std::unordered_map<std::string, CallableRecord> callables_;
     std::unordered_map<std::string, Value*> locals_;
     struct SharedMemory { Value* pointer; uint32_t length; };
     std::unordered_map<std::string, SharedMemory> shared_;

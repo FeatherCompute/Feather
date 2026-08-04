@@ -27,8 +27,10 @@
 #include <luisa/runtime/byte_buffer.h>
 #include <luisa/runtime/context.h>
 #include <luisa/runtime/device.h>
+#include <luisa/runtime/image.h>
 #include <luisa/runtime/shader.h>
 #include <luisa/runtime/stream.h>
+#include <luisa/runtime/volume.h>
 #include <luisa/xir/builder.h>
 #include <luisa/xir/module.h>
 #include <luisa/xir/translators/xir2ast.h>
@@ -50,6 +52,8 @@ constexpr uint8_t kExpressionBinary = 7;
 constexpr uint8_t kExpressionBuiltin = 18;
 constexpr uint8_t kLValueResourceElement = 4;
 constexpr uint8_t kResourceBuffer = 1;
+constexpr uint8_t kResourceTexture2D = 2;
+constexpr uint8_t kResourceTexture3D = 6;
 constexpr uint8_t kAccessWrite = 2;
 constexpr uint8_t kAccessReadWrite = 3;
 constexpr uint8_t kBuiltinThreadIndexX = 1;
@@ -432,6 +436,23 @@ bool repack_value(const TypedIR::Module& module, uint32_t id, const Type* device
     }
 }
 
+std::optional<PixelStorage> pixel_storage(uint32_t format) {
+    switch (format) {
+    case 1: return PixelStorage::BYTE1;
+    case 2: return PixelStorage::BYTE2;
+    case 3: return PixelStorage::BYTE4;
+    case 5: return PixelStorage::HALF1;
+    case 6: return PixelStorage::HALF2;
+    case 7: return PixelStorage::HALF4;
+    case 8: return PixelStorage::FLOAT1;
+    case 9: return PixelStorage::FLOAT2;
+    case 10: return PixelStorage::FLOAT4;
+    default: return std::nullopt;
+    }
+}
+
+using RuntimeTexture = std::variant<Image<float>, Volume<float>>;
+
 } // namespace
 
 std::string RuntimeDirectory() {
@@ -461,7 +482,8 @@ std::string RuntimeDirectory() {
 }
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
-              std::span<HostBufferBinding> host_buffers, const DispatchInputs& dispatch, std::string* error) {
+              std::span<HostBufferBinding> host_buffers, std::span<HostTextureBinding> host_textures,
+              const DispatchInputs& dispatch, std::string* error) {
     if (error != nullptr)
         error->clear();
     xir::Module xir_module;
@@ -485,12 +507,39 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
     std::vector<std::vector<unsigned char>> staged_bytes;
     std::vector<HostBufferBinding*> staged_bindings;
     std::vector<luisa::compute::Function::Binding> bound_arguments;
+    std::vector<RuntimeTexture> runtime_textures;
+    std::vector<HostTextureBinding*> staged_textures;
     runtime_buffers.reserve(host_buffers.size());
     staged_bytes.reserve(host_buffers.size());
     staged_bindings.reserve(host_buffers.size());
     bound_arguments.reserve(lowering.resources.size());
+    runtime_textures.reserve(host_textures.size());
+    staged_textures.reserve(host_textures.size());
 
     for (const auto& resource : lowering.resources) {
+        if (resource.kind == kResourceTexture2D || resource.kind == kResourceTexture3D) {
+            auto found = std::find_if(host_textures.begin(), host_textures.end(),
+                                      [&](const auto& binding) { return binding.binding == resource.binding; });
+            auto storage = found == host_textures.end() ? std::nullopt : pixel_storage(found->pixel_format);
+            if (found == host_textures.end() || found->bytes == nullptr || found->bytes->empty() || !storage) {
+                if (error != nullptr) *error = "Luisa texture binding is missing or uses an unsupported pixel format";
+                return false;
+            }
+            if (resource.kind == kResourceTexture2D) {
+                runtime_textures.emplace_back(device.create_image<float>(
+                    *storage, luisa::make_uint2(found->width, found->height), found->mip_levels, true));
+            } else {
+                runtime_textures.emplace_back(device.create_volume<float>(
+                    *storage, luisa::make_uint3(found->width, found->height, found->depth), found->mip_levels, true));
+            }
+            auto& runtime = runtime_textures.back();
+            std::visit([&](auto& texture) {
+                stream << texture.copy_from(found->bytes->data()) << synchronize();
+                bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
+            }, runtime);
+            staged_textures.push_back(&*found);
+            continue;
+        }
         if (resource.kind != kResourceBuffer)
             continue;
         auto found = std::find_if(host_buffers.begin(), host_buffers.end(),
@@ -561,6 +610,16 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 return false;
             }
         }
+    }
+    size_t texture_index = 0;
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kResourceTexture2D && resource.kind != kResourceTexture3D) continue;
+        auto* found = staged_textures[texture_index];
+        auto& runtime = runtime_textures[texture_index++];
+        if (resource.access != kAccessWrite && resource.access != kAccessReadWrite) continue;
+        std::visit([&](auto& texture) {
+            stream << texture.copy_to(found->bytes->data()) << synchronize();
+        }, runtime);
     }
     return true;
 }

@@ -23,6 +23,13 @@ struct ResourceInfo {
     uint32_t height = 0;
     uint32_t depth = 1;
     bool sampled = false;
+    uint32_t sampler_min_filter = 0;
+    uint32_t sampler_mag_filter = 0;
+    uint32_t sampler_mipmap_mode = 0;
+    uint32_t sampler_address_u = 0;
+    uint32_t sampler_address_v = 0;
+    uint32_t sampler_address_w = 0;
+    bool sampler_anisotropy = false;
 };
 
 struct PushConstantInfo {

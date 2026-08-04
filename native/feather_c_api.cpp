@@ -4308,6 +4308,23 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                                      ? const_cast<unsigned char*>(kernel.push_constants.data() + offset)
                                      : nullptr;
             inputs->push_constants.push_back(push_constant);
+        } else if (resource.kind == kIrResourceKindSampler) {
+            const auto bound = kernel.samplers.find(resource.binding);
+            if (bound == kernel.samplers.end()) {
+                return false;
+            }
+            const auto sampler = g_samplers.find(bound->second);
+            if (sampler == g_samplers.end()) {
+                return false;
+            }
+            const auto& desc = sampler->second.desc;
+            resource_info.sampler_min_filter = desc.min_filter;
+            resource_info.sampler_mag_filter = desc.mag_filter;
+            resource_info.sampler_mipmap_mode = desc.mipmap_mode;
+            resource_info.sampler_address_u = desc.address_u;
+            resource_info.sampler_address_v = desc.address_v;
+            resource_info.sampler_address_w = desc.address_w;
+            resource_info.sampler_anisotropy = desc.anisotropy_enable != 0u;
         } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
             resource_info.sampled = resource.access == 4;
             resource_info.width = 1;
@@ -5459,9 +5476,43 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
 
     std::vector<Feather::Luisa::HostBufferBinding> bindings;
     bindings.reserve(lowering.resources.size());
+    std::vector<Feather::Luisa::HostTextureBinding> texture_bindings;
+    texture_bindings.reserve(lowering.resources.size());
     GPU::Backend::Backend* easygpu_backend = nullptr;
     for (const auto& resource : lowering.resources) {
         if (resource.kind == kIrResourceKindPushConstant) {
+            continue;
+        }
+        if (resource.kind == kIrResourceKindSampler) {
+            continue;
+        }
+        if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
+            const auto bound = kernel.textures.find(resource.binding);
+            if (bound == kernel.textures.end())
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Luisa dispatch is missing a required texture binding.");
+            auto texture = g_textures.find(bound->second);
+            if (texture == g_textures.end())
+                return fail(FE_ERROR_INVALID_HANDLE, "Luisa dispatch references an invalid Feather texture.");
+            if (texture->second.device_dirty) {
+                if (easygpu_backend == nullptr) {
+                    GPU::Runtime::AutoInitContext();
+                    GPU::Runtime::Context::GetInstance().MakeCurrent();
+                    easygpu_backend = GPU::Runtime::Context::GetBackend();
+                }
+                if (easygpu_backend == nullptr)
+                    return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU is unavailable to stage a device-dirty texture for Luisa.");
+                download_easygpu_texture(texture->second, *easygpu_backend);
+            }
+            texture_bindings.push_back(Feather::Luisa::HostTextureBinding{
+                .binding = resource.binding,
+                .kind = resource.kind,
+                .access = resource.access,
+                .width = texture->second.width,
+                .height = texture->second.height,
+                .depth = texture->second.depth,
+                .mip_levels = texture->second.mip_levels,
+                .pixel_format = texture->second.pixel_format,
+                .bytes = &texture->second.bytes});
             continue;
         }
         if (resource.kind != kIrResourceKindBuffer) {
@@ -5506,7 +5557,7 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
                                  ? configured_runtime
                                  : Feather::Luisa::RuntimeDirectory()};
     std::string error;
-    if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, dispatch, &error)) {
+    if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, texture_bindings, dispatch, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Luisa dispatch failed." : std::move(error));
     }
 
@@ -5517,6 +5568,14 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
         auto buffer = g_buffers.find(bound->second);
         buffer->second.host_dirty = true;
         buffer->second.device_dirty = false;
+    }
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kIrResourceKindTexture2D && resource.kind != kIrResourceKindTexture3D) continue;
+        if (resource.access == 1 || resource.access == 4) continue;
+        const auto bound = kernel.textures.find(resource.binding);
+        auto texture = g_textures.find(bound->second);
+        texture->second.host_dirty = true;
+        texture->second.device_dirty = false;
     }
     return ok();
 #endif
