@@ -44,7 +44,7 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
     ScopeEntry(
         "src/Feather/AD/AD.cs",
         "managed AD markers, kernel wrapper, supported gradient readback",
-        ((12, 34), (44, 124), (128, 144), (150, 181), (190, 339)),
+        ((12, 34), (44, 132), (136, 152), (158, 189), (198, 347)),
         ("Feather/AD/AD.cs",),
     ),
     ScopeEntry("src/Feather/Core/GPU.cs", "GPU.CreateADKernel facade", ((173, 178),), ("Feather/Core/GPU.cs",)),
@@ -142,78 +142,78 @@ LINE_EXCLUSIONS: dict[tuple[str, int], str] = {
     },
     (
         "src/Feather/AD/AD.cs",
-        225,
+        233,
     ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
     (
         "src/Feather/AD/AD.cs",
-        226,
+        234,
     ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
     (
         "src/Feather/AD/AD.cs",
-        227,
+        235,
     ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
     (
         "src/Feather/AD/AD.cs",
-        256,
-    ): "native zero-gradient metadata corruption guard; valid zero-gradient failure is covered by native AD tests",
-    (
-        "src/Feather/AD/AD.cs",
-        257,
+        264,
     ): "native zero-gradient metadata corruption guard; valid zero-gradient failure is covered by native AD tests",
     (
         "src/Feather/AD/AD.cs",
         265,
-    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
-    (
-        "src/Feather/AD/AD.cs",
-        266,
-    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
-    (
-        "src/Feather/AD/AD.cs",
-        267,
-    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
-    (
-        "src/Feather/AD/AD.cs",
-        272,
-    ): "native byte-size corruption guard requires fault injection; valid scalar/vector readback is covered",
+    ): "native zero-gradient metadata corruption guard; valid zero-gradient failure is covered by native AD tests",
     (
         "src/Feather/AD/AD.cs",
         273,
+    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
+    (
+        "src/Feather/AD/AD.cs",
+        274,
+    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
+    (
+        "src/Feather/AD/AD.cs",
+        275,
+    ): "native metadata empty-name fallback requires fault injection; valid named readback is covered",
+    (
+        "src/Feather/AD/AD.cs",
+        280,
     ): "native byte-size corruption guard requires fault injection; valid scalar/vector readback is covered",
     (
         "src/Feather/AD/AD.cs",
-        289,
+        281,
+    ): "native byte-size corruption guard requires fault injection; valid scalar/vector readback is covered",
+    (
+        "src/Feather/AD/AD.cs",
+        297,
     ): "native scalar-layout corruption guard requires fault injection; managed bad-shape conversion guards are covered",
     (
         "src/Feather/AD/AD.cs",
-        290,
+        298,
     ): "native scalar-layout corruption guard requires fault injection; managed bad-shape conversion guards are covered",
 }
 
 BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     (
         "src/Feather/AD/AD.cs",
-        224,
+        232,
     ): "native metadata corruption guard; valid zero-gradient-count failure is covered by native AD failure tests",
     (
         "src/Feather/AD/AD.cs",
-        255,
+        263,
     ): "native metadata empty-name fallback; valid named readback is covered and resource-name fallback requires fault injection",
     (
         "src/Feather/AD/AD.cs",
-        264,
+        272,
     ): "compiler-emitted fixed-buffer branch around native gradient readback; successful scalar/vector readback is covered",
     (
         "src/Feather/AD/AD.cs",
-        271,
+        279,
     ): "native metadata scalar-layout corruption guard; valid scalar/vector layouts and managed bad-shape conversion guards are covered",
     (
         "src/Feather/AD/AD.cs",
-        277,
+        285,
     ): "generic type-pattern counter mixes tested TryGetArray true/false with compiler null-pattern bookkeeping",
     (
         "src/Feather/AD/AD.cs",
-        288,
+        296,
     ): "native metadata scalar-layout corruption guard; valid scalar/vector layouts and managed bad-shape conversion guards are covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
