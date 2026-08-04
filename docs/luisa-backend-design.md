@@ -19,13 +19,12 @@ unchanged and remains the default.
 
 ## FEIR To XIR
 
-The Feather-owned translator creates a Luisa `xir::Module` and will translate
-each typed FEIR function into a `xir::KernelFunction` or
-`xir::CallableFunction`. M2.1's `Feather::Luisa::Dispatch` contains the first
-lowerer: one compute entry, scalar expressions, and buffer arguments. The full
-translator will maintain maps from FEIR type, function, value, lvalue, and
-resource IDs to their XIR counterparts. Translation will be staged so recursive
-callable symbols and resource arguments exist before bodies are emitted.
+The Feather-owned translator in `native/feather_luisa_xir.cpp` creates a Luisa
+`xir::Module` and translates each typed FEIR compute entry and callable into a
+`xir::KernelFunction` or `xir::CallableFunction`. It maintains maps from FEIR
+types, functions, locals, l-values, and resources to XIR values. Callable
+symbols and parameter lists are staged before bodies, so nested call graphs and
+resource arguments do not depend on declaration order.
 
 The primary Luisa 0.9.0 API is:
 
@@ -47,10 +46,10 @@ and normalizes XIR, calls `xir_to_ast_translate`, wraps the returned
 internal handoff to Luisa's Vulkan XIR/SPIR-V backend, not a Feather DSL or CPU
 fallback.
 
-M2.1 implements the first general subset: one-dimensional scalar buffer
-expressions composed of typed resource reads, dispatch index, constants, and
-arithmetic, followed by a buffer write. Unsupported constructs fail explicitly
-on the Luisa route and never silently switch backend.
+M2.2 covers every forward-compute statement, expression, l-value, and resource
+kind emitted by the current FEIR generator. Invalid FEIR and unsupported future
+record kinds fail explicitly on the Luisa route and never silently switch
+backend.
 
 ## Resources And Scheduling
 
@@ -61,23 +60,26 @@ by Luisa sampling calls. Push constants become value arguments with the same
 FEIR packing and alignment contract. Read/write access is retained for
 validation and dirty-state tracking.
 
-M2.1 establishes correctness with host staging: synchronize dirty EasyGPU
+Correctness currently uses host staging: synchronize dirty EasyGPU
 buffers to Feather host bytes, upload those bytes to typed Luisa buffers,
 dispatch on a Luisa compute stream, download writable buffers, then mark the
-Feather host copy authoritative. This avoids assuming cross-runtime Vulkan
-ownership. M2.2 will replace staging with explicitly negotiated Vulkan buffer
-and image import, queue-family ownership transfers, layout transitions,
-timeline synchronization, and lifetime tracking.
+Feather host copy authoritative. Aggregate buffers are repacked recursively
+between Feather's declared offsets and XIR's device layout. Textures use the
+same staging contract and validate their Vulkan pixel storage before creation.
+This avoids assuming cross-runtime Vulkan ownership. Zero-copy Vulkan sharing
+remains a performance milestone: it requires explicit buffer/image import,
+queue-family ownership transfers, layout transitions, timeline synchronization,
+and lifetime tracking, but does not change forward semantics.
 
 Luisa dispatch receives Feather's logical extent, while XIR kernel block size
-comes from FEIR's thread-group metadata. Luisa 0.9.0 requires an XIR block to
-contain 32--1024 threads in multiples of 32. The M2.1 subset observes global
-dispatch IDs only, so Feather rounds its 1D block width up to that granularity
-without changing the logical dispatch extent. M2.2 must preserve exact local-ID
-and barrier semantics when those features enter the route. `wait: true`
-synchronizes the Luisa stream before returning. Asynchronous dispatch will
-require retained staging and completion objects; until that is implemented,
-the Luisa route rejects `wait: false` rather than weakening lifetime guarantees.
+comes from FEIR's thread-group metadata. Luisa 0.9.0 requires 32--1024 physical
+threads per XIR block in multiples of 32. Feather packs an integral number of
+logical groups into each physical block, reconstructs exact 1D/2D/3D local and
+group IDs, offsets each logical group's shared allocation, and guards padded
+dispatch lanes. Barriers remain physical-block barriers, which is correct
+because every packed logical group reaches each barrier together. `wait: true`
+synchronizes before returning. Asynchronous dispatch remains disabled until
+staging allocations can be retained by completion objects.
 
 The native asset staging step places Luisa's runtime, XIR libraries, and Vulkan
 backend module beside the Feather library. Feather resolves that directory from
@@ -96,27 +98,42 @@ translation or execution fails.
 
 ## Coverage Plan
 
-| FEIR feature | M2.1 | M2.2 plan |
+| FEIR feature | M2.2 status | Local GPU evidence |
 | --- | --- | --- |
-| Scalar types/constants/casts | int/uint/float slice | Complete scalar and bitcast matrix |
-| Vectors/matrices | Not routed | Constructors, swizzles, arithmetic, matrix ops |
-| Arrays/struct aggregates | Design only | Layout-checked constants, GEP, load/store |
-| Control flow | Straight-line slice | If/switch/loops, break/continue, phi normalization |
-| Local/shared memory | Design only | Alloca address spaces, barriers, block-size validation |
-| Buffer memory | Typed read/write | Byte buffers, volatile access, atomics, zero-copy interop |
-| Atomics | API mapping identified | Full FEIR atomic operation/type matrix |
-| Callables/shader libraries | Symbol staging designed | Recursive call graph, captures, deduplication |
-| Textures/samplers | Mapping designed | 2D/3D read/write/sample, mip/grad, format validation |
-| Dispatch/bounds checks | 1D dispatch index | 2D/3D IDs, logical bounds, indirect dispatch |
-| Automatic differentiation | Not routed | XIR autodiff parity only after forward coverage |
-| Graphics/ray tracing | Not routed | Separate milestones after compute parity |
+| Scalar types/constants/casts | Complete: bool/int/uint/float, numeric casts, unary/binary/bitwise/comparison/logical/select, and supported intrinsics | `LuisaBackendTypeFeatureTests` (5 tests) |
+| Vectors/matrices | Complete: 2--4 component constructors, extraction/swizzles/arithmetic, and square 2--4 matrix construction/component and linear-algebra operations | `VectorConstructionAndSwizzlesMatchEasyGpu`; `MatrixConstructionAndLinearAlgebraMatchEasyGpu` |
+| Arrays/struct aggregates | Complete: recursive ABI repacking, constants, indexed/field addressing, loads, stores, and nested writeback | `StructAggregateLoadsAndNestedFieldExtractionMatchEasyGpu`; `StructArraysAndNestedWritebackMatchEasyGpu` |
+| Control flow | Complete: if/else, for/while/do-while, break/continue/return and expression statements; mutable locals remove FEIR phi requirements before XIR CFG normalization/verification | `StructuredControlFlowAndMutableLocalsMatchEasyGpu` (four kernels) |
+| Local/shared memory | Complete: local/shared allocas, logical-group shared offsets, barriers, and 32--1024 physical block validation | `SharedMemoryLocalIdsAndBarrierMatchEasyGpu` |
+| Buffer memory | Complete for FEIR: typed reads/writes, aggregate field/index writes, push constants, and access validation | Type, control/memory, and resource/dispatch suites |
+| Atomics | Complete: add/sub/min/max/and/or/xor/exchange/compare-exchange on FEIR int targets | `FullIntegerAtomicMatrixMatchesEasyGpu` |
+| Callables/shader libraries | Complete: staged/de-duplicated symbols, nested calls, value/reference parameters, aggregate writeback, and buffer/texture/sampler resource parameters | four callable parity tests in `LuisaBackendResourceDispatchTests` |
+| Textures/samplers | Complete for emitted FEIR: 2D/3D load/store; 2D Sample/SampleLevel/SampleGrad; decoded struct-pixel components; format and sampler validation | four texture tests in `LuisaBackendResourceDispatchTests` |
+| Dispatch/bounds checks | Complete: 1D/2D/3D global/local/group/size builtins, logical bounds guards, and padded-lane suppression | `TwoAndThreeDimensionalDispatchIdsMatchEasyGpu`; `NonDivisibleLogicalBoundsMatchEasyGpu`; shared-memory test |
+| Automatic differentiation | M3 | Not a forward-compute M2.2 feature |
+| Graphics/ray tracing | M3 | Separate non-compute pipelines |
+
+The local M2.2 suite contains 19 `[Category=Gpu]` tests; every parity-capable
+kernel runs once through EasyGPU and once through Luisa Vulkan and compares GPU
+readback element-by-element. `SampleGrad` is executed and checked against its
+known texel result on Luisa because EasyGPU's current `ModuleBuilder` has no
+`TextureSampleGrad` operation; adding parity there would require changing the
+pristine EasyGPU submodule.
+
+The current FEIR schema has no switch statement, recursive callable graph,
+byte-buffer or volatile-access node, sampled-3D expression, or indirect-dispatch
+record. Those entries are N/A rather than rejected M2.2 features: the generator
+rejects switch and recursion, `GpuTexture3D` exposes load/store but no sampling
+API, and dispatch is direct. The residual rejection list for generator-emitted
+forward compute FEIR is therefore empty. AD, vertex/fragment graphics, and ray
+tracing remain explicitly outside M2.2 and are the only translation families
+left for M3.
 
 ## Risks And Gates
 
-The highest risks are exact aggregate layout parity, Vulkan resource sharing
-between two runtimes, callable/resource capture ordering, and differences
-between FEIR structured control flow and XIR CFG verification. Every expansion
-must add backend-parity tests and preserve explicit rejection for unsupported
-features. LuisaCompute remains a pristine pinned submodule; compatibility is
-handled only through supported build options and Feather-owned integration
-code.
+The remaining risks are cross-runtime zero-copy ownership, asynchronous staging
+lifetimes, Luisa's single filter/address sampler representation versus Feather's
+richer descriptor, and the M3 AD/graphics lowering model. The Luisa route
+validates descriptors it cannot represent rather than changing their meaning.
+LuisaCompute remains a pristine pinned submodule; compatibility is handled only
+through supported build options and Feather-owned integration code.

@@ -81,8 +81,8 @@ public class LuisaBackendResourceDispatchTests
     {
         using var texture = GPU.CreateTexture2D<float4, float4>(2, 2, PixelFormat.Rgba32Float, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
-        using var easy = GPU.CreateBuffer<float4>(1);
-        using var luisa = GPU.CreateBuffer<float4>(1);
+        using var easy = GPU.CreateBuffer<float4>(2);
+        using var luisa = GPU.CreateBuffer<float4>(2);
         texture.Upload([
             new(1, 2, 3, 4), new(5, 6, 7, 8),
             new(9, 10, 11, 12), new(13, 14, 15, 16)
@@ -91,6 +91,22 @@ public class LuisaBackendResourceDispatchTests
         GPU.Dispatch(new LuisaTextureSamplingKernel(texture.AsSampled(), sampler, easy.AsReadWrite()), 1);
         DispatchLuisa(new LuisaTextureSamplingKernel(texture.AsSampled(), sampler, luisa.AsReadWrite()), new(1, 1, 1));
         Assert.Equal(easy.ToArray(), luisa.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Gpu")]
+    public void TextureSampleGradExecutesThroughLuisaXir()
+    {
+        using var texture = GPU.CreateTexture2D<float4, float4>(2, 2, PixelFormat.Rgba32Float, TextureAccess.Sampled);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var output = GPU.CreateBuffer<float4>(1);
+        texture.Upload([
+            new(1, 2, 3, 4), new(5, 6, 7, 8),
+            new(9, 10, 11, 12), new(13, 14, 15, 16)
+        ]);
+
+        DispatchLuisa(new LuisaTextureSampleGradKernel(texture.AsSampled(), sampler, output.AsReadWrite()), new(1, 1, 1));
+        Assert.Equal(new float4(13, 14, 15, 16), output.ToArray()[0]);
     }
 
     [Fact]
@@ -115,6 +131,57 @@ public class LuisaBackendResourceDispatchTests
         GPU.Dispatch(new ReadWriteBufferCallableKernel(input.AsReadOnly(), easy.AsReadWrite()), 4);
         DispatchLuisa(new ReadWriteBufferCallableKernel(input.AsReadOnly(), luisa.AsReadWrite()), new(4, 1, 1));
         Assert.Equal(easy.ToArray(), luisa.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Gpu")]
+    public void ShaderLibraryTextureAndSamplerCallablesMatchEasyGpu()
+    {
+        using var sampled = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.Sampled);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var easySample = GPU.CreateBuffer<float>(1);
+        using var luisaSample = GPU.CreateBuffer<float>(1);
+        sampled.Upload([new Rgba32(128, 0, 0, 255)]);
+        GPU.Dispatch(new TextureCallableKernel(sampled.AsSampled(), sampler, easySample.AsReadWrite()), 1);
+        DispatchLuisa(new TextureCallableKernel(sampled.AsSampled(), sampler, luisaSample.AsReadWrite()), new(1, 1, 1));
+        Assert.Equal(easySample.ToArray(), luisaSample.ToArray());
+
+        using var storage = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.ReadOnly);
+        using var easyLoad = GPU.CreateBuffer<float>(1);
+        using var luisaLoad = GPU.CreateBuffer<float>(1);
+        storage.Upload([new Rgba32(64, 0, 0, 255)]);
+        GPU.Dispatch(new ReadOnlyTextureCallableKernel(storage.AsReadOnly(), easyLoad.AsReadWrite()), 1);
+        DispatchLuisa(new ReadOnlyTextureCallableKernel(storage.AsReadOnly(), luisaLoad.AsReadWrite()), new(1, 1, 1));
+        Assert.Equal(easyLoad.ToArray(), luisaLoad.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Gpu")]
+    public void MutableGpuStructCallablesAndWritebackMatchEasyGpu()
+    {
+        MutableCounter[] counters =
+        [
+            new() { Value = 10, Hits = 1, Nested = new MutableCounterNested { Inner = 5 } },
+            new() { Value = -3, Hits = 4, Nested = new MutableCounterNested { Inner = 1 } }
+        ];
+        using var easyCounters = GPU.CreateBuffer<MutableCounter>(counters);
+        using var luisaCounters = GPU.CreateBuffer<MutableCounter>(counters);
+        using var input = GPU.CreateBuffer<float>([2, 5]);
+        using var easy = GPU.CreateBuffer<float>(2);
+        using var luisa = GPU.CreateBuffer<float>(2);
+        GPU.Dispatch(new GpuStructMutatingInstanceCallableKernel(
+            easyCounters.AsReadWrite(), input.AsReadOnly(), easy.AsReadWrite()), 2);
+        DispatchLuisa(new GpuStructMutatingInstanceCallableKernel(
+            luisaCounters.AsReadWrite(), input.AsReadOnly(), luisa.AsReadWrite()), new(2, 1, 1));
+        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        var expected = easyCounters.ToArray();
+        var actual = luisaCounters.ToArray();
+        for (var i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(expected[i].Value, actual[i].Value);
+            Assert.Equal(expected[i].Hits, actual[i].Hits);
+            Assert.Equal(expected[i].Nested.Inner, actual[i].Nested.Inner);
+        }
     }
 
     [Fact]
@@ -183,6 +250,21 @@ public readonly partial struct LuisaTextureSamplingKernel(
     public void Execute()
     {
         float2 uv = new(0.75f, 0.75f);
-        output[ThreadIds.X] = texture.SampleLevel(sampler, uv, 0.0f);
+        output[0] = texture.Sample(sampler, uv);
+        output[1] = texture.SampleLevel(sampler, uv, 0.0f);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct LuisaTextureSampleGradKernel(
+    SampledTexture2D<float4> texture,
+    SamplerState sampler,
+    ReadWriteBuffer<float4> output) : IKernel1D
+{
+    public void Execute()
+    {
+        float2 uv = new(0.75f, 0.75f);
+        output[0] = texture.SampleGrad(sampler, uv, new float2(0.5f, 0.0f), new float2(0.0f, 0.5f));
     }
 }

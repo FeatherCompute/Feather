@@ -29,6 +29,26 @@ public class LuisaBackendTypeFeatureTests
 
     [Fact]
     [Trait("Category", "Gpu")]
+    public void UnsignedConstantsBitOperationsComparisonsAndConversionsMatchEasyGpu()
+    {
+        int[] signedValues = [-8, -1, 0, 3, 17];
+        uint[] unsignedValues = [0u, 1u, 7u, 31u, 0x80000000u];
+        float[] floatValues = [-3.5f, -1.0f, 0.0f, 1.25f, 8.0f];
+        using var signed = GPU.CreateBuffer<int>(signedValues);
+        using var unsigned = GPU.CreateBuffer<uint>(unsignedValues);
+        using var floats = GPU.CreateBuffer<float>(floatValues);
+        using var easy = GPU.CreateBuffer<int>(signedValues.Length);
+        using var luisa = GPU.CreateBuffer<int>(signedValues.Length);
+
+        GPU.Dispatch(new LuisaScalarMatrixKernel(
+            signed.AsReadOnly(), unsigned.AsReadOnly(), floats.AsReadOnly(), easy.AsReadWrite()), signedValues.Length);
+        DispatchLuisa(new LuisaScalarMatrixKernel(
+            signed.AsReadOnly(), unsigned.AsReadOnly(), floats.AsReadOnly(), luisa.AsReadWrite()), signedValues.Length);
+        Assert.Equal(easy.ToArray(), luisa.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Gpu")]
     public void VectorConstructionAndSwizzlesMatchEasyGpu()
     {
         float4[] values =
@@ -80,5 +100,23 @@ public class LuisaBackendTypeFeatureTests
         using var compiled = GpuKernel.Create<TKernel>(GPU.Context, GpuExecutionBackend.Luisa);
         GpuKernel.Dispatch(GPU.Context, compiled, kernel, new GpuDispatchSize(count, 1, 1), wait: true);
         Assert.Equal(DispatchPath.Luisa, compiled.LastDispatchPath);
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct LuisaScalarMatrixKernel(
+    Resources.ReadOnlyBuffer<int> signed,
+    Resources.ReadOnlyBuffer<uint> unsigned,
+    Resources.ReadOnlyBuffer<float> floats,
+    Resources.ReadWriteBuffer<int> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        uint bits = ((unsigned[i] << 2) ^ 0xAu) | 1u;
+        bool predicate = bits > unsigned[i] && floats[i] != 0.0f;
+        int converted = (int)bits + (int)floats[i] + signed[i];
+        output[i] = predicate ? converted : -converted;
     }
 }

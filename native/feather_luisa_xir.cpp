@@ -277,6 +277,28 @@ class Lowerer {
         return nullptr;
     }
 
+    const Type* texture_element_type(uint32_t id) {
+        if (id >= module_.types.size()) return nullptr;
+        return module_.types[id].kind == kTypeStruct ? Type::vector(Type::of<float>(), 4u) : type(id);
+    }
+
+    bool is_texture_expression(uint32_t id) const {
+        if (id >= module_.expressions.size()) return false;
+        const auto& expression = module_.expressions[id];
+        if (expression.kind == kExpressionTextureSample) return true;
+        if (expression.kind == kExpressionResourceElement) {
+            const auto resource = resources_.find(std::string{string(expression.name_id)});
+            return resource != resources_.end() &&
+                   (resource->second.kind == kResourceTexture2D || resource->second.kind == kResourceTexture3D);
+        }
+        if (expression.kind != kExpressionIndexAccess || expression.a >= module_.expressions.size()) return false;
+        const auto& base = module_.expressions[expression.a];
+        if (base.kind != kExpressionLocal && base.kind != kExpressionParameter) return false;
+        const auto resource = resources_.find(std::string{string(base.name_id)});
+        return resource != resources_.end() &&
+               (resource->second.kind == kResourceTexture2D || resource->second.kind == kResourceTexture3D);
+    }
+
     std::optional<uint32_t> field_index(uint32_t owner_type, std::string_view name) const {
         if (owner_type >= module_.types.size()) return std::nullopt;
         const auto& source = module_.types[owner_type];
@@ -365,7 +387,10 @@ class Lowerer {
                         lowered.argument = callable->create_value_argument(Type::of<uint32_t>());
                         lowered.sampler_address = callable->create_value_argument(Type::of<uint32_t>());
                     } else {
-                        auto* element = type(parameter_type.b);
+                        auto* element = parameter_type.a == kTypeResourceTexture2D ||
+                                                parameter_type.a == kTypeResourceTexture3D
+                                            ? texture_element_type(parameter_type.b)
+                                            : type(parameter_type.b);
                         if (element == nullptr) return fail("FEIR callable resource element type is unsupported");
                         const Type* resource_type = nullptr;
                         if (parameter_type.a == kTypeResourceBuffer) resource_type = Type::buffer(element);
@@ -419,8 +444,11 @@ class Lowerer {
                                                                                          : kResourceTexture3D;
                         const uint8_t access = parameter_type.c == 0u ? 1u : parameter_type.c == 1u ? 2u
                                                : parameter_type.c == 2u ? 3u : 4u;
+                        auto* element = kind == kResourceTexture2D || kind == kResourceTexture3D
+                                            ? texture_element_type(parameter_type.b)
+                                            : type(parameter_type.b);
                         resources_.emplace(parameter_name,
-                            Resource{static_cast<ResourceArgument*>(lowered.argument), type(parameter_type.b), 0u, kind, access});
+                            Resource{static_cast<ResourceArgument*>(lowered.argument), element, 0u, kind, access});
                     }
                 } else if (parameter.direction == 0u) {
                     auto* storage = builder_.alloca_local(type(parameter.type_id));
@@ -580,8 +608,28 @@ class Lowerer {
         if (id >= module_.expressions.size()) return fail("FEIR expression index is out of range"), nullptr;
         const auto& expression = module_.expressions[id];
         auto* result_type = type(expression.type_id);
+        if (expression.kind == kExpressionTextureSample) {
+            result_type = texture_element_type(expression.type_id);
+        } else if (expression.kind == kExpressionResourceElement) {
+            const auto resource = resources_.find(std::string{string(expression.name_id)});
+            if (resource != resources_.end() &&
+                (resource->second.kind == kResourceTexture2D || resource->second.kind == kResourceTexture3D))
+                result_type = resource->second.element_type;
+        } else if (expression.kind == kExpressionIndexAccess && expression.a < module_.expressions.size()) {
+            const auto& base = module_.expressions[expression.a];
+            if (base.kind == kExpressionLocal || base.kind == kExpressionParameter) {
+                const auto resource = resources_.find(std::string{string(base.name_id)});
+                if (resource != resources_.end() &&
+                    (resource->second.kind == kResourceTexture2D || resource->second.kind == kResourceTexture3D))
+                    result_type = resource->second.element_type;
+            }
+        } else if ((expression.kind == kExpressionField || expression.kind == kExpressionMemberAccess) &&
+                   is_texture_expression(expression.a)) {
+            result_type = Type::of<float>();
+        }
         if (result_type == nullptr && !(expression.kind == kExpressionCallableCall && is_void_type(expression.type_id)))
-            return fail("FEIR expression has an unsupported XIR type"), nullptr;
+            return fail("FEIR expression kind " + std::to_string(expression.kind) + " has unsupported type " +
+                        std::to_string(expression.type_id)), nullptr;
         switch (expression.kind) {
         case kExpressionLiteral:
             return literal(expression, result_type);
@@ -795,6 +843,12 @@ class Lowerer {
             expression.argument_count != found->second.parameters.size())
             return fail("FEIR callable call has an unknown target or invalid argument range"), nullptr;
         std::vector<Value*> values;
+        struct Writeback {
+            Address address;
+            Value* temporary;
+            const Type* type;
+        };
+        std::vector<Writeback> writebacks;
         for (uint32_t i = 0; i < expression.argument_count; ++i) {
             const auto expression_id = module_.arguments[expression.first_argument + i];
             const auto& parameter = found->second.parameters[i];
@@ -817,12 +871,35 @@ class Lowerer {
                     values.push_back(resource->second.argument);
                 }
             } else {
-                auto* value = lower_expression(expression_id);
-                if (value == nullptr) return nullptr;
-                values.push_back(value);
+                if (parameter.direction == 0u) {
+                    auto* value = lower_expression(expression_id);
+                    if (value == nullptr) return nullptr;
+                    values.push_back(value);
+                } else {
+                    auto target = expression_address(expression_id);
+                    if (!target) return fail("FEIR callable reference argument is not assignable"), nullptr;
+                    if (target->pointer != nullptr && target->indices.empty()) {
+                        values.push_back(target->pointer);
+                    } else {
+                        auto* value_type = type(parameter.type_id);
+                        auto* temporary = builder_.alloca_local(value_type);
+                        if (parameter.direction == 2u) {
+                            auto* initial = read_address(*target, value_type);
+                            if (initial == nullptr) return nullptr;
+                            builder_.store(temporary, initial);
+                        }
+                        values.push_back(temporary);
+                        writebacks.push_back(Writeback{std::move(*target), temporary, value_type});
+                    }
+                }
             }
         }
-        return builder_.call(result_type, found->second.function, values);
+        auto* result = builder_.call(result_type, found->second.function, values);
+        for (const auto& writeback : writebacks) {
+            auto* value = builder_.load(writeback.type, writeback.temporary);
+            if (!write_address(writeback.address, writeback.type, value)) return nullptr;
+        }
+        return result;
     }
 
     Value* lower_texture_sample(const TypedIR::Expression& expression, const Type* result_type) {
@@ -969,6 +1046,42 @@ class Lowerer {
             return base;
         }
         return fail("unsupported FEIR l-value kind " + std::to_string(lvalue.kind)), std::nullopt;
+    }
+
+    std::optional<Address> expression_address(uint32_t id) {
+        if (id >= module_.expressions.size()) return std::nullopt;
+        const auto& expression = module_.expressions[id];
+        if (expression.kind == kExpressionLocal || expression.kind == kExpressionParameter) {
+            const auto name = std::string{string(expression.name_id)};
+            auto found = locals_.find(name);
+            return found == locals_.end() ? std::nullopt
+                                          : std::optional{Address{.pointer = found->second,
+                                                                  .root_type = found->second->type()}};
+        }
+        if (expression.kind == kExpressionResourceElement) {
+            auto found = resources_.find(std::string{string(expression.name_id)});
+            auto* index = lower_expression(expression.a);
+            if (found == resources_.end() || index == nullptr) return std::nullopt;
+            index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
+            return Address{.resource = &found->second, .resource_index = index,
+                           .root_type = found->second.element_type};
+        }
+        if (expression.kind == kExpressionField || expression.kind == kExpressionMemberAccess ||
+            expression.kind == kExpressionIndexAccess || expression.kind == kExpressionMatrixColumn) {
+            auto base = expression_address(expression.a);
+            if (!base) return std::nullopt;
+            if (expression.kind == kExpressionIndexAccess || expression.kind == kExpressionMatrixColumn) {
+                auto* index = lower_expression(expression.b);
+                if (index == nullptr) return std::nullopt;
+                base->indices.push_back(index);
+            } else {
+                auto field = field_index(module_.expressions[expression.a].type_id, string(expression.name_id));
+                if (!field) return std::nullopt;
+                base->indices.push_back(index_constant(*field));
+            }
+            return base;
+        }
+        return std::nullopt;
     }
 
     Value* read_address(const Address& address, const Type* result_type) {
