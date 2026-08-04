@@ -52,6 +52,37 @@ fi
 mkdir -p "$(dirname "$target")"
 cp "$source" "$target"
 
+stage_luisa_runtime() {
+    local native_dir source_file
+    native_dir="$(dirname "$target")"
+    case "$RID" in
+        win-*)
+            while IFS= read -r -d '' source_file; do
+                cp -f "$source_file" "$native_dir/"
+            done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f -iname 'luisa*.dll' -print0)
+            ;;
+        linux-*)
+            while IFS= read -r -d '' source_file; do
+                cp -f "$source_file" "$native_dir/"
+            done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f -name 'libluisa*.so*' -print0)
+            ;;
+        osx-*)
+            while IFS= read -r -d '' source_file; do
+                cp -f "$source_file" "$native_dir/"
+            done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f \
+                \( -name 'libluisa*.dylib' -o -name 'libluisa-backend-*.so' \) -print0)
+            ;;
+    esac
+
+    if ! find "$native_dir" -maxdepth 1 -type f \
+        \( -iname 'luisa-backend-vk.dll' -o -name 'libluisa-backend-vk.so' \) -print -quit | grep -q .; then
+        echo "Luisa Vulkan backend was not found under: $BUILD_DIR/bin" >&2
+        exit 1
+    fi
+}
+
+stage_luisa_runtime
+
 is_macos_system_dependency() {
     local dependency="$1"
 
@@ -190,7 +221,8 @@ resolve_macos_dependency() {
 ensure_macos_loader_path_rpath() {
     local binary="$1"
 
-    if print_macos_rpaths "$binary" | grep -Fqx "@loader_path"; then
+    if print_macos_rpaths "$binary" |
+        awk '$0 == "@loader_path" { found = 1 } END { exit !found }'; then
         return
     fi
 
@@ -235,7 +267,9 @@ stage_macos_dependencies() {
     processed="$native_dir/.feather-native-processed"
     : > "$pending"
     : > "$processed"
-    append_unique_line "$pending" "$target"
+    while IFS= read -r -d '' current; do
+        append_unique_line "$pending" "$current"
+    done < <(find "$native_dir" -maxdepth 1 -type f \( -name '*.dylib' -o -name '*.so' \) -print0)
 
     while [[ -s "$pending" ]]; do
         current="$(sed -n '1p' "$pending")"

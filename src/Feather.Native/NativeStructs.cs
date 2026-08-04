@@ -20,7 +20,14 @@ public enum FeDispatchPath : uint
     TypedEasyGpu = 1,
     CpuReferenceFallback = 2,
     GraphicsFallback = 3,
-    Rejected = 4
+    Rejected = 4,
+    Luisa = 5
+}
+
+public enum FeExecutionBackend : uint
+{
+    EasyGpu = 0,
+    Luisa = 1
 }
 
 [StructLayout(LayoutKind.Sequential)]

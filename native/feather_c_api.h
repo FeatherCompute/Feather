@@ -48,8 +48,14 @@ typedef enum FeDispatchPath {
     FE_DISPATCH_PATH_TYPED_EASYGPU = 1,
     FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK = 2,
     FE_DISPATCH_PATH_GRAPHICS_FALLBACK = 3,
-    FE_DISPATCH_PATH_REJECTED = 4
+    FE_DISPATCH_PATH_REJECTED = 4,
+    FE_DISPATCH_PATH_LUISA = 5
 } FeDispatchPath;
+
+typedef enum FeExecutionBackend {
+    FE_EXECUTION_BACKEND_EASYGPU = 0,
+    FE_EXECUTION_BACKEND_LUISA = 1
+} FeExecutionBackend;
 
 typedef struct FeBackendCaps {
     uint32_t backend_type;
@@ -318,6 +324,7 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture);
 FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, FeSamplerHandle sampler);
+FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t backend);
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size);
 FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                    uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait);

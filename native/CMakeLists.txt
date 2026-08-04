@@ -132,5 +132,22 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
         target_compile_options(luisa-compute-spirv PRIVATE "-include" "luisa/ast/type.h")
     endif()
 
+    target_sources(feather PRIVATE feather_luisa_backend.cpp)
+    target_link_libraries(feather PRIVATE luisa-compute-runtime luisa-compute-xir)
+    target_compile_definitions(feather PRIVATE FEATHER_HAS_LUISA=1)
+    if(APPLE)
+        set(_feather_luisa_origin "@loader_path")
+    elseif(UNIX)
+        set(_feather_luisa_origin "$ORIGIN")
+    endif()
+    if(DEFINED _feather_luisa_origin)
+        set_target_properties(feather luisa-compute-core luisa-compute-ast
+            luisa-compute-runtime luisa-compute-xir luisa-compute-backend-vk PROPERTIES
+            BUILD_RPATH "${_feather_luisa_origin}"
+            INSTALL_RPATH "${_feather_luisa_origin}"
+        )
+    endif()
     add_dependencies(feather luisa-compute-backend-vk)
+else()
+    target_compile_definitions(feather PRIVATE FEATHER_HAS_LUISA=0)
 endif()

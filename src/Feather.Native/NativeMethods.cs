@@ -361,6 +361,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint binding, FeSamplerHandle sampler);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, FeExecutionBackend backend);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, IntPtr data, ulong size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

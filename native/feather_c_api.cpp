@@ -2,6 +2,10 @@
 #include "feather_typed_ir.h"
 #include "feather_typed_ir_lowerer.h"
 
+#if FEATHER_HAS_LUISA
+#include "feather_luisa_backend.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -270,6 +274,7 @@ struct KernelState {
     std::vector<ADGradientState> ad_gradients;
     GPU::Backend::BufferHandle ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
     size_t ad_adj_pool_size = 0;
+    FeExecutionBackend execution_backend = FE_EXECUTION_BACKEND_EASYGPU;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
 };
 
@@ -5418,6 +5423,99 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
     mark_easygpu_writable_buffers_dirty(kernel, *context);
     mark_easygpu_writable_textures_dirty(kernel, *context);
     return true;
+}
+
+FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+                               uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait) {
+#if !FEATHER_HAS_LUISA
+    (void)kernel;
+    (void)group_x;
+    (void)group_y;
+    (void)group_z;
+    (void)logical_x;
+    (void)logical_y;
+    (void)logical_z;
+    (void)wait;
+    return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Feather was built without the LuisaCompute Vulkan backend.");
+#else
+    if (!wait) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "Luisa dispatch requires wait=true until asynchronous staging lifetimes are implemented.");
+    }
+    if (kernel.auto_diff) {
+        return fail(FE_ERROR_UNSUPPORTED, "Automatic differentiation is not supported by the M2.1 Luisa path.");
+    }
+
+    ParsedIr ir;
+    if (!parse_feather_ir(kernel.ir, &ir) || !ir.has_section7) {
+        return fail(FE_ERROR_UNSUPPORTED, "Luisa dispatch requires a valid section 7 typed IR payload.");
+    }
+
+    Feather::TypedIR::LoweringInputs lowering;
+    if (!build_typed_ir_lowering_inputs(ir, kernel, &lowering)) {
+        return fail(FE_ERROR_INVALID_ARGUMENT,
+                    "Section 7 typed IR resources could not be matched to bound native resources.");
+    }
+
+    std::vector<Feather::Luisa::HostBufferBinding> bindings;
+    bindings.reserve(lowering.resources.size());
+    GPU::Backend::Backend* easygpu_backend = nullptr;
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kIrResourceKindBuffer) {
+            return fail(FE_ERROR_UNSUPPORTED, "The M2.1 Luisa path supports buffer resources only.");
+        }
+        const auto bound = kernel.buffers.find(resource.binding);
+        if (bound == kernel.buffers.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Luisa dispatch is missing a required buffer binding.");
+        }
+        auto buffer = g_buffers.find(bound->second);
+        if (buffer == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Luisa dispatch references an invalid Feather buffer.");
+        }
+        if (buffer->second.device_dirty) {
+            if (easygpu_backend == nullptr) {
+                GPU::Runtime::AutoInitContext();
+                GPU::Runtime::Context::GetInstance().MakeCurrent();
+                easygpu_backend = GPU::Runtime::Context::GetBackend();
+            }
+            if (easygpu_backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            "EasyGPU is unavailable to stage a device-dirty buffer for Luisa.");
+            }
+            download_easygpu_buffer(buffer->second, *easygpu_backend);
+        }
+        bindings.push_back(Feather::Luisa::HostBufferBinding{
+            .binding = resource.binding,
+            .access = resource.access,
+            .stride = buffer->second.stride,
+            .bytes = &buffer->second.bytes});
+    }
+
+    const auto* configured_runtime = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
+    Feather::Luisa::DispatchInputs dispatch{
+        .group_x = group_x,
+        .group_y = group_y,
+        .group_z = group_z,
+        .logical_x = logical_x,
+        .logical_y = logical_y,
+        .logical_z = logical_z,
+        .runtime_directory = configured_runtime != nullptr && configured_runtime[0] != '\0'
+                                 ? configured_runtime
+                                 : Feather::Luisa::RuntimeDirectory()};
+    std::string error;
+    if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, dispatch, &error)) {
+        return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Luisa dispatch failed." : std::move(error));
+    }
+
+    for (const auto& resource : lowering.resources) {
+        if (resource.access == 1) continue;
+        const auto bound = kernel.buffers.find(resource.binding);
+        auto buffer = g_buffers.find(bound->second);
+        buffer->second.host_dirty = true;
+        buffer->second.device_dirty = false;
+    }
+    return ok();
+#endif
 }
 
 
@@ -11953,6 +12051,19 @@ FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, 
     return ok();
 }
 
+FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t backend) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_kernels.find(kernel);
+    if (it == g_kernels.end()) {
+        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+    }
+    if (backend != FE_EXECUTION_BACKEND_EASYGPU && backend != FE_EXECUTION_BACKEND_LUISA) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Unknown kernel execution backend.");
+    }
+    it->second.execution_backend = static_cast<FeExecutionBackend>(backend);
+    return ok();
+}
+
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size) {
     return protect([&] {
         if (data == nullptr && size != 0) {
@@ -12003,10 +12114,15 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         const auto start = std::chrono::steady_clock::now();
         FeResult result = FE_OK;
 
-        // Use the AD dispatch path for AutoDiff kernels, which sets up the GradienTape
-        // and generates the backward pass after the forward dispatch.
         it->second.last_dispatch_path = FE_DISPATCH_PATH_NONE;
-        if (it->second.auto_diff) {
+        if (it->second.execution_backend == FE_EXECUTION_BACKEND_LUISA) {
+            result = dispatch_luisa_kernel(it->second, group_x, group_y, group_z,
+                                           logical_x, logical_y, logical_z, wait);
+            it->second.last_dispatch_path =
+                result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
+        // Use the AD dispatch path for AutoDiff kernels, which sets up the GradientTape
+        // and generates the backward pass after the forward dispatch.
+        } else if (it->second.auto_diff) {
             if (try_dispatch_easygpu_ad_kernel(it->second, group_x, group_y, group_z, wait)) {
                 it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
             } else {

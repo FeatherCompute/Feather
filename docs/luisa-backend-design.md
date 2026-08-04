@@ -19,11 +19,13 @@ unchanged and remains the default.
 
 ## FEIR To XIR
 
-`Feather::Luisa::TryLowerToXir` owns a Luisa `xir::Module` and translates each
-typed FEIR function into a `xir::KernelFunction` or `xir::CallableFunction`.
-It maintains maps from FEIR type, function, value, lvalue, and resource IDs to
-their XIR counterparts. Translation is staged so recursive callable symbols
-and resource arguments exist before bodies are emitted.
+The Feather-owned translator creates a Luisa `xir::Module` and will translate
+each typed FEIR function into a `xir::KernelFunction` or
+`xir::CallableFunction`. M2.1's `Feather::Luisa::Dispatch` contains the first
+lowerer: one compute entry, scalar expressions, and buffer arguments. The full
+translator will maintain maps from FEIR type, function, value, lvalue, and
+resource IDs to their XIR counterparts. Translation will be staged so recursive
+callable symbols and resource arguments exist before bodies are emitted.
 
 The primary Luisa 0.9.0 API is:
 
@@ -68,10 +70,19 @@ and image import, queue-family ownership transfers, layout transitions,
 timeline synchronization, and lifetime tracking.
 
 Luisa dispatch receives Feather's logical extent, while XIR kernel block size
-comes from FEIR's thread-group metadata. `wait: true` synchronizes the Luisa
-stream before returning. Asynchronous dispatch will require retained staging
-and completion objects; until that is implemented, the Luisa route rejects
-`wait: false` rather than weakening lifetime guarantees.
+comes from FEIR's thread-group metadata. Luisa 0.9.0 requires an XIR block to
+contain 32--1024 threads in multiples of 32. The M2.1 subset observes global
+dispatch IDs only, so Feather rounds its 1D block width up to that granularity
+without changing the logical dispatch extent. M2.2 must preserve exact local-ID
+and barrier semantics when those features enter the route. `wait: true`
+synchronizes the Luisa stream before returning. Asynchronous dispatch will
+require retained staging and completion objects; until that is implemented,
+the Luisa route rejects `wait: false` rather than weakening lifetime guarantees.
+
+The native asset staging step places Luisa's runtime, XIR libraries, and Vulkan
+backend module beside the Feather library. Feather resolves that directory from
+its own loaded module; `FEATHER_LUISA_RUNTIME_DIR` is an explicit override for
+development and diagnostics, not a requirement for packaged execution.
 
 ## Backend Selection
 
@@ -88,7 +99,7 @@ translation or execution fails.
 | FEIR feature | M2.1 | M2.2 plan |
 | --- | --- | --- |
 | Scalar types/constants/casts | int/uint/float slice | Complete scalar and bitcast matrix |
-| Vectors/matrices | Types mapped, not executed | Constructors, swizzles, arithmetic, matrix ops |
+| Vectors/matrices | Not routed | Constructors, swizzles, arithmetic, matrix ops |
 | Arrays/struct aggregates | Design only | Layout-checked constants, GEP, load/store |
 | Control flow | Straight-line slice | If/switch/loops, break/continue, phi normalization |
 | Local/shared memory | Design only | Alloca address spaces, barriers, block-size validation |

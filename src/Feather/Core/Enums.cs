@@ -95,6 +95,15 @@ public enum GpuLayout
 }
 
 /// <summary>
+/// Selects the native implementation used to execute a generated compute kernel.
+/// </summary>
+public enum GpuExecutionBackend : uint
+{
+    EasyGpu = 0,
+    Luisa = 1
+}
+
+/// <summary>
 /// Identifies the native route used by the most recent dispatch or draw.
 /// </summary>
 public enum DispatchPath : uint
@@ -103,5 +112,6 @@ public enum DispatchPath : uint
     TypedEasyGpu = 1,
     CpuReferenceFallback = 2,
     GraphicsFallback = 3,
-    Rejected = 4
+    Rejected = 4,
+    Luisa = 5
 }
