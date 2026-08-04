@@ -102,7 +102,10 @@ public sealed class MinimalRasterPass : IRasterPass
                 lights,
                 includeMaterialDraws: ViewMode == 2));
         var depth = context.GetOrCreateDepthTarget(Color);
-        var pipeline = resources.GetPipeline(context.SampleCount);
+        var pipelineResources = context.GetOrCreateAssemblyResource(
+            "MinimalRasterPass.Pipelines.v1",
+            static () => new MinimalRasterPipelineResources());
+        var pipeline = pipelineResources.GetPipeline(context.SampleCount);
         IGpuTexture2D[] targets = [color];
         var cameraPosition = camera.WorldPosition;
 
@@ -259,12 +262,54 @@ public sealed class MinimalRasterPass : IRasterPass
         return texture;
     }
 
-    /// <summary>Scene-derived CPU conversions and GPU objects retained by the RenderHost.</summary>
-    private sealed class MinimalRasterSceneResources : IDisposable
+    /// <summary>Immutable pipelines retained for the lifetime of this pass assembly.</summary>
+    private sealed class MinimalRasterPipelineResources : IDisposable
     {
         private readonly Dictionary<SampleCount,
             GpuGraphicsPipeline<MinimalRasterVertexShader, MinimalRasterFragmentShader, MinimalRasterVaryings>>
             pipelines = [];
+
+        public GpuGraphicsPipeline<
+            MinimalRasterVertexShader,
+            MinimalRasterFragmentShader,
+            MinimalRasterVaryings> GetPipeline(SampleCount sampleCount)
+        {
+            if (pipelines.TryGetValue(sampleCount, out var pipeline))
+            {
+                return pipeline;
+            }
+            pipeline = GPU.CreateGraphicsPipeline<
+                MinimalRasterVertexShader,
+                MinimalRasterFragmentShader,
+                MinimalRasterVaryings>(
+                new GraphicsPipelineDesc
+                {
+                    SampleCount = sampleCount,
+                    DepthStencil = DepthStencilState.Default with
+                    {
+                        DepthTest = true,
+                        DepthWrite = true,
+                        DepthCompare = CompareOp.Less
+                    },
+                    Raster = RasterState.Default with { CullMode = CullMode.None },
+                    DebugName = "Project Minimal Raster"
+                });
+            pipelines.Add(sampleCount, pipeline);
+            return pipeline;
+        }
+
+        public void Dispose()
+        {
+            foreach (var pipeline in pipelines.Values)
+            {
+                pipeline.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Scene-derived CPU conversions and GPU objects retained by the RenderHost.</summary>
+    private sealed class MinimalRasterSceneResources : IDisposable
+    {
         private readonly GpuTexture2D<Rgba8, float4>?[] sceneTextures;
 
         private MinimalRasterSceneResources(
@@ -412,41 +457,8 @@ public sealed class MinimalRasterPass : IRasterPass
             }
         }
 
-        public GpuGraphicsPipeline<
-            MinimalRasterVertexShader,
-            MinimalRasterFragmentShader,
-            MinimalRasterVaryings> GetPipeline(SampleCount sampleCount)
-        {
-            if (pipelines.TryGetValue(sampleCount, out var pipeline))
-            {
-                return pipeline;
-            }
-            pipeline = GPU.CreateGraphicsPipeline<
-                MinimalRasterVertexShader,
-                MinimalRasterFragmentShader,
-                MinimalRasterVaryings>(
-                new GraphicsPipelineDesc
-                {
-                    SampleCount = sampleCount,
-                    DepthStencil = DepthStencilState.Default with
-                    {
-                        DepthTest = true,
-                        DepthWrite = true,
-                        DepthCompare = CompareOp.Less
-                    },
-                    Raster = RasterState.Default with { CullMode = CullMode.None },
-                    DebugName = "Project Minimal Raster"
-                });
-            pipelines.Add(sampleCount, pipeline);
-            return pipeline;
-        }
-
         public void Dispose()
         {
-            foreach (var pipeline in pipelines.Values)
-            {
-                pipeline.Dispose();
-            }
             foreach (var draw in MaterialDraws)
             {
                 draw.Dispose();
