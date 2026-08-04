@@ -183,6 +183,13 @@ public static class GPU
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
         => new(kernel);
 
+    /// <summary>
+    /// Creates a managed AD kernel wrapper for an explicitly selected execution backend.
+    /// </summary>
+    public static GpuADKernel<TKernel> CreateADKernel<TKernel>(TKernel kernel, GpuExecutionBackend backend)
+        where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
+        => new(kernel, backend);
+
     public static void Dispatch<TKernel>(TKernel kernel, int x, bool wait = true)
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(x, 1, 1), wait);

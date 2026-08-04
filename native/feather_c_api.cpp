@@ -255,6 +255,7 @@ struct ADGradientState {
     uint32_t component_count = 0;
     size_t byte_size = 0;
     GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
+    std::vector<unsigned char> host_bytes;
 };
 
 struct KernelState {
@@ -4260,7 +4261,8 @@ bool register_easygpu_module_resources(const ParsedIr& ir, const KernelState& ke
 }
 
 bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kernel,
-                                    Feather::TypedIR::LoweringInputs* inputs) {
+                                    Feather::TypedIR::LoweringInputs* inputs,
+                                    bool allow_unbound_samplers = false) {
     if (inputs == nullptr) {
         return false;
     }
@@ -4311,20 +4313,19 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         } else if (resource.kind == kIrResourceKindSampler) {
             const auto bound = kernel.samplers.find(resource.binding);
             if (bound == kernel.samplers.end()) {
-                return false;
+                if (!allow_unbound_samplers) return false;
+            } else {
+                const auto sampler = g_samplers.find(bound->second);
+                if (sampler == g_samplers.end()) return false;
+                const auto& desc = sampler->second.desc;
+                resource_info.sampler_min_filter = desc.min_filter;
+                resource_info.sampler_mag_filter = desc.mag_filter;
+                resource_info.sampler_mipmap_mode = desc.mipmap_mode;
+                resource_info.sampler_address_u = desc.address_u;
+                resource_info.sampler_address_v = desc.address_v;
+                resource_info.sampler_address_w = desc.address_w;
+                resource_info.sampler_anisotropy = desc.anisotropy_enable != 0u;
             }
-            const auto sampler = g_samplers.find(bound->second);
-            if (sampler == g_samplers.end()) {
-                return false;
-            }
-            const auto& desc = sampler->second.desc;
-            resource_info.sampler_min_filter = desc.min_filter;
-            resource_info.sampler_mag_filter = desc.mag_filter;
-            resource_info.sampler_mipmap_mode = desc.mipmap_mode;
-            resource_info.sampler_address_u = desc.address_u;
-            resource_info.sampler_address_v = desc.address_v;
-            resource_info.sampler_address_w = desc.address_w;
-            resource_info.sampler_anisotropy = desc.anisotropy_enable != 0u;
         } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
             resource_info.sampled = resource.access == 4;
             resource_info.width = 1;
@@ -4359,6 +4360,7 @@ bool has_typed_section7_semantics(const KernelState& kernel) {
 
 std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelState& kernel,
                                                                 bool enable_fused_multiply_add,
+                                                                bool allow_unbound_samplers,
                                                                 std::string* error = nullptr) {
     if (error != nullptr) {
         error->clear();
@@ -4374,7 +4376,7 @@ std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelStat
     }
 
     Feather::TypedIR::LoweringInputs inputs;
-    if (!build_typed_ir_lowering_inputs(ir, kernel, &inputs)) {
+    if (!build_typed_ir_lowering_inputs(ir, kernel, &inputs, allow_unbound_samplers)) {
         if (error != nullptr) {
             *error = "Section 7 typed IR resources could not be matched to bound native resources.";
         }
@@ -4544,10 +4546,12 @@ bool build_easygpu_module_structured_assignment(const ParsedIr& ir, GPU::IR::Mod
 }
 
 std::unique_ptr<GPU::IR::Module> try_build_easygpu_module(const KernelState& kernel,
-                                                          GPU::AD::GradientTape* gradientTape = nullptr) {
+                                                          GPU::AD::GradientTape* gradientTape = nullptr,
+                                                          bool allow_unbound_samplers = false) {
     std::string typed_error;
     const bool enable_fused_multiply_add = kEnableFusedMultiplyAdd && !kernel.auto_diff && gradientTape == nullptr;
-    if (auto typed_module = try_build_typed_easygpu_module(kernel, enable_fused_multiply_add, &typed_error)) {
+    if (auto typed_module = try_build_typed_easygpu_module(
+            kernel, enable_fused_multiply_add, allow_unbound_samplers, &typed_error)) {
         return typed_module;
     }
 
@@ -5459,10 +5463,6 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
         return fail(FE_ERROR_UNSUPPORTED,
                     "Luisa dispatch requires wait=true until asynchronous staging lifetimes are implemented.");
     }
-    if (kernel.auto_diff) {
-        return fail(FE_ERROR_UNSUPPORTED, "Automatic differentiation is not supported by the M2.1 Luisa path.");
-    }
-
     ParsedIr ir;
     if (!parse_feather_ir(kernel.ir, &ir) || !ir.has_section7) {
         return fail(FE_ERROR_UNSUPPORTED, "Luisa dispatch requires a valid section 7 typed IR payload.");
@@ -5472,6 +5472,58 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
     if (!build_typed_ir_lowering_inputs(ir, kernel, &lowering)) {
         return fail(FE_ERROR_INVALID_ARGUMENT,
                     "Section 7 typed IR resources could not be matched to bound native resources.");
+    }
+
+    std::optional<Feather::Luisa::AdInputs> ad_inputs;
+    std::vector<ADGradientState> next_gradients;
+    if (kernel.auto_diff) {
+        std::vector<IrAdAnnotation> parameters;
+        std::vector<IrAdAnnotation> losses;
+        for (const auto& annotation : ir.ad_annotations) {
+            if (annotation.role == kIrAdRoleParameter) parameters.push_back(annotation);
+            else if (annotation.role == kIrAdRoleLoss) losses.push_back(annotation);
+        }
+        if (parameters.empty() || losses.size() != 1u)
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa AD requires at least one parameter and exactly one loss annotation.");
+        auto loss_name = string_or_empty(ir, losses.front().name_string_id);
+        if (loss_name.empty() || (losses.front().source_kind != kIrAdSourceKindLocal && losses.front().source_kind != 0u))
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa AD loss must identify a scalar float local.");
+        ad_inputs.emplace();
+        ad_inputs->loss_name = std::move(loss_name);
+        next_gradients.reserve(parameters.size());
+        std::unordered_set<uint32_t> seen;
+        for (const auto& parameter : parameters) {
+            if (parameter.binding == kIrNoBinding || parameter.source_kind != kIrAdSourceKindBufferElement ||
+                !seen.insert(parameter.binding).second) continue;
+            const auto* resource = find_resource_by_binding(ir, parameter.binding);
+            const auto bound = kernel.buffers.find(parameter.binding);
+            if (resource == nullptr || resource->kind != kIrResourceKindBuffer || bound == kernel.buffers.end())
+                return fail(FE_ERROR_UNSUPPORTED, "Luisa AD parameter must identify a bound buffer element.");
+            auto buffer = g_buffers.find(bound->second);
+            if (buffer == g_buffers.end() || buffer->second.stride == 0u || buffer->second.bytes.empty())
+                return fail(FE_ERROR_INVALID_HANDLE, "Luisa AD parameter buffer is invalid or empty.");
+            auto element_type = string_or_empty(ir, parameter.type_name_string_id);
+            if (element_type.empty()) element_type = string_or_empty(ir, resource->element_type_string_id);
+            const auto component_count = ad_component_count_for_type(element_type);
+            if (component_count == 0u)
+                return fail(FE_ERROR_UNSUPPORTED, "Luisa AD supports float scalar and vector parameters.");
+            const auto element_count = static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
+            ad_inputs->parameters.push_back({parameter.binding, element_count});
+            ADGradientState gradient;
+            gradient.name = string_or_empty(ir, parameter.name_string_id);
+            if (gradient.name.empty()) gradient.name = string_or_empty(ir, resource->name_string_id);
+            gradient.resource_name = string_or_empty(ir, parameter.resource_name_string_id);
+            if (gradient.resource_name.empty()) gradient.resource_name = string_or_empty(ir, resource->name_string_id);
+            gradient.element_type = element_type;
+            gradient.easygpu_name = easygpu_buffer_name(*resource);
+            gradient.source_binding = parameter.binding;
+            gradient.element_count = element_count;
+            gradient.element_stride = static_cast<uint32_t>(buffer->second.stride);
+            gradient.component_count = component_count;
+            next_gradients.push_back(std::move(gradient));
+        }
+        if (next_gradients.empty())
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa AD did not resolve any unique parameter buffers.");
     }
 
     std::vector<Feather::Luisa::HostBufferBinding> bindings;
@@ -5556,9 +5608,23 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
         .runtime_directory = configured_runtime != nullptr && configured_runtime[0] != '\0'
                                  ? configured_runtime
                                  : Feather::Luisa::RuntimeDirectory()};
+    std::vector<Feather::Luisa::AdGradientBinding> gradient_bindings;
+    gradient_bindings.reserve(next_gradients.size());
+    for (auto& gradient : next_gradients) {
+        gradient_bindings.push_back({gradient.source_binding, gradient.element_count,
+                                     gradient.component_count, &gradient.host_bytes});
+    }
     std::string error;
-    if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, texture_bindings, dispatch, &error)) {
+    if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, texture_bindings, dispatch,
+                                  ad_inputs ? &*ad_inputs : nullptr, gradient_bindings, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Luisa dispatch failed." : std::move(error));
+    }
+
+    if (ad_inputs) {
+        release_ad_gradient_buffers(kernel);
+        for (auto& gradient : next_gradients) gradient.byte_size = gradient.host_bytes.size();
+        kernel.ad_gradients = std::move(next_gradients);
+        kernel.last_ad_backward_glsl.clear();
     }
 
     for (const auto& resource : lowering.resources) {
@@ -6052,7 +6118,7 @@ FeResult build_easygpu_kernel_source(const KernelState& kernel, std::string* sou
         return fail(FE_ERROR_INVALID_ARGUMENT, "Output source pointer must not be null.");
     }
 
-    auto module = try_build_easygpu_module(kernel);
+    auto module = try_build_easygpu_module(kernel, nullptr, true);
     if (module == nullptr) {
         ParsedIr parsed;
         if (parse_feather_ir(kernel.ir, &parsed) && parsed.has_section7) {
@@ -12350,6 +12416,10 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
         if (size == 0) {
             return ok();
         }
+        if (!gradient.host_bytes.empty()) {
+            std::memcpy(out_data, gradient.host_bytes.data() + static_cast<size_t>(offset), static_cast<size_t>(size));
+            return ok();
+        }
         if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
             return fail(FE_ERROR_INVALID_HANDLE, "AD gradient buffer is not available.");
         }
@@ -12398,9 +12468,21 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD gradient reduction.");
         }
 
+        auto& gradient = kernel_it->second.ad_gradients[index];
+        if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE && !gradient.host_bytes.empty()) {
+            GPU::Backend::BufferDesc desc;
+            desc.sizeInBytes = gradient.host_bytes.size();
+            desc.mode = GPU::Backend::BufferMode::ReadWrite;
+            desc.initialData = gradient.host_bytes.data();
+            gradient.backend_buffer = backend->CreateBuffer(desc);
+            if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
+                return fail(FE_ERROR_OUT_OF_MEMORY, "EasyGPU failed to stage Luisa AD gradients for device reduction.");
+            }
+        }
+
         std::string error;
         if (!dispatch_ad_gradient_reduce_to_buffer(
-                kernel_it->second.ad_gradients[index],
+                gradient,
                 destination_it->second,
                 destination_offset,
                 destination_size,

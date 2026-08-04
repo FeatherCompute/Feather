@@ -1,5 +1,6 @@
 #pragma once
 
+#include "feather_luisa_xir.h"
 #include "feather_typed_ir.h"
 #include "feather_typed_ir_lowerer.h"
 
@@ -39,10 +40,18 @@ struct DispatchInputs {
     std::string runtime_directory;
 };
 
+struct AdGradientBinding {
+    uint32_t source_binding = 0;
+    uint32_t element_count = 0;
+    uint32_t component_count = 0;
+    std::vector<unsigned char>* bytes = nullptr;
+};
+
 std::string RuntimeDirectory();
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> buffers, std::span<HostTextureBinding> textures,
-              const DispatchInputs& dispatch, std::string* error = nullptr);
+              const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
+              std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
 
 } // namespace Feather::Luisa

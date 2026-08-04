@@ -63,6 +63,28 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff, GpuExecutionBackend backend)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        if (!Enum.IsDefined(backend))
+        {
+            throw new ArgumentOutOfRangeException(nameof(backend));
+        }
+        var kernel = Create<TKernel>(context, autoDiff);
+        try
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_execution_backend(
+                kernel.Handle,
+                (FeExecutionBackend)backend));
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
@@ -121,26 +143,7 @@ public sealed class GpuKernel : IDisposable
     /// </summary>
     public static GpuKernel Create<TKernel>(GpuContext context, GpuExecutionBackend backend)
         where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        if (!Enum.IsDefined(backend))
-        {
-            throw new ArgumentOutOfRangeException(nameof(backend));
-        }
-
-        var kernel = Create<TKernel>(context);
-        try
-        {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_execution_backend(
-                kernel.Handle,
-                (FeExecutionBackend)backend));
-            return kernel;
-        }
-        catch
-        {
-            kernel.Dispose();
-            throw;
-        }
-    }
+        => Create<TKernel>(context, TKernel.Descriptor.AutoDiff, backend);
 
     /// <summary>
     /// Builds this generated kernel through the EasyGPU IR module bridge and returns the resulting GLSL source.

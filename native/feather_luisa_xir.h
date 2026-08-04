@@ -17,11 +17,29 @@ struct BufferLayout {
     const luisa::compute::Type* device_type = nullptr;
 };
 
+struct AdParameter {
+    uint32_t source_binding = 0;
+    uint32_t element_count = 0;
+};
+
+struct AdInputs {
+    std::string loss_name;
+    std::vector<AdParameter> parameters;
+};
+
+struct AdGradientLayout {
+    uint32_t source_binding = 0;
+    uint32_t element_count = 0;
+    const luisa::compute::Type* device_type = nullptr;
+};
+
 luisa::compute::xir::KernelFunction* LowerToXir(
     const TypedIR::Module& module,
     const TypedIR::LoweringInputs& inputs,
     luisa::compute::xir::Module& xir_module,
     std::vector<BufferLayout>* buffer_layouts,
+    const AdInputs* ad_inputs = nullptr,
+    std::vector<AdGradientLayout>* ad_gradient_layouts = nullptr,
     std::string* error = nullptr);
 
 } // namespace Feather::Luisa

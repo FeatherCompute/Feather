@@ -97,8 +97,11 @@ constexpr uint8_t kLValueSharedMemoryElement = 9;
 class Lowerer {
   public:
     Lowerer(const TypedIR::Module& module, const TypedIR::LoweringInputs& inputs,
-            xir::Module& xir_module, std::vector<BufferLayout>* buffer_layouts, std::string* error)
-        : module_{module}, inputs_{inputs}, xir_module_{xir_module}, buffer_layouts_{buffer_layouts}, error_{error} {}
+            xir::Module& xir_module, std::vector<BufferLayout>* buffer_layouts,
+            const AdInputs* ad_inputs, std::vector<AdGradientLayout>* ad_gradient_layouts,
+            std::string* error)
+        : module_{module}, inputs_{inputs}, xir_module_{xir_module}, buffer_layouts_{buffer_layouts},
+          ad_inputs_{ad_inputs}, ad_gradient_layouts_{ad_gradient_layouts}, error_{error} {}
 
     KernelFunction* lower() {
         if (module_.entry_function >= module_.functions.size())
@@ -123,9 +126,23 @@ class Lowerer {
         kernel_->set_block_size(luisa::make_uint3(block_x, static_cast<uint32_t>(inputs_.group_y),
                                                   static_cast<uint32_t>(inputs_.group_z)));
 
-        if (!register_resources() || !stage_callables() || !lower_callable_bodies()) return nullptr;
+        if (!register_resources() || !register_ad_resources() || !stage_callables() || !lower_callable_bodies()) return nullptr;
         builder_.set_insertion_point(kernel_->create_body_block());
-        if (!emit_bounds_guard(entry.kind) || !lower_statement(entry.body_statement_index)) return nullptr;
+        if (!emit_bounds_guard(entry.kind)) return nullptr;
+        BasicBlock* ad_merge = nullptr;
+        if (ad_inputs_ != nullptr) {
+            auto* scope = builder_.autodiff_scope();
+            ad_merge = scope->create_merge_block();
+            builder_.set_insertion_point(scope->create_entry_block());
+            inside_ad_scope_ = true;
+        }
+        if (!lower_statement(entry.body_statement_index)) return nullptr;
+        if (ad_inputs_ != nullptr) {
+            if (!finish_ad_scope()) return nullptr;
+            if (!builder_.is_insertion_point_terminator()) builder_.br(ad_merge);
+            builder_.set_insertion_point(ad_merge);
+            inside_ad_scope_ = false;
+        }
         if (!builder_.is_insertion_point_terminator()) builder_.return_void();
         return kernel_;
     }
@@ -169,6 +186,18 @@ class Lowerer {
     struct LoopTargets {
         BasicBlock* break_target = nullptr;
         BasicBlock* continue_target = nullptr;
+    };
+
+    struct AdResource {
+        Resource* source = nullptr;
+        ResourceArgument* gradient = nullptr;
+        uint32_t element_count = 0;
+    };
+
+    struct AdRead {
+        AdResource* resource = nullptr;
+        Value* index = nullptr;
+        Value* value = nullptr;
     };
 
     bool fail(std::string message) {
@@ -351,6 +380,61 @@ class Lowerer {
                     return fail("Luisa cannot match a buffer element to its FEIR type record");
                 buffer_layouts_->push_back(BufferLayout{source.binding, source_type, element});
             }
+        }
+        return true;
+    }
+
+    bool register_ad_resources() {
+        if (ad_inputs_ == nullptr) return true;
+        if (ad_inputs_->loss_name.empty() || ad_inputs_->parameters.empty())
+            return fail("Luisa AD requires one loss and at least one parameter buffer");
+        for (const auto& parameter : ad_inputs_->parameters) {
+            auto source = std::find_if(resources_.begin(), resources_.end(), [&](const auto& entry) {
+                return entry.second.binding == parameter.source_binding;
+            });
+            if (source == resources_.end() || source->second.kind != kResourceBuffer ||
+                parameter.element_count == 0u ||
+                (!source->second.element_type->is_float() && !source->second.element_type->is_vector()))
+                return fail("Luisa AD parameter must identify a non-empty float buffer");
+            auto* gradient = kernel_->create_resource_argument(Type::buffer(source->second.element_type));
+            ad_resources_.emplace(parameter.source_binding,
+                                  AdResource{&source->second, gradient, parameter.element_count});
+            if (ad_gradient_layouts_ != nullptr)
+                ad_gradient_layouts_->push_back(
+                    AdGradientLayout{parameter.source_binding, parameter.element_count, source->second.element_type});
+        }
+        return true;
+    }
+
+    Value* track_ad_read(Resource& resource, Value* index, Value* value) {
+        if (!inside_ad_scope_ || value == nullptr) return value;
+        auto found = ad_resources_.find(resource.binding);
+        if (found == ad_resources_.end()) return value;
+        builder_.call(Type::of<void>(), AutodiffIntrinsicOp::AUTODIFF_REQUIRES_GRADIENT, {value});
+        ad_reads_.push_back(AdRead{&found->second, index, value});
+        return value;
+    }
+
+    bool finish_ad_scope() {
+        auto loss = locals_.find(ad_inputs_->loss_name);
+        if (loss == locals_.end() || loss->second->type() != Type::of<float>())
+            return fail("Luisa AD loss annotation does not resolve to a scalar float local");
+        auto* loss_value = builder_.load(Type::of<float>(), loss->second);
+        auto* one = xir_module_.create_constant_one(Type::of<float>());
+        builder_.call(Type::of<void>(), AutodiffIntrinsicOp::AUTODIFF_GRADIENT_MARKER, {loss_value, one});
+        builder_.call(Type::of<void>(), AutodiffIntrinsicOp::AUTODIFF_BACKWARD, {});
+
+        auto* dispatch_id = xir_module_.create_dispatch_id();
+        auto* thread = extract(dispatch_id, Type::of<uint32_t>(), {index_constant(0u)});
+        for (const auto& read : ad_reads_) {
+            auto* gradient = builder_.call(read.value->type(), AutodiffIntrinsicOp::AUTODIFF_GRADIENT, {read.value});
+            auto* count = index_constant(read.resource->element_count);
+            auto* base = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {thread, count});
+            auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {base, read.index});
+            auto* old = builder_.call(read.value->type(), ResourceReadOp::BUFFER_READ,
+                                      {read.resource->gradient, index});
+            auto* sum = builder_.call(read.value->type(), ArithmeticOp::BINARY_ADD, {old, gradient});
+            builder_.call(ResourceWriteOp::BUFFER_WRITE, {read.resource->gradient, index, sum});
         }
         return true;
     }
@@ -654,7 +738,9 @@ class Lowerer {
                                                             : builder_.bit_cast_if_necessary(result_type, texture_value);
             }
             index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
-            return builder_.call(result_type, ResourceReadOp::BUFFER_READ, {found->second.argument, index});
+            return track_ad_read(found->second, index,
+                                 builder_.call(result_type, ResourceReadOp::BUFFER_READ,
+                                               {found->second.argument, index}));
         }
         case kExpressionUnary: {
             auto* value = lower_expression(expression.a);
@@ -741,8 +827,9 @@ class Lowerer {
                                 {resource->second.argument, index});
                         }
                         index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
-                        return builder_.call(result_type, ResourceReadOp::BUFFER_READ,
-                                             {resource->second.argument, index});
+                        return track_ad_read(resource->second, index,
+                                             builder_.call(result_type, ResourceReadOp::BUFFER_READ,
+                                                           {resource->second.argument, index}));
                     }
                 }
             }
@@ -1097,8 +1184,9 @@ class Lowerer {
                                  address.resource->kind == kResourceTexture2D ? ResourceReadOp::TEXTURE2D_READ
                                                                              : ResourceReadOp::TEXTURE3D_READ,
                                  {address.resource->argument, address.resource_index});
-        } else root = builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
-                                    {address.resource->argument, address.resource_index});
+        } else root = track_ad_read(*address.resource, address.resource_index,
+                                    builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
+                                                  {address.resource->argument, address.resource_index}));
         return address.indices.empty() ? root : extract(root, result_type, address.indices);
     }
 
@@ -1322,6 +1410,8 @@ class Lowerer {
     const TypedIR::LoweringInputs& inputs_;
     xir::Module& xir_module_;
     std::vector<BufferLayout>* buffer_layouts_ = nullptr;
+    const AdInputs* ad_inputs_ = nullptr;
+    std::vector<AdGradientLayout>* ad_gradient_layouts_ = nullptr;
     std::string* error_ = nullptr;
     KernelFunction* kernel_ = nullptr;
     XIRBuilder builder_;
@@ -1335,6 +1425,9 @@ class Lowerer {
     struct SharedMemory { Value* pointer; uint32_t length; };
     std::unordered_map<std::string, SharedMemory> shared_;
     std::vector<LoopTargets> loops_;
+    std::unordered_map<uint32_t, AdResource> ad_resources_;
+    std::vector<AdRead> ad_reads_;
+    bool inside_ad_scope_ = false;
     bool uses_group_semantics_ = false;
     uint32_t logical_groups_per_block_ = 1u;
 };
@@ -1342,10 +1435,13 @@ class Lowerer {
 } // namespace
 
 KernelFunction* LowerToXir(const TypedIR::Module& module, const TypedIR::LoweringInputs& inputs,
-                           xir::Module& xir_module, std::vector<BufferLayout>* buffer_layouts, std::string* error) {
+                           xir::Module& xir_module, std::vector<BufferLayout>* buffer_layouts,
+                           const AdInputs* ad_inputs, std::vector<AdGradientLayout>* ad_gradient_layouts,
+                           std::string* error) {
     if (error != nullptr) error->clear();
     if (buffer_layouts != nullptr) buffer_layouts->clear();
-    return Lowerer{module, inputs, xir_module, buffer_layouts, error}.lower();
+    if (ad_gradient_layouts != nullptr) ad_gradient_layouts->clear();
+    return Lowerer{module, inputs, xir_module, buffer_layouts, ad_inputs, ad_gradient_layouts, error}.lower();
 }
 
 } // namespace Feather::Luisa

@@ -30,6 +30,11 @@
 #include <luisa/runtime/stream.h>
 #include <luisa/runtime/volume.h>
 #include <luisa/xir/module.h>
+#include <luisa/xir/passes/autodiff.h>
+#include <luisa/xir/passes/destructure_cfg.h>
+#include <luisa/xir/passes/inline.h>
+#include <luisa/xir/passes/reg2mem.h>
+#include <luisa/xir/passes/restructure_cfg.h>
 #include <luisa/xir/translators/xir2ast.h>
 #include <luisa/xir/verifier.h>
 
@@ -223,12 +228,15 @@ std::string RuntimeDirectory() {
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> host_buffers, std::span<HostTextureBinding> host_textures,
-              const DispatchInputs& dispatch, std::string* error) {
+              const DispatchInputs& dispatch, const AdInputs* ad_inputs,
+              std::span<AdGradientBinding> gradients, std::string* error) {
     if (error != nullptr)
         error->clear();
     xir::Module xir_module;
     std::vector<BufferLayout> buffer_layouts;
-    auto* kernel = LowerToXir(module, lowering, xir_module, &buffer_layouts, error);
+    std::vector<AdGradientLayout> gradient_layouts;
+    auto* kernel = LowerToXir(module, lowering, xir_module, &buffer_layouts,
+                              ad_inputs, &gradient_layouts, error);
     if (kernel == nullptr)
         return false;
     auto verification = xir_verify_module(&xir_module);
@@ -249,12 +257,16 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
     std::vector<luisa::compute::Function::Binding> bound_arguments;
     std::vector<RuntimeTexture> runtime_textures;
     std::vector<HostTextureBinding*> staged_textures;
+    std::vector<ByteBuffer> runtime_gradients;
+    std::vector<std::vector<unsigned char>> staged_gradients;
     runtime_buffers.reserve(host_buffers.size());
     staged_bytes.reserve(host_buffers.size());
     staged_bindings.reserve(host_buffers.size());
     bound_arguments.reserve(lowering.resources.size());
     runtime_textures.reserve(host_textures.size());
     staged_textures.reserve(host_textures.size());
+    runtime_gradients.reserve(gradient_layouts.size());
+    staged_gradients.reserve(gradient_layouts.size());
 
     for (const auto& resource : lowering.resources) {
         if (resource.kind == kResourceTexture2D || resource.kind == kResourceTexture3D) {
@@ -315,7 +327,62 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         staged_bindings.push_back(&*found);
     }
 
+    for (const auto& layout : gradient_layouts) {
+        auto found = std::find_if(gradients.begin(), gradients.end(), [&](const auto& gradient) {
+            return gradient.source_binding == layout.source_binding;
+        });
+        if (found == gradients.end() || found->bytes == nullptr || found->element_count != layout.element_count ||
+            found->component_count == 0u || layout.device_type == nullptr) {
+            if (error != nullptr) *error = "Luisa AD gradient output metadata is missing or inconsistent";
+            return false;
+        }
+        const auto value_count = static_cast<size_t>(dispatch.logical_x) * layout.element_count;
+        staged_gradients.emplace_back(value_count * layout.device_type->size(), 0u);
+        runtime_gradients.emplace_back(device.create_byte_buffer(staged_gradients.back().size()));
+        auto& runtime = runtime_gradients.back();
+        stream << runtime.copy_from(staged_gradients.back().data()) << synchronize();
+        bound_arguments.emplace_back(
+            luisa::compute::Function::BufferBinding{runtime.handle(), 0u, runtime.size_bytes()});
+    }
+
     xir_to_ast_normalize_module(&xir_module);
+    if (ad_inputs != nullptr) {
+        auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
+        if (destructured.error_count != 0u) {
+            if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
+            return false;
+        }
+        auto inlined = inline_all_pass_run_on_module(
+            &xir_module, InlineOptions{.allow_autodiff_scope_in_caller = true});
+        if (inlined.skipped_recursive_callable_count != 0u ||
+            inlined.skipped_structured_call_count != 0u ||
+            inlined.skipped_constrained_call_count != 0u ||
+            inlined.rejected_malformed_call_count != 0u) {
+            if (error != nullptr) *error = "Luisa could not inline the complete FEIR callable graph before autodiff";
+            return false;
+        }
+        static_cast<void>(reg2mem_pass_run_on_module(&xir_module));
+        auto restructured = restructure_cfg_pass_run_on_module(&xir_module);
+        if (!restructured.succeeded()) {
+            if (error != nullptr) *error = "Luisa failed to restructure XIR control flow before autodiff";
+            return false;
+        }
+        static_cast<void>(reg2mem_pass_run_on_module(&xir_module));
+        auto ad = autodiff_pass_run_on_module(&xir_module);
+        if (ad.transformed_scope_count == 0u) {
+            if (error != nullptr) *error = "Luisa XIR autodiff did not transform the generated AD scope";
+            return false;
+        }
+        auto ad_verification = xir_verify_module(&xir_module);
+        if (!ad_verification.succeeded()) {
+            if (error != nullptr) {
+                *error = "Luisa autodiff output failed XIR verification: ";
+                error->append(ad_verification.errors.front().message.data(), ad_verification.errors.front().message.size());
+            }
+            return false;
+        }
+        xir_to_ast_normalize_module(&xir_module);
+    }
     auto ast = xir_to_ast_translate(
         *kernel, XIR2ASTConfig{.strict = true,
                                .bound_arguments = luisa::span<const luisa::compute::Function::Binding>{
@@ -360,6 +427,20 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         std::visit([&](auto& texture) {
             stream << texture.copy_to(found->bytes->data()) << synchronize();
         }, runtime);
+    }
+    for (size_t i = 0; i < gradient_layouts.size(); ++i) {
+        auto& packed = staged_gradients[i];
+        stream << runtime_gradients[i].copy_to(packed.data()) << synchronize();
+        auto found = std::find_if(gradients.begin(), gradients.end(), [&](const auto& gradient) {
+            return gradient.source_binding == gradient_layouts[i].source_binding;
+        });
+        const auto value_count = static_cast<size_t>(dispatch.logical_x) * found->element_count;
+        const auto packed_stride = static_cast<size_t>(found->component_count) * sizeof(float);
+        found->bytes->assign(value_count * packed_stride, 0u);
+        for (size_t value = 0; value < value_count; ++value) {
+            std::memcpy(found->bytes->data() + value * packed_stride,
+                        packed.data() + value * gradient_layouts[i].device_type->size(), packed_stride);
+        }
     }
     return true;
 }

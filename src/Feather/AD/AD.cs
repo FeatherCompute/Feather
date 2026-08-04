@@ -53,10 +53,18 @@ public sealed class GpuADKernel<TKernel> : IDisposable
     /// </summary>
     /// <param name="kernel">The generated kernel struct holding bound resources.</param>
     public GpuADKernel(TKernel kernel)
+        : this(kernel, GpuExecutionBackend.EasyGpu)
+    {
+    }
+
+    /// <summary>
+    /// Initializes an AD kernel wrapper for an explicitly selected execution backend.
+    /// </summary>
+    public GpuADKernel(TKernel kernel, GpuExecutionBackend backend)
     {
         Kernel = kernel;
-        gpuKernel = GpuKernel.Create<TKernel>(GPU.Context);
-        forwardOnlyKernel = GpuKernel.Create<TKernel>(GPU.Context, autoDiff: false);
+        gpuKernel = GpuKernel.Create<TKernel>(GPU.Context, autoDiff: true, backend);
+        forwardOnlyKernel = GpuKernel.Create<TKernel>(GPU.Context, autoDiff: false, backend);
         Gradients = new GradientSet(ReadBackGradientsCore);
     }
 
