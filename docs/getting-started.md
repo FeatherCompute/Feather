@@ -5,10 +5,12 @@ This guide takes you from a fresh checkout to a working generated GPU kernel.
 ## Prerequisites
 
 - .NET SDK `10.0.301` or a compatible SDK feature band.
-- CMake 3.20+.
+- CMake 3.26+.
 - A C++20 compiler.
 - A GPU and driver supported by the selected EasyGPU backend.
-- Vulkan SDK, glslang, and SPIRV-Tools when building the Vulkan backend.
+- Vulkan SDK (including headers and loader), glslang, and SPIRV-Tools when
+  building the EasyGPU and embedded LuisaCompute Vulkan backends. macOS uses
+  MoltenVK.
 - Linux window samples need X11 development libraries.
 
 Build the native Feather runtime locally when working from source. Published

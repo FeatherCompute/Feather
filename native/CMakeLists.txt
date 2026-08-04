@@ -1,6 +1,11 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.26)
 
-project(FeatherNative LANGUAGES CXX)
+project(FeatherNative LANGUAGES C CXX)
+
+if(APPLE)
+    enable_language(OBJC)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -19,6 +24,7 @@ set(EASYGPU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(EASYGPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 option(FEATHER_BUILD_WINDOW "Build Feather native window and texture presentation support" ON)
 option(FEATHER_BUILD_OPTIMIZATION_BENCHMARK "Build the Vulkan shader optimization benchmark" OFF)
+option(FEATHER_BUILD_LUISA_COMPUTE "Build LuisaCompute's Vulkan backend for the future XIR path" ON)
 set(FEATHER_SHADER_OPTIMIZATION_LEVEL "Ultra" CACHE STRING
     "SPIR-V optimization preset: None, Size, Aggressive, Ultra, or Extreme")
 set_property(CACHE FEATHER_SHADER_OPTIMIZATION_LEVEL PROPERTY STRINGS
@@ -33,6 +39,7 @@ set(EASYGPU_BUILD_WINDOW_EXAMPLES OFF CACHE BOOL "" FORCE)
 if(FEATHER_BUILD_OPTIMIZATION_BENCHMARK)
     set(EASYGPU_ENABLE_SPIRV_CROSS_GLSL ON CACHE BOOL "" FORCE)
 endif()
+
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../EasyGPU" "${CMAKE_CURRENT_BINARY_DIR}/EasyGPU")
 
 add_library(feather SHARED
@@ -83,4 +90,44 @@ if(FEATHER_BUILD_OPTIMIZATION_BENCHMARK)
     )
     target_compile_features(feather_optimization_benchmark PRIVATE cxx_std_20)
     target_link_libraries(feather_optimization_benchmark PRIVATE EasyGPU::EasyGPU)
+endif()
+
+# LuisaCompute changes global output-directory variables. Keep it after every
+# Feather target has been created so the existing native asset layout remains
+# stable while M1 verifies the Vulkan/XIR toolchain.
+if(FEATHER_BUILD_LUISA_COMPUTE)
+    set(LUISA_COMPUTE_ENABLE_DSL OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_TENSOR OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_DX OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_METAL OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_HIP OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_CUDA_EXT_LCUB OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_CPU OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_FALLBACK OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_REMOTE OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_GUI OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_CLANG_CXX OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_RUST OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_VK_XIR_SPIRV ON CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_VK_AST_LLVM_SPIRV OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_ENABLE_SCCACHE OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LUISA_COMPUTE_DOWNLOAD_OIDN OFF CACHE BOOL "" FORCE)
+
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../LuisaCompute" "${CMAKE_CURRENT_BINARY_DIR}/LuisaCompute")
+
+    # LuisaCompute 0.9.0's Vulkan SPIR-V argument analysis dereferences
+    # luisa::compute::Type while only its forward declaration is visible.
+    # Supply its owning header for this one upstream target until the pinned
+    # revision includes it directly. This keeps recursive checkouts
+    # reproducible without carrying a modified LuisaCompute worktree.
+    if(MSVC)
+        target_compile_options(luisa-compute-spirv PRIVATE "/FIluisa/ast/type.h")
+    else()
+        target_compile_options(luisa-compute-spirv PRIVATE "-include" "luisa/ast/type.h")
+    endif()
+
+    add_dependencies(feather luisa-compute-backend-vk)
 endif()
