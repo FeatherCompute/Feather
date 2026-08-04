@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
+#include <numeric>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -106,9 +107,10 @@ class Lowerer {
 
         kernel_ = xir_module_.create_kernel();
         kernel_->set_name(std::string{string(entry.name_id)});
-        const auto block_x = group_threads < 32u
-                                 ? static_cast<uint32_t>(inputs_.group_x) * static_cast<uint32_t>(32u / group_threads)
-                                 : static_cast<uint32_t>(inputs_.group_x);
+        logical_groups_per_block_ = static_cast<uint32_t>(32u / std::gcd<uint64_t>(group_threads, 32u));
+        if (group_threads * logical_groups_per_block_ > 1024u)
+            return fail("FEIR thread group cannot be represented at Luisa's 32-thread granularity"), nullptr;
+        const auto block_x = static_cast<uint32_t>(inputs_.group_x) * logical_groups_per_block_;
         kernel_->set_block_size(luisa::make_uint3(block_x, static_cast<uint32_t>(inputs_.group_y),
                                                   static_cast<uint32_t>(inputs_.group_z)));
 
@@ -520,7 +522,8 @@ class Lowerer {
             auto found = shared_.find(std::string{string(expression.name_id)});
             auto* index = lower_expression(expression.a);
             if (found == shared_.end() || index == nullptr) return fail("invalid FEIR shared-memory read"), nullptr;
-            auto* pointer = builder_.gep(result_type, found->second, {index});
+            index = shared_index(index, found->second.length);
+            auto* pointer = builder_.gep(result_type, found->second.pointer, {index});
             return builder_.load(result_type, pointer);
         }
         case kExpressionIntrinsic:
@@ -540,8 +543,24 @@ class Lowerer {
         Value* vector = nullptr;
         uint32_t component = 0;
         if (builtin >= 1u && builtin <= 3u) { vector = xir_module_.create_dispatch_id(); component = builtin - 1u; }
-        else if (builtin >= 4u && builtin <= 6u) { vector = xir_module_.create_thread_id(); component = builtin - 4u; }
-        else if (builtin >= 7u && builtin <= 9u) { vector = xir_module_.create_block_id(); component = builtin - 7u; }
+        else if (builtin >= 4u && builtin <= 6u) {
+            component = builtin - 4u;
+            auto* dispatch = extract(xir_module_.create_dispatch_id(), Type::of<uint32_t>(), {index_constant(component)});
+            const uint32_t sizes[]{static_cast<uint32_t>(inputs_.group_x), static_cast<uint32_t>(inputs_.group_y),
+                                   static_cast<uint32_t>(inputs_.group_z)};
+            auto* divisor = xir_module_.create_constant(Type::of<uint32_t>(), &sizes[component]);
+            auto* value = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MOD, {dispatch, divisor});
+            return builder_.static_cast_if_necessary(result_type, value);
+        }
+        else if (builtin >= 7u && builtin <= 9u) {
+            component = builtin - 7u;
+            auto* dispatch = extract(xir_module_.create_dispatch_id(), Type::of<uint32_t>(), {index_constant(component)});
+            const uint32_t sizes[]{static_cast<uint32_t>(inputs_.group_x), static_cast<uint32_t>(inputs_.group_y),
+                                   static_cast<uint32_t>(inputs_.group_z)};
+            auto* divisor = xir_module_.create_constant(Type::of<uint32_t>(), &sizes[component]);
+            auto* value = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_DIV, {dispatch, divisor});
+            return builder_.static_cast_if_necessary(result_type, value);
+        }
         else if (builtin >= 10u && builtin <= 12u) { vector = xir_module_.create_dispatch_size(); component = builtin - 10u; }
         else if (builtin >= 13u && builtin <= 15u) {
             const uint32_t sizes[]{static_cast<uint32_t>(inputs_.group_x), static_cast<uint32_t>(inputs_.group_y),
@@ -560,6 +579,18 @@ class Lowerer {
         if (found == nullptr || found->data == nullptr || found->size < result_type->size())
             return fail("FEIR push constant is missing or has the wrong layout"), nullptr;
         return xir_module_.create_constant(result_type, found->data);
+    }
+
+    Value* shared_index(Value* logical_index, uint32_t length) {
+        if (logical_groups_per_block_ == 1u) return logical_index;
+        auto* physical_x = extract(xir_module_.create_thread_id(), Type::of<uint32_t>(), {index_constant(0u)});
+        const auto group_x = static_cast<uint32_t>(inputs_.group_x);
+        auto* group_width = xir_module_.create_constant(Type::of<uint32_t>(), &group_x);
+        auto* subgroup = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_DIV, {physical_x, group_width});
+        auto* stride = xir_module_.create_constant(Type::of<uint32_t>(), &length);
+        auto* offset = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {subgroup, stride});
+        auto* index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), logical_index);
+        return builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {offset, index});
     }
 
     static std::optional<ArithmeticOp> intrinsic_op(std::string_view name) {
@@ -618,7 +649,8 @@ class Lowerer {
             auto* index = lower_expression(lvalue.a);
             if (found == shared_.end() || index == nullptr) return fail("invalid FEIR shared-memory l-value"), std::nullopt;
             auto* result_type = type(lvalue.type_id);
-            return Address{.pointer = builder_.gep(result_type, found->second, {index}), .root_type = result_type};
+            index = shared_index(index, found->second.length);
+            return Address{.pointer = builder_.gep(result_type, found->second.pointer, {index}), .root_type = result_type};
         }
         if (lvalue.kind == kLValueField || lvalue.kind == kLValueMemberAccess || lvalue.kind == kLValueIndexAccess) {
             auto base = address(lvalue.a);
@@ -739,11 +771,11 @@ class Lowerer {
             auto name = std::string{string(statement.name_id)};
             auto* element = type(statement.op);
             if (name.empty() || element == nullptr || statement.a == 0u) return fail("invalid FEIR shared declaration");
-            auto* memory = builder_.alloca_shared(Type::array(element, statement.a));
+            auto* memory = builder_.alloca_shared(Type::array(element, statement.a * logical_groups_per_block_));
             memory->set_name(name);
-            shared_[name] = memory;
+            shared_[name] = SharedMemory{memory, statement.a};
             uses_group_semantics_ = true;
-            return validate_exact_block_size();
+            return true;
         }
         case kStatementAssignment:
         case kStatementCompoundAssignment:
@@ -796,20 +828,11 @@ class Lowerer {
             return lower_expression(statement.a) != nullptr;
         case kStatementBarrier:
             uses_group_semantics_ = true;
-            if (!validate_exact_block_size()) return false;
             builder_.synchronize_block();
             return true;
         default:
             return fail("unsupported FEIR statement kind " + std::to_string(statement.kind));
         }
-    }
-
-    bool validate_exact_block_size() {
-        const auto count = static_cast<uint64_t>(inputs_.group_x) * static_cast<uint64_t>(inputs_.group_y) *
-                           static_cast<uint64_t>(inputs_.group_z);
-        return count >= 32u && count % 32u == 0u
-                   ? true
-                   : fail("Luisa local/shared semantics require an exact FEIR group size that is a multiple of 32");
     }
 
     bool lower_if(const TypedIR::Statement& statement) {
@@ -828,17 +851,26 @@ class Lowerer {
     }
 
     bool lower_loop(uint32_t body_id, uint32_t condition_id, uint32_t update_id, bool do_first) {
+        Value* first_iteration = nullptr;
+        if (do_first) {
+            first_iteration = builder_.alloca_local(Type::of<bool>());
+            builder_.store(first_iteration, xir_module_.create_constant_one(Type::of<bool>()));
+        }
         auto* loop = builder_.loop();
         auto* prepare = loop->create_prepare_block();
         auto* body = loop->create_body_block();
         auto* update = loop->create_update_block();
         auto* merge = loop->create_merge_block();
         builder_.set_insertion_point(prepare);
-        if (do_first) builder_.br(body);
-        else if (condition_id == TypedIR::NoIndex) builder_.br(body);
+        if (condition_id == TypedIR::NoIndex) builder_.br(body);
         else {
             auto* condition = lower_expression(condition_id);
             if (condition == nullptr) return false;
+            if (do_first) {
+                auto* first = builder_.load(Type::of<bool>(), first_iteration);
+                condition = builder_.call(Type::of<bool>(), ArithmeticOp::BINARY_BIT_OR,
+                                          {first, builder_.static_cast_if_necessary(Type::of<bool>(), condition)});
+            }
             builder_.cond_br(builder_.static_cast_if_necessary(Type::of<bool>(), condition), body, merge);
         }
         loops_.push_back({merge, update});
@@ -848,12 +880,8 @@ class Lowerer {
         builder_.set_insertion_point(update);
         if (update_id != TypedIR::NoIndex && !lower_statement(update_id)) return false;
         if (!builder_.is_insertion_point_terminator()) {
-            if (!do_first) builder_.br(prepare);
-            else {
-                auto* condition = lower_expression(condition_id);
-                if (condition == nullptr) return false;
-                builder_.cond_br(builder_.static_cast_if_necessary(Type::of<bool>(), condition), body, merge);
-            }
+            if (do_first) builder_.store(first_iteration, xir_module_.create_constant_zero(Type::of<bool>()));
+            builder_.br(prepare);
         }
         loops_.pop_back();
         builder_.set_insertion_point(merge);
@@ -872,9 +900,11 @@ class Lowerer {
     std::vector<bool> struct_visiting_;
     std::unordered_map<std::string, Resource> resources_;
     std::unordered_map<std::string, Value*> locals_;
-    std::unordered_map<std::string, Value*> shared_;
+    struct SharedMemory { Value* pointer; uint32_t length; };
+    std::unordered_map<std::string, SharedMemory> shared_;
     std::vector<LoopTargets> loops_;
     bool uses_group_semantics_ = false;
+    uint32_t logical_groups_per_block_ = 1u;
 };
 
 } // namespace
