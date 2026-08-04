@@ -35,9 +35,9 @@ target, so M1 intentionally has no Cargo/toolchain setup.
 
 Luisa's Vulkan backend compiles its XIR-to-SPIR-V generator and uses bundled
 `volk`. Linux CI already installs Vulkan headers/loader, glslang, and SPIR-V
-tools; Windows CI provisions a Vulkan SDK. macOS CI installs `vulkan-headers`,
-`vulkan-loader`, and `molten-vk`, then verifies the headers, loader, and
-`libMoltenVK.dylib` before the native build.
+tools; Windows CI provisions a Vulkan SDK. macOS CI uses `macos-15` (Xcode 16)
+and installs `vulkan-headers`, `vulkan-loader`, and `molten-vk`, then verifies
+the headers, loader, and `libMoltenVK.dylib` before the native build.
 
 ## CI And Risks
 
@@ -54,16 +54,12 @@ Feather adds that header as a target-local forced include for
 this compatibility workaround when a pinned upstream revision includes the
 header directly; the Luisa submodule itself remains unmodified.
 
-M1 also uses Luisa's supported `LUISA_COMPUTE_USE_SYSTEM_STL` option. This
-avoids bundled EASTL alias-template CTAD that macOS-14's Apple Clang cannot
-compile in Luisa's Vulkan dependencies. It is a project-wide upstream build
-mode, not a backend fallback; the enabled execution backend remains Vulkan.
-
-Xcode 15.4 additionally cannot construct Luisa's aggregate-only `SharedVar`
-and local `LoopSite` types through `emplace`. CMake writes narrowly patched
-copies of those two sources to the build directory and compiles the copies;
-the pinned submodule is never modified. Configuration fails if the expected
-upstream text changes, forcing an explicit compatibility review on upgrades.
+M1 uses Luisa's supported `LUISA_COMPUTE_USE_SYSTEM_STL` option. It is an
+upstream build mode, not a backend fallback; the enabled execution backend
+remains Vulkan. The LuisaCompute submodule is compiled directly from its
+pinned sources: Feather neither changes it nor creates build-tree source
+copies. macOS CI therefore uses Xcode 16, whose libc++ supports the C++20
+aggregate `emplace` expressions in LuisaCompute 0.9.0 that Xcode 15.4 rejects.
 
 M1 deliberately does not package Luisa dylibs or expose a Luisa API through
 the Feather C ABI. Loading those artifacts before a backend-selection contract

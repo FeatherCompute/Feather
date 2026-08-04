@@ -35,7 +35,7 @@ jobs:
           - os: ubuntu-24.04
             rid: linux-x64
             library: libfeather.so
-          - os: macos-14
+          - os: macos-15
             rid: osx-arm64
             library: libfeather.dylib
           - os: windows-2022
