@@ -37,6 +37,7 @@ jobs:
             libgl1-mesa-dev \
             libspirv-cross-c-shared-dev \
             libssl-dev \
+            uuid-dev \
             libvulkan-dev \
             libx11-dev \
             libxcursor-dev \
@@ -124,6 +125,7 @@ jobs:
             libgl1-mesa-dev \
             libspirv-cross-c-shared-dev \
             libssl-dev \
+            uuid-dev \
             libvulkan-dev \
             libx11-dev \
             libxcursor-dev \
