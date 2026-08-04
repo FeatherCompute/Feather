@@ -33,12 +33,17 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        var manifestStarted = System.Diagnostics.Stopwatch.StartNew();
         var manifest = manifestCache.Load(manifestPath);
+        manifestStarted.Stop();
         manifest.ValidateGraph(graph);
         var reloaded = current is null || !current.Matches(manifest);
+        var loadTimings = PassAssemblyLoadTimings.Empty;
         if (reloaded)
         {
-            var replacement = PassAssemblyGeneration.Load(manifest);
+            var loaded = PassAssemblyGeneration.Load(manifest);
+            var replacement = loaded.Generation;
+            loadTimings = loaded.Timings;
             var previous = current;
             current = replacement;
             if (previous is not null)
@@ -52,9 +57,20 @@ internal sealed class ProjectPassAssemblyManager : IDisposable
         // different View is active, so checking every execution prevents stale per-View history.
         viewState.PreparePassBuild(manifest.BuildId, graph);
 
-        return current!.Execute(
+        var execution = current!.Execute(
             graph, scene, width, height, viewProjection, inverseViewProjection, cameraPosition, purpose,
             sceneFingerprint, reloaded, viewState);
+        return execution with
+        {
+            Stages = execution.Stages with
+            {
+                ManifestDetectionMilliseconds = manifestStarted.Elapsed.TotalMilliseconds,
+                AssemblyReadMilliseconds = loadTimings.AssemblyReadMilliseconds,
+                AssemblyHashMilliseconds = loadTimings.AssemblyHashMilliseconds,
+                AlcLoadMilliseconds = loadTimings.AlcLoadMilliseconds,
+                ReflectionMilliseconds = loadTimings.ReflectionMilliseconds,
+            },
+        };
     }
 
     public void Dispose()
@@ -162,7 +178,41 @@ internal sealed record ProjectPassExecutionResult(
     int PassCount,
     bool Reloaded,
     double GpuReadbackMilliseconds,
-    IReadOnlyList<PassExecutionTiming> PassTimings);
+    IReadOnlyList<PassExecutionTiming> PassTimings,
+    PassExecutionStages Stages,
+    string PassGuid);
+
+internal sealed record PassExecutionStages(
+    double ManifestDetectionMilliseconds,
+    double AssemblyReadMilliseconds,
+    double AssemblyHashMilliseconds,
+    double AlcLoadMilliseconds,
+    double ReflectionMilliseconds,
+    double PassConstructMilliseconds,
+    double ResourcePrepareMilliseconds,
+    double ExecuteMilliseconds,
+    double GraphFinalizeMilliseconds,
+    double? IrLoweringMilliseconds,
+    double? ShaderLookupMilliseconds,
+    double? PipelineCreateMilliseconds,
+    double? GpuDispatchMilliseconds)
+{
+    public static PassExecutionStages Empty { get; } = new(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null);
+}
+
+internal sealed record PassAssemblyLoadTimings(
+    double AssemblyReadMilliseconds,
+    double AssemblyHashMilliseconds,
+    double AlcLoadMilliseconds,
+    double ReflectionMilliseconds)
+{
+    public static PassAssemblyLoadTimings Empty { get; } = new(0.0, 0.0, 0.0, 0.0);
+}
+
+internal sealed record PassAssemblyLoadResult(
+    PassAssemblyGeneration Generation,
+    PassAssemblyLoadTimings Timings);
 
 /// <summary>
 /// A measured CPU interval for one graph pass. EasyGPU does not currently expose timestamp-query
@@ -216,26 +266,39 @@ internal sealed class PassAssemblyGeneration : IDisposable
 
     public WeakReference UnloadReference { get; }
 
-    public static PassAssemblyGeneration Load(ProjectPassManifest manifest)
+    public static PassAssemblyLoadResult Load(ProjectPassManifest manifest)
     {
+        var stage = System.Diagnostics.Stopwatch.StartNew();
         var assemblyBytes = ReadFileShared(manifest.AssemblyPath);
+        var pdbPath = Path.ChangeExtension(manifest.AssemblyPath, ".pdb");
+        var pdbBytes = File.Exists(pdbPath) ? ReadFileShared(pdbPath) : null;
+        stage.Stop();
+        var assemblyReadMilliseconds = stage.Elapsed.TotalMilliseconds;
+
+        stage.Restart();
         manifest.ValidateBuildId(assemblyBytes);
+        stage.Stop();
+        var assemblyHashMilliseconds = stage.Elapsed.TotalMilliseconds;
+
+        stage.Restart();
         var loadContext = new ProjectPassLoadContext(manifest.AssemblyPath);
         try
         {
             using var assemblyStream = new MemoryStream(assemblyBytes, writable: false);
-            var pdbPath = Path.ChangeExtension(manifest.AssemblyPath, ".pdb");
             Assembly assembly;
-            if (File.Exists(pdbPath))
+            if (pdbBytes is not null)
             {
-                using var pdbStream = new MemoryStream(ReadFileShared(pdbPath), writable: false);
+                using var pdbStream = new MemoryStream(pdbBytes, writable: false);
                 assembly = loadContext.LoadFromStream(assemblyStream, pdbStream);
             }
             else
             {
                 assembly = loadContext.LoadFromStream(assemblyStream);
             }
+            stage.Stop();
+            var alcLoadMilliseconds = stage.Elapsed.TotalMilliseconds;
 
+            stage.Restart();
             var passTypes = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
             foreach (var definition in manifest.Passes)
             {
@@ -268,8 +331,15 @@ internal sealed class PassAssemblyGeneration : IDisposable
                 }
                 passTypes.Add(definition.PassGuid, type);
             }
+            stage.Stop();
 
-            return new PassAssemblyGeneration(loadContext, assembly, manifest, passTypes);
+            return new PassAssemblyLoadResult(
+                new PassAssemblyGeneration(loadContext, assembly, manifest, passTypes),
+                new PassAssemblyLoadTimings(
+                    assemblyReadMilliseconds,
+                    assemblyHashMilliseconds,
+                    alcLoadMilliseconds,
+                    stage.Elapsed.TotalMilliseconds));
         }
         catch
         {
@@ -297,6 +367,10 @@ internal sealed class PassAssemblyGeneration : IDisposable
         RenderViewState viewState)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        var resourcePrepareMilliseconds = 0.0;
+        var passConstructMilliseconds = 0.0;
+        var executeMilliseconds = 0.0;
+        var stage = System.Diagnostics.Stopwatch.StartNew();
         var resources = new GraphResourceResolver(graph, manifest);
         // Socket identities are only comparable within one topology, so a changed graph has to
         // start from an empty pool.
@@ -331,8 +405,11 @@ internal sealed class PassAssemblyGeneration : IDisposable
             passTexturePool,
             sceneResourcePool,
             inferenceWeights);
+        stage.Stop();
+        resourcePrepareMilliseconds += stage.Elapsed.TotalMilliseconds;
         var executedTypes = new List<string>(graph.Passes.Length);
         var passTimings = new List<PassExecutionTiming>(graph.Passes.Length);
+        var lastPassGuid = string.Empty;
         foreach (var passNode in graph.Passes)
         {
             if (passNode.Muted)
@@ -342,19 +419,34 @@ internal sealed class PassAssemblyGeneration : IDisposable
 
             var definition = manifest.DefinitionFor(passNode);
             var type = passTypes[definition.PassGuid];
+            stage.Restart();
             var instance = (IRenderPass)(Activator.CreateInstance(type)
                 ?? throw new InvalidDataException($"Unable to create pass type '{definition.TypeName}'."));
+            stage.Stop();
+            passConstructMilliseconds += stage.Elapsed.TotalMilliseconds;
             var passStarted = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                stage.Restart();
                 PassMemberBinder.BindResources(instance, passNode, definition, resources);
                 PassMemberBinder.BindParameters(instance, passNode.Parameters);
+                stage.Stop();
+                resourcePrepareMilliseconds += stage.Elapsed.TotalMilliseconds;
+                stage.Restart();
                 backend.BeginPass(passNode.NodeId);
                 instance.Execute(new RenderContext(backend));
+                stage.Stop();
+                executeMilliseconds += stage.Elapsed.TotalMilliseconds;
                 executedTypes.Add(definition.TypeName);
+                lastPassGuid = definition.PassGuid;
             }
             finally
             {
+                if (stage.IsRunning)
+                {
+                    stage.Stop();
+                    executeMilliseconds += stage.Elapsed.TotalMilliseconds;
+                }
                 backend.EndPass();
                 (instance as IDisposable)?.Dispose();
                 passStarted.Stop();
@@ -373,12 +465,14 @@ internal sealed class PassAssemblyGeneration : IDisposable
             }
         }
 
+        stage.Restart();
         var finalHandle = resources.ResolveTextureSource(
             graph.ResolvedOutput.NodeId,
             graph.ResolvedOutput.SocketGuid);
         var frame = backend.TakeFrame(finalHandle);
         var historyUpdates = backend.CaptureHistory();
         viewState.CommitHistory(historyUpdates);
+        stage.Stop();
         return new ProjectPassExecutionResult(
             frame,
             manifest.BuildId,
@@ -386,7 +480,15 @@ internal sealed class PassAssemblyGeneration : IDisposable
             executedTypes.Count,
             reloaded,
             backend.GpuReadbackMilliseconds,
-            passTimings);
+            passTimings,
+            PassExecutionStages.Empty with
+            {
+                PassConstructMilliseconds = passConstructMilliseconds,
+                ResourcePrepareMilliseconds = resourcePrepareMilliseconds,
+                ExecuteMilliseconds = executeMilliseconds,
+                GraphFinalizeMilliseconds = stage.Elapsed.TotalMilliseconds,
+            },
+            lastPassGuid);
     }
 
     public void Dispose()

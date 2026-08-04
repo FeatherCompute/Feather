@@ -49,6 +49,8 @@ internal sealed class RenderHostRunner : IDisposable
         var passReloaded = false;
         var gpuReadbackMilliseconds = 0.0;
         IReadOnlyList<PassExecutionTiming> passTimings = Array.Empty<PassExecutionTiming>();
+        var passGuid = string.Empty;
+        var passStages = PassExecutionStages.Empty;
         stage.Restart();
         if (request.ManifestPath is not null)
         {
@@ -71,6 +73,8 @@ internal sealed class RenderHostRunner : IDisposable
             passReloaded = execution.Reloaded;
             gpuReadbackMilliseconds = execution.GpuReadbackMilliseconds;
             passTimings = execution.PassTimings;
+            passGuid = execution.PassGuid;
+            passStages = execution.Stages;
         }
         else
         {
@@ -87,6 +91,18 @@ internal sealed class RenderHostRunner : IDisposable
         }
         stage.Stop();
         var passExecutionMilliseconds = stage.Elapsed.TotalMilliseconds;
+        var measuredPassStages =
+            passStages.ManifestDetectionMilliseconds +
+            passStages.AssemblyReadMilliseconds +
+            passStages.AssemblyHashMilliseconds +
+            passStages.AlcLoadMilliseconds +
+            passStages.ReflectionMilliseconds +
+            passStages.PassConstructMilliseconds +
+            passStages.ResourcePrepareMilliseconds +
+            passStages.ExecuteMilliseconds +
+            passStages.GraphFinalizeMilliseconds;
+        var passOverheadMilliseconds = System.Math.Max(
+            0.0, passExecutionMilliseconds - measuredPassStages);
         var iteration = viewState.CompleteIteration(graph);
         var frameWriteMilliseconds = 0.0;
         if (iteration.PublishFrame)
@@ -129,6 +145,24 @@ internal sealed class RenderHostRunner : IDisposable
             frameWriteMilliseconds,
             started.Elapsed.TotalMilliseconds,
             passTimings,
+            passGuid,
+            request.ViewId,
+            cachedScene.ContentFingerprint,
+            graph.GraphFingerprint,
+            passStages.ManifestDetectionMilliseconds,
+            passStages.AssemblyReadMilliseconds,
+            passStages.AssemblyHashMilliseconds,
+            passStages.AlcLoadMilliseconds,
+            passStages.ReflectionMilliseconds,
+            passStages.PassConstructMilliseconds,
+            passStages.ResourcePrepareMilliseconds,
+            passStages.ExecuteMilliseconds,
+            passStages.GraphFinalizeMilliseconds,
+            passOverheadMilliseconds,
+            passStages.IrLoweringMilliseconds,
+            passStages.ShaderLookupMilliseconds,
+            passStages.PipelineCreateMilliseconds,
+            passStages.GpuDispatchMilliseconds,
             scene.Diagnostics);
     }
 
@@ -170,4 +204,22 @@ internal sealed record RenderHostResult(
     double FrameWriteMilliseconds,
     double TotalMilliseconds,
     IReadOnlyList<PassExecutionTiming> PassTimings,
+    string PassGuid,
+    string ViewId,
+    string SceneFingerprint,
+    string GraphFingerprint,
+    double ManifestDetectionMilliseconds,
+    double AssemblyReadMilliseconds,
+    double AssemblyHashMilliseconds,
+    double AlcLoadMilliseconds,
+    double ReflectionMilliseconds,
+    double PassConstructMilliseconds,
+    double ResourcePrepareMilliseconds,
+    double ExecuteMilliseconds,
+    double GraphFinalizeMilliseconds,
+    double PassOverheadMilliseconds,
+    double? IrLoweringMilliseconds,
+    double? ShaderLookupMilliseconds,
+    double? PipelineCreateMilliseconds,
+    double? GpuDispatchMilliseconds,
     IReadOnlyList<RenderHostDiagnostic> Diagnostics);

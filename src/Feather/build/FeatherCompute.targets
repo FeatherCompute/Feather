@@ -35,6 +35,8 @@
 
   <Target Name="FeatherWritePassManifest"
           AfterTargets="Build"
+          Inputs="$(TargetPath);$(FeatherManifestExporterPath)"
+          Outputs="$(FeatherPassManifestPath)"
           Condition="'$(FeatherEmitPassManifest)' == 'true' and Exists('$(TargetPath)')">
     <Error Condition="!Exists('$(FeatherManifestExporterPath)')"
            Text="Feather manifest exporter was not found at '$(FeatherManifestExporterPath)'." />
