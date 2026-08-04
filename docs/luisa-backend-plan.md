@@ -59,6 +59,12 @@ avoids bundled EASTL alias-template CTAD that macOS-14's Apple Clang cannot
 compile in Luisa's Vulkan dependencies. It is a project-wide upstream build
 mode, not a backend fallback; the enabled execution backend remains Vulkan.
 
+Xcode 15.4 additionally cannot construct Luisa's aggregate-only `SharedVar`
+and local `LoopSite` types through `emplace`. CMake writes narrowly patched
+copies of those two sources to the build directory and compiles the copies;
+the pinned submodule is never modified. Configuration fails if the expected
+upstream text changes, forcing an explicit compatibility review on upgrades.
+
 M1 deliberately does not package Luisa dylibs or expose a Luisa API through
 the Feather C ABI. Loading those artifacts before a backend-selection contract
 exists would risk changing the current EasyGPU runtime behavior. M2 must add
