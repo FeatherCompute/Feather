@@ -137,3 +137,68 @@ richer descriptor, and the M3 AD/graphics lowering model. The Luisa route
 validates descriptors it cannot represent rather than changing their meaning.
 LuisaCompute remains a pristine pinned submodule; compatibility is handled only
 through supported build options and Feather-owned integration code.
+
+## Post-compute parity assessment
+
+### Automatic differentiation
+
+LuisaCompute 0.9.0 has a real reverse-mode XIR path, rather than an AST-only AD
+facility. `include/luisa/xir/op.h:158-167` defines the gradient intrinsics,
+`include/luisa/xir/instructions/autodiff.h:7-33` defines AD scopes and intrinsic
+instructions, and `include/luisa/xir/passes/autodiff.h:11-30` exposes module and
+function AD passes. The Vulkan SPIR-V pipeline detects AD scopes and runs
+pre-AD legalization followed by `autodiff_pass_run_on_module`
+(`src/backends/common/spirv/spirv_codegen/utils.cpp:459-513,683-698`). Its Vulkan
+unit coverage executes reverse-mode kernels and checks derivatives, including
+the `{12, 4}` control-flow example
+(`src/tests/unit/runtime/test_vk_spirv_codegen_path.cpp:1443-1475`) and a callable
+case (`:2173-2236`).
+
+Feather can therefore implement AD without changing LuisaCompute. The current
+`xir_to_ast_translate` bridge cannot consume an AD scope directly, so the
+Feather-owned path must create the scope and parameter/loss intrinsics from the
+FEIR AD annotations, run the same public XIR legalization/AD passes, and only
+then use the existing XIR-to-AST execution bridge. Gradient buffers remain
+explicit Luisa resource arguments and retain Feather's existing per-dispatch
+thread gradient/readback contract.
+
+### Raster graphics
+
+The Vulkan backend itself implements rasterization: it registers `RasterExt`
+in `src/backends/vk/device.cpp:761-772`, and
+`src/backends/vk/vk_raster_ext.cpp:11-136` compiles vertex and pixel functions
+to Vulkan SPIR-V artifacts. The public runtime accepts a DSL `RasterKernel`
+(`include/luisa/runtime/device.h:315-326`). This is not, however, an XIR raster
+entry point in the pinned release. XIR only has kernel, callable, and external
+function tags (`include/luisa/xir/function.h:9-20,183-205`), while AST has a
+separate `RASTER_STAGE` tag and AST-to-XIR explicitly rejects it with
+`LUISA_NOT_IMPLEMENTED` (`src/xir/translators/ast2xir.cpp:1277-1290`).
+
+Consequently Feather's vertex/fragment FEIR cannot travel through the accepted
+FEIR-to-XIR architecture at this pin. Implementing a second FEIR-to-Luisa-AST
+compiler would duplicate the full typed lowerer and abandon the XIR backend
+contract, so it is not an acceptable fallback. Raster parity is a pinned-LC XIR
+capability gap. The follow-up is an upstream raster-stage XIR representation
+and translator/backend entry point, or a user-approved LuisaCompute upgrade
+that supplies one.
+
+### Asynchrony and resource sharing
+
+LC streams support command commit without synchronization and explicit
+`synchronize()` (`include/luisa/runtime/stream.h:35-50,85-95`). It also exposes
+external image and buffer imports (`include/luisa/runtime/device.h:183-196,
+234-247`); the Vulkan buffer implementation wraps the supplied `VkBuffer`
+(`src/backends/vk/device.cpp:2323-2360`). These APIs do not transfer queue
+ownership or establish cross-runtime ordering by themselves.
+
+Feather's current Luisa route deliberately stages host bytes, synchronizes each
+upload, dispatch, and readback, and destroys the temporary device/stream and
+resources before returning (`native/feather_luisa_backend.cpp:302-365`). Thus
+`wait:false` is rejected at the public dispatch boundary
+(`native/feather_c_api.cpp:5458-5463`), and EasyGPU/Luisa resources are not
+zero-copy shared. Correct asynchronous support requires persistent per-context
+Luisa objects, retained staging allocations and completion tracking. Zero-copy
+requires verified compatible Vulkan handles plus queue-family ownership, image
+layout transitions, timeline synchronization, and joint lifetime management.
+Neither is needed by the current synchronous FEIR parity tests, and neither may
+silently weaken the existing ownership model.
