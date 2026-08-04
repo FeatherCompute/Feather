@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SUBMODULE_ROOTS = {
+    path.resolve()
+    for path in ROOT.iterdir()
+    if path.is_dir() and (path / ".git").is_file()
+}
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
@@ -51,6 +56,8 @@ def main() -> int:
     errors: list[str] = []
     for path in sorted(ROOT.rglob("*.md")):
         if any(part in {"EasyGPU", "bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in path.parts):
+            continue
+        if any(path.is_relative_to(submodule) for submodule in SUBMODULE_ROOTS):
             continue
         errors.extend(check_file(path))
 
