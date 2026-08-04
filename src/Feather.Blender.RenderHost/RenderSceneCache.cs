@@ -88,6 +88,51 @@ internal sealed record CachedScene(
     double BuildMilliseconds);
 
 /// <summary>
+/// Owns immutable resources whose lifetime is one pass-assembly generation. Keeping this separate
+/// from graph-scoped pools lets warmed pipelines survive pass and View switches without allowing
+/// graph textures or scene-derived buffers to outlive their identities.
+/// </summary>
+internal sealed class PassAssemblyResourcePool : IDisposable
+{
+    private readonly Dictionary<string, IDisposable> entries = new(StringComparer.Ordinal);
+    private bool disposed;
+
+    public T GetOrCreate<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (entries.TryGetValue(identity, out var existing))
+        {
+            if (existing is T typed)
+            {
+                return typed;
+            }
+            throw new InvalidOperationException(
+                $"Retained assembly resource '{identity}' was requested with two different types.");
+        }
+
+        var created = factory() ?? throw new InvalidOperationException(
+            $"Retained assembly resource factory '{identity}' returned null.");
+        entries.Add(identity, created);
+        return created;
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+        foreach (var entry in entries.Values)
+        {
+            entry.Dispose();
+        }
+        entries.Clear();
+        disposed = true;
+    }
+}
+
+/// <summary>
 /// Owns pass-created CPU and GPU scene resources for one pass-assembly generation.
 /// </summary>
 internal sealed class PassSceneResourcePool : IDisposable

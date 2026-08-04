@@ -271,6 +271,24 @@ public interface IRenderContextBackend
         => throw new NotSupportedException("This render host does not expose retained scene resources.");
 
     /// <summary>
+    /// Returns a resource owned by the current pass-assembly generation. The resource survives graph
+    /// and View switches and is disposed when that assembly generation unloads. Callers must not
+    /// dispose returned resources. An identity must always refer to the same resource type within one
+    /// generation; use a pass-qualified, versioned identity such as
+    /// <c>"MyPass.Pipelines.v1"</c>.
+    /// </summary>
+    /// <param name="identity">The stable, assembly-wide identity of the retained resource.</param>
+    /// <param name="factory">Creates the resource when <paramref name="identity"/> is first requested.</param>
+    /// <typeparam name="T">A disposable resource owner retained by the render host.</typeparam>
+    /// <returns>The existing resource for <paramref name="identity"/>, or the newly created value.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The same identity was already used with another resource type, or the factory returned null.
+    /// </exception>
+    T GetOrCreateAssemblyResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+        => throw new NotSupportedException("This render host does not expose retained assembly resources.");
+
+    /// <summary>
     /// Resolves a host-owned texture private to the current pass node and View. The allocation survives
     /// camera-only executions and is released when the graph or pass assembly changes.
     /// </summary>
@@ -478,6 +496,32 @@ public sealed class RenderContext
         ArgumentException.ThrowIfNullOrWhiteSpace(identity);
         ArgumentNullException.ThrowIfNull(factory);
         return Backend.GetOrCreateSceneResource(identity, factory);
+    }
+
+    /// <summary>
+    /// Returns a host-owned resource retained for the current pass-assembly generation. Use this for
+    /// compiled shader pipelines and similar heavy objects whose identity does not depend on the
+    /// active graph, View, or scene. The value survives graph and View switches, and the host disposes
+    /// it when the assembly generation unloads during reload or shutdown. The caller must not dispose
+    /// the returned value. An identity must always refer to the same resource type within one
+    /// generation; use a pass-qualified, versioned identity such as
+    /// <c>"MyPass.Pipelines.v1"</c>.
+    /// </summary>
+    /// <param name="identity">The stable, assembly-wide identity of the retained resource.</param>
+    /// <param name="factory">Creates the resource when <paramref name="identity"/> is first requested.</param>
+    /// <typeparam name="T">A disposable resource owner retained by the render host.</typeparam>
+    /// <returns>The existing resource for <paramref name="identity"/>, or the newly created value.</returns>
+    /// <exception cref="ArgumentException"><paramref name="identity"/> is empty or whitespace.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="factory"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The same identity was already used with another resource type, or the factory returned null.
+    /// </exception>
+    public T GetOrCreateAssemblyResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        ArgumentNullException.ThrowIfNull(factory);
+        return Backend.GetOrCreateAssemblyResource(identity, factory);
     }
 
     /// <summary>

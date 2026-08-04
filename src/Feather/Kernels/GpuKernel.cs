@@ -7,16 +7,18 @@ namespace Feather;
 public sealed class GpuKernel : IDisposable
 {
     private bool disposed;
+    private readonly Type kernelType;
     internal delegate byte[] IrTransform(ReadOnlySpan<byte> ir);
 
     // Test-only hook used to validate native behavior against transformed generated IR without
     // adding public APIs for raw native kernel creation.
     internal static IrTransform? IrTransformForTesting;
 
-    private GpuKernel(FeKernelHandle handle, KernelDescriptor descriptor)
+    private GpuKernel(FeKernelHandle handle, KernelDescriptor descriptor, Type kernelType)
     {
         Handle = handle;
         Descriptor = descriptor;
+        this.kernelType = kernelType;
     }
 
     internal FeKernelHandle Handle { get; }
@@ -56,7 +58,7 @@ public sealed class GpuKernel : IDisposable
                     autoDiff,
                     descriptor.BoundsCheck);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuKernel(handle, descriptor);
+                return new GpuKernel(handle, descriptor, typeof(TKernel));
             }
         }
     }
@@ -68,12 +70,38 @@ public sealed class GpuKernel : IDisposable
         Dispatch(context, gpuKernel, kernel, size, wait);
     }
 
-    internal static void Dispatch<TKernel>(GpuContext context, GpuKernel gpuKernel, TKernel kernel, GpuDispatchSize size, bool wait)
+    /// <summary>
+    /// Dispatches a generated kernel through an existing compiled GPU kernel. The caller retains
+    /// ownership of <paramref name="gpuKernel"/> and may reuse it for later dispatches of the same
+    /// <typeparamref name="TKernel"/> type.
+    /// </summary>
+    /// <param name="context">The GPU context that created <paramref name="gpuKernel"/>.</param>
+    /// <param name="gpuKernel">A live kernel created with <see cref="Create{TKernel}(GpuContext)"/>.</param>
+    /// <param name="kernel">The generated kernel value whose resources and uniforms will be bound.</param>
+    /// <param name="size">The logical dispatch extent.</param>
+    /// <param name="wait">Whether to wait for the submitted GPU work to complete.</param>
+    /// <typeparam name="TKernel">The generated kernel type used to create <paramref name="gpuKernel"/>.</typeparam>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="gpuKernel"/> was created for a different generated kernel type.
+    /// </exception>
+    public static void Dispatch<TKernel>(
+        GpuContext context,
+        GpuKernel gpuKernel,
+        TKernel kernel,
+        GpuDispatchSize size,
+        bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(gpuKernel);
         gpuKernel.ThrowIfDisposed();
+        if (gpuKernel.kernelType != typeof(TKernel))
+        {
+            throw new ArgumentException(
+                $"GPU kernel was created for '{gpuKernel.kernelType.FullName}', not "
+                + $"'{typeof(TKernel).FullName}'.",
+                nameof(gpuKernel));
+        }
         var command = new GpuKernelCommand(gpuKernel.Handle);
         TKernel.Bind(in kernel, command);
         var groups = ComputeGroups(size, TKernel.Descriptor.ThreadGroupSize);

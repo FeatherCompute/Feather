@@ -248,6 +248,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
     private readonly RasterTargetPool rasterTargetPool = new();
     private readonly PassSceneResourcePool sceneResourcePool = new();
     private readonly InferenceWeightsCache inferenceWeights;
+    private readonly PassAssemblyResourcePool assemblyResourcePool = new();
     private bool disposed;
 
     private PassAssemblyGeneration(
@@ -404,6 +405,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
             rasterTargetPool,
             passTexturePool,
             sceneResourcePool,
+            assemblyResourcePool,
             inferenceWeights);
         stage.Stop();
         resourcePrepareMilliseconds += stage.Elapsed.TotalMilliseconds;
@@ -499,6 +501,7 @@ internal sealed class PassAssemblyGeneration : IDisposable
         }
 
         inferenceWeights.Dispose();
+        assemblyResourcePool.Dispose();
         sceneResourcePool.Dispose();
         rasterTargetPool.Dispose();
         foreach (var passTexturePool in passTexturePools.Values)
@@ -1759,6 +1762,7 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     private readonly RasterTargetPool rasterTargetPool;
     private readonly GraphTexturePool passTexturePool;
     private readonly PassSceneResourcePool sceneResourcePool;
+    private readonly PassAssemblyResourcePool assemblyResourcePool;
     private readonly InferenceWeightsCache inferenceWeights;
     private string? currentPassNodeId;
 
@@ -1783,12 +1787,14 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
         RasterTargetPool rasterTargetPool,
         GraphTexturePool passTexturePool,
         PassSceneResourcePool sceneResourcePool,
+        PassAssemblyResourcePool assemblyResourcePool,
         InferenceWeightsCache inferenceWeights)
     {
         this.texturePool = texturePool;
         this.rasterTargetPool = rasterTargetPool;
         this.passTexturePool = passTexturePool;
         this.sceneResourcePool = sceneResourcePool;
+        this.assemblyResourcePool = assemblyResourcePool;
         this.inferenceWeights = inferenceWeights;
         geometry = new SceneGeometry(scene.Geometry.Vertices, scene.Geometry.Indices, scene.Geometry.Submeshes);
         objectRanges = scene.Geometry.Objects;
@@ -1868,6 +1874,10 @@ internal sealed class ProjectRenderContextBackend : IRenderContextBackend
     public T GetOrCreateSceneResource<T>(string identity, Func<T> factory)
         where T : class, IDisposable
         => sceneResourcePool.GetOrCreate(identity, factory);
+
+    public T GetOrCreateAssemblyResource<T>(string identity, Func<T> factory)
+        where T : class, IDisposable
+        => assemblyResourcePool.GetOrCreate(identity, factory);
 
     public void BeginPass(string nodeId)
     {
