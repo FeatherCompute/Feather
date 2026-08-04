@@ -110,8 +110,9 @@ translation or execution fails.
 | Callables/shader libraries | Complete: staged/de-duplicated symbols, nested calls, value/reference parameters, aggregate writeback, and buffer/texture/sampler resource parameters | four callable parity tests in `LuisaBackendResourceDispatchTests` |
 | Textures/samplers | Complete for emitted FEIR: 2D/3D load/store; 2D Sample/SampleLevel/SampleGrad; decoded struct-pixel components; format and sampler validation | four texture tests in `LuisaBackendResourceDispatchTests` |
 | Dispatch/bounds checks | Complete: 1D/2D/3D global/local/group/size builtins, logical bounds guards, and padded-lane suppression | `TwoAndThreeDimensionalDispatchIdsMatchEasyGpu`; `NonDivisibleLogicalBoundsMatchEasyGpu`; shared-memory test |
-| Automatic differentiation | M3 | Not a forward-compute M2.2 feature |
-| Graphics/ray tracing | M3 | Separate non-compute pipelines |
+| Automatic differentiation | Complete for current FEIR AD: float scalar/vector buffer parameters, scalar loss, structured control flow, nested callables, per-dispatch gradients, readback, and device reduction handoff | Four GPU tests in `LuisaBackendAdTests` |
+| Raster graphics | Blocked at pinned LC 0.9.0: Vulkan raster exists, but XIR has no raster-stage function | Source evidence in the post-compute assessment below |
+| Asynchronous dispatch / cross-runtime zero-copy | Not required by the current synchronous FEIR parity surface; explicitly rejected rather than silently changing ownership | LC APIs and Feather staging evidence below |
 
 The local M2.2 suite contains 19 `[Category=Gpu]` tests; every parity-capable
 kernel runs once through EasyGPU and once through Luisa Vulkan and compares GPU
@@ -154,13 +155,20 @@ the `{12, 4}` control-flow example
 (`src/tests/unit/runtime/test_vk_spirv_codegen_path.cpp:1443-1475`) and a callable
 case (`:2173-2236`).
 
-Feather can therefore implement AD without changing LuisaCompute. The current
+Feather implements AD without changing LuisaCompute. The current
 `xir_to_ast_translate` bridge cannot consume an AD scope directly, so the
-Feather-owned path must create the scope and parameter/loss intrinsics from the
-FEIR AD annotations, run the same public XIR legalization/AD passes, and only
-then use the existing XIR-to-AST execution bridge. Gradient buffers remain
-explicit Luisa resource arguments and retain Feather's existing per-dispatch
-thread gradient/readback contract.
+Feather-owned path creates the scope and parameter/loss intrinsics from the
+FEIR AD annotations, destructures and inlines the complete callable graph, runs
+the public XIR AD pass, and only then uses the existing XIR-to-AST execution
+bridge. Gradient buffers are explicit Luisa resource arguments and retain
+Feather's existing per-dispatch-thread gradient/readback contract. Host-staged
+gradients can also be uploaded into the existing EasyGPU reduction pipeline for
+`CopyGradientToBuffer`; this is a cross-runtime transfer, not a CPU backend.
+
+`LuisaBackendAdTests` supplies four local Vulkan executions. Scalar, vector,
+and conditional/intrinsic kernels run through both EasyGPU and Luisa and compare
+losses and gradients; a nested-callable kernel checks Luisa against its analytic
+derivative; the scalar test also verifies device-side gradient reduction.
 
 ### Raster graphics
 
