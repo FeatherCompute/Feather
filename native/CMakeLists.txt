@@ -115,6 +115,9 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
     set(LUISA_COMPUTE_ENABLE_SCCACHE OFF CACHE BOOL "" FORCE)
     set(LUISA_COMPUTE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LUISA_COMPUTE_DOWNLOAD_OIDN OFF CACHE BOOL "" FORCE)
+    # Use Luisa's portable STL mode. macOS-14's Apple Clang cannot compile
+    # the bundled EASTL alias-template CTAD used by the Vulkan dependencies.
+    set(LUISA_COMPUTE_USE_SYSTEM_STL ON CACHE BOOL "" FORCE)
 
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../LuisaCompute" "${CMAKE_CURRENT_BINARY_DIR}/LuisaCompute")
 

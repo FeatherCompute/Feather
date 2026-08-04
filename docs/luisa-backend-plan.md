@@ -54,6 +54,11 @@ Feather adds that header as a target-local forced include for
 this compatibility workaround when a pinned upstream revision includes the
 header directly; the Luisa submodule itself remains unmodified.
 
+M1 also uses Luisa's supported `LUISA_COMPUTE_USE_SYSTEM_STL` option. This
+avoids bundled EASTL alias-template CTAD that macOS-14's Apple Clang cannot
+compile in Luisa's Vulkan dependencies. It is a project-wide upstream build
+mode, not a backend fallback; the enabled execution backend remains Vulkan.
+
 M1 deliberately does not package Luisa dylibs or expose a Luisa API through
 the Feather C ABI. Loading those artifacts before a backend-selection contract
 exists would risk changing the current EasyGPU runtime behavior. M2 must add
