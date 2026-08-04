@@ -39,27 +39,11 @@ public sealed class GpuKernel : IDisposable
 
     public static GpuKernel Create<TKernel>(GpuContext context)
         where TKernel : struct, IGeneratedKernel<TKernel>
-        => Create<TKernel>(context, TKernel.Descriptor.AutoDiff, GpuExecutionBackend.EasyGpu);
-
-    /// <summary>
-    /// Creates a generated compute kernel for an explicitly selected execution backend.
-    /// </summary>
-    public static GpuKernel Create<TKernel>(GpuContext context, GpuExecutionBackend backend)
-        where TKernel : struct, IGeneratedKernel<TKernel>
-        => Create<TKernel>(context, TKernel.Descriptor.AutoDiff, backend);
+        => Create<TKernel>(context, TKernel.Descriptor.AutoDiff);
 
     internal static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff)
         where TKernel : struct, IGeneratedKernel<TKernel>
-        => Create<TKernel>(context, autoDiff, GpuExecutionBackend.EasyGpu);
-
-    private static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff, GpuExecutionBackend backend)
-        where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        ArgumentNullException.ThrowIfNull(context);
-        if (!Enum.IsDefined(backend))
-        {
-            throw new ArgumentOutOfRangeException(nameof(backend));
-        }
         var descriptor = TKernel.Descriptor;
         var transformedIr = IrTransformForTesting?.Invoke(TKernel.IR);
         var ir = transformedIr is null ? TKernel.IR : transformedIr.AsSpan();
@@ -74,17 +58,6 @@ public sealed class GpuKernel : IDisposable
                     autoDiff,
                     descriptor.BoundsCheck);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_create_from_ir(context.Handle, in createDesc, out var handle));
-                try
-                {
-                    NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_execution_backend(
-                        handle,
-                        (FeExecutionBackend)backend));
-                }
-                catch
-                {
-                    handle.Dispose();
-                    throw;
-                }
                 return new GpuKernel(handle, descriptor, typeof(TKernel));
             }
         }
@@ -141,6 +114,32 @@ public sealed class GpuKernel : IDisposable
             (uint)size.Y,
             (uint)size.Z,
             wait));
+    }
+
+    /// <summary>
+    /// Creates a generated compute kernel for an explicitly selected execution backend.
+    /// </summary>
+    public static GpuKernel Create<TKernel>(GpuContext context, GpuExecutionBackend backend)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        if (!Enum.IsDefined(backend))
+        {
+            throw new ArgumentOutOfRangeException(nameof(backend));
+        }
+
+        var kernel = Create<TKernel>(context);
+        try
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_execution_backend(
+                kernel.Handle,
+                (FeExecutionBackend)backend));
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
