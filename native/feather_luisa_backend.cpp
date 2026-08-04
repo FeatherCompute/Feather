@@ -1,7 +1,9 @@
 #include "feather_luisa_backend.h"
+#include "feather_luisa_xir.h"
 
 #include <algorithm>
 #include <charconv>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -22,6 +24,7 @@
 #include <luisa/ast/function.h>
 #include <luisa/ast/type.h>
 #include <luisa/runtime/buffer.h>
+#include <luisa/runtime/byte_buffer.h>
 #include <luisa/runtime/context.h>
 #include <luisa/runtime/device.h>
 #include <luisa/runtime/shader.h>
@@ -298,8 +301,6 @@ class Lowerer {
     std::unordered_map<std::string, Resource> resources_;
 };
 
-using RuntimeBuffer = std::variant<Buffer<float>, Buffer<int32_t>, Buffer<uint32_t>>;
-
 bool has_vulkan_backend(const std::filesystem::path& directory) {
 #if defined(_WIN32)
     return std::filesystem::exists(directory / "luisa-backend-vk.dll");
@@ -317,8 +318,118 @@ std::string resolve_runtime_directory(std::filesystem::path module_path) {
     return has_vulkan_backend(build_bin) ? build_bin.string() : directory.string();
 }
 
-template <typename F> decltype(auto) visit_buffer(RuntimeBuffer& buffer, F&& f) {
-    return std::visit([&](auto& typed) -> decltype(auto) { return f(typed); }, buffer);
+size_t align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1u) / alignment * alignment;
+}
+
+bool feir_layout(const TypedIR::Module& module, uint32_t id, size_t* size, size_t* alignment) {
+    if (id >= module.types.size() || size == nullptr || alignment == nullptr) return false;
+    const auto& source = module.types[id];
+    switch (source.kind) {
+    case 1:
+        *size = source.b / 8u;
+        *alignment = *size;
+        return source.b == 32u;
+    case 2: {
+        size_t element_size = 0;
+        size_t element_alignment = 0;
+        if (!feir_layout(module, source.a, &element_size, &element_alignment)) return false;
+        *size = element_size * source.b;
+        *alignment = source.b == 2u ? 8u : 16u;
+        return true;
+    }
+    case 3:
+        *size = source.b * 16u;
+        *alignment = 16u;
+        return true;
+    case 4:
+        if (source.a >= module.structs.size()) return false;
+        *size = module.structs[source.a].size_in_bytes;
+        *alignment = module.structs[source.a].alignment;
+        return true;
+    case 5: {
+        size_t element_size = 0;
+        size_t element_alignment = 0;
+        if (source.b == TypedIR::NoIndex || !feir_layout(module, source.a, &element_size, &element_alignment)) return false;
+        *size = align_up(element_size, element_alignment) * source.b;
+        *alignment = element_alignment;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool repack_value(const TypedIR::Module& module, uint32_t id, const Type* device_type,
+                  const unsigned char* source, unsigned char* destination, bool to_device) {
+    if (id >= module.types.size() || device_type == nullptr || source == nullptr || destination == nullptr) return false;
+    const auto& type = module.types[id];
+    size_t source_size = 0;
+    size_t source_alignment = 0;
+    if (!feir_layout(module, id, &source_size, &source_alignment)) return false;
+    auto copy_direction = [&](const void* feir, void* device, size_t bytes) {
+        if (to_device) std::memcpy(device, feir, bytes);
+        else std::memcpy(const_cast<void*>(feir), device, bytes);
+    };
+    switch (type.kind) {
+    case 1:
+        if (type.a == 0u) {
+            if (to_device) {
+                const bool value = *reinterpret_cast<const uint32_t*>(source) != 0u;
+                std::memcpy(destination, &value, sizeof(value));
+            } else {
+                bool value = false;
+                std::memcpy(&value, destination, sizeof(value));
+                const uint32_t packed = value ? 1u : 0u;
+                std::memcpy(const_cast<unsigned char*>(source), &packed, sizeof(packed));
+            }
+            return true;
+        }
+        copy_direction(source, destination, std::min(source_size, device_type->size()));
+        return true;
+    case 2:
+        if (module.types[type.a].kind == 1u && module.types[type.a].a == 0u) {
+            for (uint32_t i = 0; i < type.b; ++i) {
+                if (!repack_value(module, type.a, Type::of<bool>(), source + i * sizeof(uint32_t), destination + i, to_device))
+                    return false;
+            }
+            return true;
+        }
+        copy_direction(source, destination, source_size);
+        return true;
+    case 3:
+        copy_direction(source, destination, source_size);
+        return true;
+    case 4: {
+        if (type.a >= module.structs.size() || !device_type->is_structure()) return false;
+        const auto& structure = module.structs[type.a];
+        auto members = device_type->members();
+        if (members.size() != structure.field_count) return false;
+        size_t device_offset = 0;
+        for (uint32_t i = 0; i < structure.field_count; ++i) {
+            const auto& field = module.struct_fields[structure.first_field + i];
+            device_offset = align_up(device_offset, members[i]->alignment());
+            if (!repack_value(module, field.type_id, members[i], source + field.offset,
+                              destination + device_offset, to_device)) return false;
+            device_offset += members[i]->size();
+        }
+        return true;
+    }
+    case 5: {
+        if (!device_type->is_array()) return false;
+        size_t feir_element_size = 0;
+        size_t feir_element_alignment = 0;
+        if (!feir_layout(module, type.a, &feir_element_size, &feir_element_alignment)) return false;
+        const auto feir_stride = align_up(feir_element_size, feir_element_alignment);
+        const auto device_stride = align_up(device_type->element()->size(), device_type->element()->alignment());
+        for (uint32_t i = 0; i < type.b; ++i)
+            if (!repack_value(module, type.a, device_type->element(), source + i * feir_stride,
+                              destination + i * device_stride, to_device)) return false;
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 } // namespace
@@ -353,15 +464,9 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               std::span<HostBufferBinding> host_buffers, const DispatchInputs& dispatch, std::string* error) {
     if (error != nullptr)
         error->clear();
-    if (dispatch.logical_y != 1 || dispatch.logical_z != 1) {
-        if (error != nullptr)
-            *error = "M2.1 Luisa slice requires a one-dimensional dispatch";
-        return false;
-    }
-
     xir::Module xir_module;
-    Lowerer lowerer{module, lowering, error};
-    auto* kernel = lowerer.lower(xir_module);
+    std::vector<BufferLayout> buffer_layouts;
+    auto* kernel = LowerToXir(module, lowering, xir_module, &buffer_layouts, error);
     if (kernel == nullptr)
         return false;
     auto verification = xir_verify_module(&xir_module);
@@ -376,40 +481,49 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
     Context context{dispatch.runtime_directory};
     auto device = context.create_device("vk");
     auto stream = device.create_stream(StreamTag::COMPUTE);
-    std::vector<RuntimeBuffer> runtime_buffers;
+    std::vector<ByteBuffer> runtime_buffers;
+    std::vector<std::vector<unsigned char>> staged_bytes;
+    std::vector<HostBufferBinding*> staged_bindings;
     std::vector<luisa::compute::Function::Binding> bound_arguments;
-    runtime_buffers.reserve(lowering.resources.size());
+    runtime_buffers.reserve(host_buffers.size());
+    staged_bytes.reserve(host_buffers.size());
+    staged_bindings.reserve(host_buffers.size());
     bound_arguments.reserve(lowering.resources.size());
 
     for (const auto& resource : lowering.resources) {
+        if (resource.kind != kResourceBuffer)
+            continue;
         auto found = std::find_if(host_buffers.begin(), host_buffers.end(),
                                   [&](const auto& binding) { return binding.binding == resource.binding; });
-        if (found == host_buffers.end() || found->bytes == nullptr || found->stride != 4 || found->bytes->empty() ||
+        if (found == host_buffers.end() || found->bytes == nullptr || found->stride == 0 || found->bytes->empty() ||
             found->bytes->size() % found->stride != 0) {
             if (error != nullptr)
                 *error = "Luisa buffer binding is missing or has an unsupported stride";
             return false;
         }
-        const auto count = found->bytes->size() / found->stride;
-        if (resource.element_type == "float" || resource.element_type == "System.Single") {
-            runtime_buffers.emplace_back(device.create_buffer<float>(count));
-        } else if (resource.element_type == "int" || resource.element_type == "System.Int32") {
-            runtime_buffers.emplace_back(device.create_buffer<int32_t>(count));
-        } else if (resource.element_type == "uint" || resource.element_type == "System.UInt32") {
-            runtime_buffers.emplace_back(device.create_buffer<uint32_t>(count));
-        } else {
-            if (error != nullptr)
-                *error = "M2.1 Luisa slice supports float, int, and uint buffers only";
+        const auto layout = std::find_if(buffer_layouts.begin(), buffer_layouts.end(),
+                                         [&](const auto& candidate) { return candidate.binding == resource.binding; });
+        if (layout == buffer_layouts.end() || layout->device_type == nullptr) {
+            if (error != nullptr) *error = "Luisa buffer layout metadata is missing";
             return false;
         }
+        const auto count = found->bytes->size() / found->stride;
+        staged_bytes.emplace_back(count * layout->device_type->size(), 0u);
+        auto& packed = staged_bytes.back();
+        for (size_t i = 0; i < count; ++i) {
+            if (!repack_value(module, layout->feir_type_id, layout->device_type,
+                              found->bytes->data() + i * found->stride,
+                              packed.data() + i * layout->device_type->size(), true)) {
+                if (error != nullptr) *error = "Luisa failed to repack a Feather buffer element";
+                return false;
+            }
+        }
+        runtime_buffers.emplace_back(device.create_byte_buffer(packed.size()));
         auto& runtime = runtime_buffers.back();
-        visit_buffer(runtime, [&](auto& typed) {
-            using T = buffer_element_t<std::remove_cvref_t<decltype(typed)>>;
-            auto values = luisa::span<const T>{reinterpret_cast<const T*>(found->bytes->data()), count};
-            stream << typed.copy_from(values) << synchronize();
-            bound_arguments.emplace_back(
-                luisa::compute::Function::BufferBinding{typed.handle(), 0u, typed.size_bytes()});
-        });
+        stream << runtime.copy_from(packed.data()) << synchronize();
+        bound_arguments.emplace_back(
+            luisa::compute::Function::BufferBinding{runtime.handle(), 0u, runtime.size_bytes()});
+        staged_bindings.push_back(&*found);
     }
 
     xir_to_ast_normalize_module(&xir_module);
@@ -422,21 +536,31 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             *error = "Luisa failed to translate generated XIR to its executable AST";
         return false;
     }
-    auto shader = device.create<Shader1D<>>(luisa::compute::Function{ast.get()}, ShaderOption{});
-    stream << shader().dispatch(dispatch.logical_x) << synchronize();
+    auto shader = device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, ShaderOption{});
+    stream << shader().dispatch(luisa::make_uint3(dispatch.logical_x, dispatch.logical_y, dispatch.logical_z))
+           << synchronize();
 
-    for (size_t i = 0; i < lowering.resources.size(); ++i) {
-        const auto& resource = lowering.resources[i];
+    size_t staged_index = 0;
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kResourceBuffer)
+            continue;
+        auto* found = staged_bindings[staged_index];
+        auto& runtime = runtime_buffers[staged_index++];
         if (resource.access != kAccessWrite && resource.access != kAccessReadWrite)
             continue;
-        auto found = std::find_if(host_buffers.begin(), host_buffers.end(),
-                                  [&](const auto& binding) { return binding.binding == resource.binding; });
+        auto& packed = staged_bytes[staged_index - 1u];
+        stream << runtime.copy_to(packed.data()) << synchronize();
+        const auto layout = std::find_if(buffer_layouts.begin(), buffer_layouts.end(),
+                                         [&](const auto& candidate) { return candidate.binding == resource.binding; });
         const auto count = found->bytes->size() / found->stride;
-        visit_buffer(runtime_buffers[i], [&](auto& typed) {
-            using T = buffer_element_t<std::remove_cvref_t<decltype(typed)>>;
-            auto values = luisa::span<T>{reinterpret_cast<T*>(found->bytes->data()), count};
-            stream << typed.copy_to(values) << synchronize();
-        });
+        for (size_t i = 0; i < count; ++i) {
+            if (!repack_value(module, layout->feir_type_id, layout->device_type,
+                              found->bytes->data() + i * found->stride,
+                              packed.data() + i * layout->device_type->size(), false)) {
+                if (error != nullptr) *error = "Luisa failed to restore a Feather buffer element layout";
+                return false;
+            }
+        }
     }
     return true;
 }

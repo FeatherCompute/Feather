@@ -5461,8 +5461,11 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
     bindings.reserve(lowering.resources.size());
     GPU::Backend::Backend* easygpu_backend = nullptr;
     for (const auto& resource : lowering.resources) {
+        if (resource.kind == kIrResourceKindPushConstant) {
+            continue;
+        }
         if (resource.kind != kIrResourceKindBuffer) {
-            return fail(FE_ERROR_UNSUPPORTED, "The M2.1 Luisa path supports buffer resources only.");
+            return fail(FE_ERROR_UNSUPPORTED, "The Luisa buffer path received an unsupported resource kind.");
         }
         const auto bound = kernel.buffers.find(resource.binding);
         if (bound == kernel.buffers.end()) {
@@ -5508,6 +5511,7 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
     }
 
     for (const auto& resource : lowering.resources) {
+        if (resource.kind != kIrResourceKindBuffer) continue;
         if (resource.access == 1) continue;
         const auto bound = kernel.buffers.find(resource.binding);
         auto buffer = g_buffers.find(bound->second);

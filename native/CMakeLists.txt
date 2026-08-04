@@ -132,7 +132,7 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
         target_compile_options(luisa-compute-spirv PRIVATE "-include" "luisa/ast/type.h")
     endif()
 
-    target_sources(feather PRIVATE feather_luisa_backend.cpp)
+    target_sources(feather PRIVATE feather_luisa_backend.cpp feather_luisa_xir.cpp)
     target_link_libraries(feather PRIVATE luisa-compute-runtime luisa-compute-xir)
     target_compile_definitions(feather PRIVATE FEATHER_HAS_LUISA=1)
     if(APPLE)
