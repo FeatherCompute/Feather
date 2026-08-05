@@ -1,5 +1,6 @@
 using Feather;
 using Feather.AD;
+using Feather.Interop;
 using Feather.Math;
 using Feather.Resources;
 
@@ -26,7 +27,15 @@ Console.WriteLine("AD Linear Regression (conceptual - uses [AutoDiff] attribute)
 Console.WriteLine("The kernel builder activates the GradientTape when AutoDiff is true.");
 Console.WriteLine("Backward-pass validation is outside the completed basic DSL proof set, so this sample does not print PASS.");
 
-GPU.Dispatch(new LinearKernel(bufX.AsReadOnly(), bufY.AsReadOnly(), bufW.AsReadWrite(), bufB.AsReadWrite()), N);
+var path = GPU.DispatchAndGetPath(
+    new LinearKernel(bufX.AsReadOnly(), bufY.AsReadOnly(), bufW.AsReadWrite(), bufB.AsReadWrite()),
+    N,
+    GpuExecutionBackend.Luisa);
+if (path != DispatchPath.Luisa)
+{
+    throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
+}
+Console.WriteLine($"Dispatch path: {path}");
 
 float[] wResult = bufW.ToArray();
 float[] bResult = bufB.ToArray();

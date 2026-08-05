@@ -54,12 +54,12 @@ static CaseMeasurement MeasureComputeBuffer(ProfilerCaseContext context)
 
     var profiler = context.Measure("ProfileIncrementKernel", () =>
     {
-        path = GPU.DispatchAndGetPath(kernel, count);
+        path = GPU.DispatchAndGetPath(kernel, count, GpuExecutionBackend.Luisa);
     });
 
     var result = output.ToArray();
     Validate(result[0] == 1 && result[^1] == count, "compute buffer increment validation failed.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"compute buffer path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"compute buffer path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),
@@ -94,13 +94,13 @@ static CaseMeasurement MeasureTextureCopy(ProfilerCaseContext context)
 
     var profiler = context.Measure("ProfileTextureCopyKernel", () =>
     {
-        path = GPU.DispatchAndGetPath(kernel, new int2(width, height));
+        path = GPU.DispatchAndGetPath(kernel, new int2(width, height), GpuExecutionBackend.Luisa);
     });
 
     var readback = new Rgba32[pixels.Length];
     output.Read(readback);
     Validate(readback[0].Equals(pixels[0]) && readback[^1].Equals(pixels[^1]), "texture copy validation failed.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"texture copy path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"texture copy path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),
@@ -136,7 +136,7 @@ static CaseMeasurement MeasureAdLinear(ProfilerCaseContext context)
         yBuffer.AsReadOnly(),
         w.AsReadWrite(),
         b.AsReadWrite(),
-        loss.AsReadWrite()));
+        loss.AsReadWrite()), GpuExecutionBackend.Luisa);
     var path = DispatchPath.None;
 
     var profiler = context.Measure("ProfileLinearAdKernel", () =>
@@ -152,7 +152,7 @@ static CaseMeasurement MeasureAdLinear(ProfilerCaseContext context)
     var gradients = new[] { wGradient.ToArray()[0], bGradient.ToArray()[0] };
     var lossValues = loss.ToArray();
     Validate(gradients.All(float.IsFinite), "AD gradients were not finite.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"AD path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"AD path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),

@@ -20,24 +20,23 @@ using var bias = new Parameter<float>(
 bias.AddGradientAlias("b");
 using var lossBuffer = GPU.CreateBuffer<float>(1, BufferAccess.ReadWrite);
 var optimizer = new SGD([weight, bias], learningRate: learningRate);
-using var trainingStep = TrainingStep<LinearRegressionAdKernel>.Create(
+using var adKernel = GPU.CreateADKernel(
     new LinearRegressionAdKernel(
         xBuffer.AsReadOnly(),
         yBuffer.AsReadOnly(),
         weight.Value.Buffer.AsReadWrite(),
         bias.Value.Buffer.AsReadWrite(),
         lossBuffer.AsReadWrite()),
-    [weight, bias],
-    optimizer,
-    lossBuffer,
-    count: 1);
+    GpuExecutionBackend.Luisa);
 
 Console.WriteLine("AD Linear Regression");
 Console.WriteLine("step loss       w        b");
 
 for (var step = 0; step < steps; step++)
 {
-    var loss = trainingStep.Run();
+    adKernel.Backward(1);
+    optimizer.Step(adKernel);
+    var loss = lossBuffer.ToArray()[0];
 
     var w = weight.Value.Buffer.ToArray()[0];
     var b = bias.Value.Buffer.ToArray()[0];
@@ -48,7 +47,7 @@ for (var step = 0; step < steps; step++)
 var finalW = weight.Value.Buffer.ToArray()[0];
 var finalB = bias.Value.Buffer.ToArray()[0];
 Console.WriteLine($"final w={finalW:F4}, b={finalB:F4}");
-Console.WriteLine($"dispatch={trainingStep.LastDispatchPath}, gradients materialized={trainingStep.GradientsMaterialized}");
+Console.WriteLine($"dispatch={adKernel.LastDispatchPath}, gradients materialized={adKernel.HasBackwardRun}");
 
 [Kernel]
 [AutoDiff]

@@ -2,11 +2,51 @@
 
 Feather ships samples that are meant to be read as a learning path. Each sample is a normal .NET project under `samples/` and can be run from the repository root.
 
+## M6 Backend Matrix
+
+Compute and AD samples that are supported by the LuisaCompute XIR/Vulkan path
+select `GpuExecutionBackend.Luisa` explicitly and print `DispatchPath.Luisa`.
+EasyGPU remains the library default and is still used by raster presentation.
+
+| Sample | Classification | Backend decision / reason |
+| --- | --- | --- |
+| `AdLinearRegression` | ✅ Luisa | Direct generated AD kernel plus optimizer handoff uses Luisa. |
+| `AutoDiffLinearRegression` | ✅ Luisa | Direct generated AD kernel uses Luisa; conceptual sample remains non-PASS. |
+| `ColorFilter` | ✅ Luisa | Buffer compute and texture-free FEIR. |
+| `GpuStructInterfaces` | ✅ Luisa | Struct, callable, and interface-monomorphized compute. |
+| `HelloBuffer` | ✅ Luisa | Minimal buffer compute. |
+| `HelloWorld` | ✅ Luisa | Uniform and buffer compute. |
+| `Histogram` | ✅ Luisa | Buffer copy baseline. |
+| `JuliaSet` | ✅ Luisa | 2D math/callable compute. |
+| `Mandelbrot` | ✅ Luisa | 2D math/callable compute. |
+| `ParallelReduction` | ✅ Luisa | Barrier and buffer compute. |
+| `ProfilerSuite` | ✅ partial | Compute and AD cases use Luisa; NN trainer and raster cases remain EasyGPU. |
+| `RayTracing` | ✅ Luisa | The sample is a pure compute path tracer; it does not use hardware RT/acceleration structures. |
+| `SdfRenderer` | ✅ Luisa | 2D math/callable compute. |
+| `SpirvOptInspection` | ✅ Luisa | Dispatch uses Luisa; GLSL inspection intentionally remains an EasyGPU inspection tool. |
+| `TextureCopy` | ✅ Luisa | 2D texture load/store compute. |
+| `VolumetricFog` | ✅ Luisa | 2D math/callable compute. |
+| `WindowCompute` | ✅ partial | Pixel compute dispatch uses Luisa; window and texture presentation remain EasyGPU. |
+| `AdGptDemo` | ❌待支持 | NN trainer API does not expose a Luisa backend selector; NN source is out of scope. |
+| `AdGptPoetDemo` | ❌待支持 | Same NN trainer backend-selection gap. |
+| `AdMlpRegression` | ❌待支持 | `MlpRegressionJob` owns a `TrainingStep` without backend selection. |
+| `AdTransformer` | ❌待支持 | NN trainer API does not expose a Luisa backend selector. |
+| `BlenderRenderGraph` | ❌排除 | RenderHost/raster pipeline; Luisa XIR has no raster entry point. |
+| `SponzaRenderer` | ❌排除 | Vertex/fragment raster pipeline and window presentation. |
+| `WindowGraphicsTexturedQuad` | ❌排除 | Raster graphics pipeline. |
+| `WindowGraphicsTriangle` | ❌排除 | Raster graphics pipeline. |
+| `WindowHello` | ❌排除 | Window/event-loop sample with no compute kernel. |
+| `WindowPixels` | ❌排除 | CPU pixel generation and window presentation, no GPU kernel. |
+
+The Luisa-enabled samples are run with the same default arguments used by their
+EasyGPU versions when validating output; only long-running image samples may be
+invoked with reduced dimensions/samples for a bounded GPU smoke run.
+
 ## Recommended Order
 
 | Step | Sample | Command | What it teaches |
 | --- | --- | --- | --- |
-| 1 | `HelloBuffer` | `dotnet run --project samples/HelloBuffer/HelloBuffer.csproj` | Minimal buffer upload, 1D dispatch, readback, `DispatchPath.TypedEasyGpu`. |
+| 1 | `HelloBuffer` | `dotnet run --project samples/HelloBuffer/HelloBuffer.csproj` | Minimal buffer upload, 1D dispatch, readback, `DispatchPath.Luisa`. |
 | 2 | `GpuStructInterfaces` | `dotnet run --project samples/GpuStructInterfaces/GpuStructInterfaces.csproj` | `[GpuStruct]` data, instance `[Callable]` methods, mutating receivers, and generic interface monomorphization. |
 | 3 | `Mandelbrot` | `dotnet run --project samples/Mandelbrot/Mandelbrot.csproj -- 1024 1024 256` | 2D dispatch, `Uniform<T>`, callables, math, image output. |
 | 4 | `JuliaSet` | `dotnet run --project samples/JuliaSet/JuliaSet.csproj` | Another 2D compute renderer with parameterized fractal math. |
@@ -22,7 +62,7 @@ Feather ships samples that are meant to be read as a learning path. Each sample 
 
 ![Mandelbrot rendered with Feather](img/mandelbrot-feather.png)
 
-`samples/Mandelbrot` renders a fractal into a `ReadWriteBuffer<float4>`, writes an image artifact, and asserts that the generated kernel used the typed EasyGPU path. It is the best sample for learning 2D dispatch, `ThreadIds.XY`, uniforms, and callables.
+`samples/Mandelbrot` renders a fractal into a `ReadWriteBuffer<float4>`, writes an image artifact, and asserts that the generated kernel used the Luisa path. It is the best sample for learning 2D dispatch, `ThreadIds.XY`, uniforms, and callables.
 
 ### Julia Set
 
@@ -79,7 +119,7 @@ The Cornell box image demonstrates path/ray-style rendering workloads. Use the r
 
 - Generated kernels are `readonly partial struct` types with `[Kernel]`.
 - Shader resource constructor parameters become FEIR resource bindings.
-- `SampleProof.AssertTypedEasyGpu(path)` verifies that a sample did not silently rely on a compatibility fallback.
+- `SampleProof.AssertLuisa(path)` verifies that a Luisa-enabled sample did not silently fall back to EasyGPU.
 - `GpuStructInterfaces` checks generated GLSL for concrete generic monomorphizations and `inout` receivers.
 - Window samples render into Feather textures and then present those textures; swapchain rendering is not exposed as the public graphics target.
 - AD samples use `AD.Parameter` and `AD.Loss` inside a generated kernel, then drive `GpuADKernel<T>` or `TrainingStep<TKernel>` from host code.
