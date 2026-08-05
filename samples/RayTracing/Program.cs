@@ -11,6 +11,7 @@ const int DefaultSamplesPerPixel = 2560 * 4;
 var width = args.Length > 0 && int.TryParse(args[0], out var parsedWidth) ? parsedWidth : DefaultWidth;
 var height = args.Length > 1 && int.TryParse(args[1], out var parsedHeight) ? parsedHeight : DefaultHeight;
 var samplesPerPixel = args.Length > 2 && int.TryParse(args[2], out var parsedSamples) ? parsedSamples : DefaultSamplesPerPixel;
+var executionBackend = args.Length > 3 ? ParseBackend(args[3]) : GpuExecutionBackend.Luisa;
 ArgumentOutOfRangeException.ThrowIfLessThan(width, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(samplesPerPixel, 1);
@@ -30,9 +31,9 @@ var path = GPU.DispatchAndGetPath(
         new Uniform<int>(height),
         new Uniform<int>(samplesPerPixel)),
     new int2(width, height),
-    GpuExecutionBackend.Luisa);
+    executionBackend);
 stopwatch.Stop();
-SampleProof.AssertLuisa(path);
+SampleProof.AssertBackend(path, executionBackend);
 
 var pixels = image.ToArray();
 var imagePath = Path.GetFullPath(Path.Combine("artifacts", "images", "cornell-box-feather.tga"));
@@ -63,6 +64,14 @@ if (new FileInfo(imagePath).Length <= 18)
 }
 
 Console.WriteLine("PASS");
+
+static GpuExecutionBackend ParseBackend(string value)
+    => value.ToLowerInvariant() switch
+    {
+        "easygpu" => GpuExecutionBackend.EasyGpu,
+        "luisa" => GpuExecutionBackend.Luisa,
+        _ => throw new ArgumentException($"Unknown execution backend '{value}'. Expected easygpu or luisa.")
+    };
 
 static int[] CreateSeeds(int width, int height)
 {
@@ -497,13 +506,14 @@ internal static class SampleProof
     }
 
     /// <summary>
-    /// Requires the dispatch to have used the Luisa backend path.
+    /// Requires the dispatch to have used the explicitly selected backend path.
     /// </summary>
-    public static void AssertLuisa(DispatchPath path)
+    public static void AssertBackend(DispatchPath path, GpuExecutionBackend backend)
     {
-        if (path != DispatchPath.Luisa)
+        var expected = backend == GpuExecutionBackend.Luisa ? DispatchPath.Luisa : DispatchPath.TypedEasyGpu;
+        if (path != expected)
         {
-            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected {expected} dispatch, got {path}.");
         }
     }
 
