@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Existing Luisa parity tests are the FEIR -> XIR -> SPIR-V -> Vulkan contract.
+# Metal parity runs separately and isolates known upstream compiler assertions.
+export FEATHER_LUISA_BACKEND=vk
+
 detect_rid() {
     local os arch
     os="$(uname -s)"

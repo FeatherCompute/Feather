@@ -1,8 +1,9 @@
 # Luisa Performance
 
 This document records the reproducible baseline and each M7 runtime/code-generation
-experiment. EasyGPU remains Feather's default backend until the separate default-switch
-milestone.
+experiment. Within the Luisa execution path, Metal is the default target on macOS;
+Vulkan remains the default on Windows and Linux. `FEATHER_LUISA_BACKEND` explicitly
+overrides that platform choice.
 
 ## Benchmark method
 
@@ -117,10 +118,10 @@ investigation.
 
 ## TRACK-F: FEIR to multiple AST backends
 
-The experimental backend selector preserves one front end for every target:
+The backend selector preserves one front end for every target:
 `FEIR -> XIR -> XIR2AST -> AST -> Context::create_device(backend)`.
-The default remains `vk` (the XIR-to-SPIR-V route). Set `FEATHER_LUISA_BACKEND=metal`
-to opt into the Apple Metal AST compiler; `cuda` and `hip` are accepted selector values
+The default is `metal` on macOS and `vk` (the XIR-to-SPIR-V route) on Windows and Linux.
+Set `FEATHER_LUISA_BACKEND` to override it; `cuda` and `hip` are accepted selector values
 and fail with an explicit unavailable-backend error when their native backend was not built.
 The existing callable inlining and XIR verification happen before XIR2AST and are shared
 by all selected backends.
@@ -129,8 +130,8 @@ by all selected backends.
 
 | Backend | Build/configuration | Runtime result | Decision |
 | --- | --- | --- | --- |
-| Vulkan (`vk`) | ON by default; `XirSpirv` | Cornell and default HelloWorld PASS | Current default |
-| Metal (`metal`) | macOS only; `-DFEATHER_LUISA_ENABLE_METAL=ON` | Builds and Cornell PASS, but 19/23 Luisa tests pass; 4 test hosts crash in LC Metal compilation | Experimental, default OFF |
+| Vulkan (`vk`) | ON by default; `XirSpirv` | Cornell and explicit-override HelloWorld PASS | Windows/Linux default; macOS fallback |
+| Metal (`metal`) | macOS only; build defaults ON there | Cornell, all 17 supported samples, and 19/23 parity cases PASS; 4 parity cases hit known LC compiler bugs | macOS default |
 | CUDA (`cuda`) | Requires `CUDAToolkit 12.1` (`cuda_driver`, `nvrtc_static`) | `nvcc`/toolkit absent on this host; explicit selector reports backend not built | Build-ready, unverified |
 | HIP (`hip`) | Requires HIP/ROCm, `hiprtc`, and HIPRT toolchain | `hipcc`/ROCm absent on this host; explicit selector reports backend not built | Build-ready, unverified |
 
@@ -144,8 +145,9 @@ Release, three fresh processes per backend) produced:
 | Luisa Vulkan | 57.292 s | 56.710 s | 59.174 s | 57.292 s | 1.98x |
 | Luisa Metal | 35.519 s | 33.598 s | 31.206 s | 33.598 s | 1.16x |
 
-All nine Cornell runs printed `PASS`, with 1,041,954 lit pixels. Metal is faster than
-Vulkan but does not meet the <=15% target and is not stable enough for default use.
+All nine Cornell runs printed `PASS`, with 1,041,954 lit pixels. Metal is 41% faster
+than the measured Vulkan path and is 16% slower than EasyGPU. Product policy selects
+Metal as the macOS Luisa default while retaining explicit Vulkan override coverage.
 The four Metal failures are deterministic compiler failures, not test assertion failures:
 
 - `TextureSamplingAndMixedResourceOrderMatchEasyGpu`: MSL rejects `.sample` on the generated
@@ -155,7 +157,9 @@ The four Metal failures are deterministic compiler failures, not test assertion 
 - `VectorConstructionAndSwizzlesMatchEasyGpu`: MSL rejects non-const `vector_element_ref`
   on swizzle temporaries such as `(v3).yx`; LC aborts at `metal_compiler.cpp:402`.
 
-Because these failures terminate the test host, the fallback contract is active: Metal is
-disabled by default in `native/CMakeLists.txt`; macOS CI passes
-`-DFEATHER_LUISA_ENABLE_METAL=ON` to retain compile coverage, while all runtime calls remain
-on Vulkan unless explicitly opted in. Fixing the pinned LC Metal compiler is an M8+ item.
+F2 isolates those failures in `LuisaBackendMetalTests`: each case runs in a subprocess,
+must fail with the documented LC diagnostic, and cannot abort the remaining suite. The
+existing 23-case Luisa parity contract remains pinned to Vulkan by `eng/test.sh`; the new
+Metal suite requires the other 19 cases to pass. Reproduction details and upstream source
+locations are recorded in `docs/lc-metal-bugs.md`. Fixing the pinned LC Metal compiler is
+an M8+ item; no sample or lowering workaround was introduced.
