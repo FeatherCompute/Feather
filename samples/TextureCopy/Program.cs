@@ -25,8 +25,8 @@ using var output = GPU.CreateTexture2D<Rgba32, Rgba32>(Width, Height, PixelForma
 
 input.Upload(pixels);
 
-var path = GPU.DispatchAndGetPath(new TextureCopyKernel(input.AsReadOnly(), output.AsReadWrite()), new int2(Width, Height));
-SampleProof.AssertTypedEasyGpu(path);
+var path = GPU.DispatchAndGetPath(new TextureCopyKernel(input.AsReadOnly(), output.AsReadWrite()), new int2(Width, Height), GpuExecutionBackend.Luisa);
+SampleProof.AssertLuisa(path);
 
 var readback = new Rgba32[pixels.Length];
 output.Read(readback);
@@ -55,7 +55,7 @@ if (new FileInfo(imagePath).Length <= 18)
 Console.WriteLine("PASS");
 
 /// <summary>
-/// Copies a texture pixel-by-pixel through the EasyGPU imageLoad/imageStore bridge.
+/// Copies a texture pixel-by-pixel through the generated compute kernel.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(1, 1, 1)]
@@ -112,13 +112,13 @@ internal static class SampleProof
     }
 
     /// <summary>
-    /// Requires the dispatch to have used the typed EasyGPU backend path.
+    /// Requires the dispatch to have used the Luisa backend path.
     /// </summary>
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 

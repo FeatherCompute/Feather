@@ -17,8 +17,8 @@ if (!SampleProof.IsEasyGpuGlsl(glsl))
 
 using var input = GPU.CreateBuffer<float>([1.0f, 2.0f, 3.0f, 4.0f], BufferAccess.ReadOnly);
 using var output = GPU.CreateBuffer<float>(4, BufferAccess.ReadWrite);
-var path = GPU.DispatchAndGetPath(new InspectKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
-SampleProof.AssertTypedEasyGpu(path);
+var path = GPU.DispatchAndGetPath(new InspectKernel(input.AsReadOnly(), output.AsReadWrite()), 4, GpuExecutionBackend.Luisa);
+SampleProof.AssertLuisa(path);
 AssertOutput(output.ToArray());
 Console.WriteLine($"Dispatch path: {path}");
 Console.WriteLine("PASS");
@@ -78,13 +78,13 @@ internal static class SampleProof
            !glsl.Contains("Feather native stub", StringComparison.Ordinal);
 
     /// <summary>
-    /// Requires the dispatch to have used the typed EasyGPU backend path.
+    /// Requires the dispatch to have used the Luisa backend path.
     /// </summary>
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 }

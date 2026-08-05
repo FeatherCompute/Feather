@@ -18,8 +18,9 @@ using var output = GPU.CreateBuffer<int>(count, BufferAccess.ReadWrite);
 
 var path = GPU.DispatchAndGetPath(
     new IncrementKernel(input.AsReadOnly(), output.AsReadWrite(), new Uniform<int>(count)),
-    count);
-SampleProof.AssertTypedEasyGpu(path);
+    count,
+    GpuExecutionBackend.Luisa);
+SampleProof.AssertLuisa(path);
 
 int[] result = output.ToArray();
 bool allCorrect = true;
@@ -95,13 +96,13 @@ internal static class SampleProof
     }
 
     /// <summary>
-    /// Requires the dispatch to have used the typed EasyGPU backend path.
+    /// Requires the dispatch to have used the Luisa backend path.
     /// </summary>
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 }

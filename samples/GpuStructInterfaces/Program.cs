@@ -53,8 +53,9 @@ var path = GPU.DispatchAndGetPath(
         pointBuffer.AsReadOnly(),
         moveBuffer.AsReadOnly(),
         output.AsReadWrite()),
-    expected.Length);
-SampleProof.AssertTypedEasyGpu(path);
+    expected.Length,
+    GpuExecutionBackend.Luisa);
+SampleProof.AssertLuisa(path);
 
 var actual = output.ToArray();
 AssertNear(expected, actual);
@@ -221,11 +222,11 @@ internal static class SampleProof
         Console.WriteLine("Generic interface monomorphization: OK");
     }
 
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 }

@@ -12,8 +12,8 @@ using var input = GPU.CreateBuffer<float>(data, BufferAccess.ReadOnly);
 using var output = GPU.CreateBuffer<float>(data.Length, BufferAccess.ReadWrite);
 
 // Create and dispatch the kernel
-var path = GPU.DispatchAndGetPath(new DoubleKernel(input.AsReadOnly(), output.AsReadWrite()), data.Length);
-SampleProof.AssertTypedEasyGpu(path);
+var path = GPU.DispatchAndGetPath(new DoubleKernel(input.AsReadOnly(), output.AsReadWrite()), data.Length, GpuExecutionBackend.Luisa);
+SampleProof.AssertLuisa(path);
 
 // Read back the results
 float[] result = output.ToArray();
@@ -87,13 +87,13 @@ internal static class SampleProof
     }
 
     /// <summary>
-    /// Requires the dispatch to have used the typed EasyGPU backend path.
+    /// Requires the dispatch to have used the Luisa backend path.
     /// </summary>
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 }

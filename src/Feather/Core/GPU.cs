@@ -201,6 +201,11 @@ public static class GPU
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(x, 1, 1), wait);
 
+    /// <summary>Dispatches a one-dimensional kernel through an explicitly selected backend.</summary>
+    public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int x, GpuExecutionBackend backend, bool wait = true)
+        where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
+        => DispatchExplicit(kernel, new GpuDispatchSize(x, 1, 1), backend, wait);
+
     public static void Dispatch<TKernel>(TKernel kernel, int2 size, bool wait = true)
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
@@ -212,6 +217,11 @@ public static class GPU
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
 
+    /// <summary>Dispatches a two-dimensional kernel through an explicitly selected backend.</summary>
+    public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int2 size, GpuExecutionBackend backend, bool wait = true)
+        where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
+        => DispatchExplicit(kernel, new GpuDispatchSize(size.X, size.Y, 1), backend, wait);
+
     public static void Dispatch<TKernel>(TKernel kernel, int3 size, bool wait = true)
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
@@ -222,6 +232,19 @@ public static class GPU
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int3 size, bool wait = true)
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
+
+    /// <summary>Dispatches a three-dimensional kernel through an explicitly selected backend.</summary>
+    public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int3 size, GpuExecutionBackend backend, bool wait = true)
+        where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
+        => DispatchExplicit(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), backend, wait);
+
+    private static DispatchPath DispatchExplicit<TKernel>(TKernel kernel, GpuDispatchSize size, GpuExecutionBackend backend, bool wait)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        using var compiled = GpuKernel.Create<TKernel>(Context, backend);
+        GpuKernel.Dispatch(Context, compiled, kernel, size, wait);
+        return compiled.LastDispatchPath;
+    }
 
     private static class CachedKernelDispatcher<TKernel>
         where TKernel : struct, IGeneratedKernel<TKernel>

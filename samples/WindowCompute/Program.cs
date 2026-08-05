@@ -24,7 +24,14 @@ while (window.IsOpen)
         }
     }
 
-    GPU.Dispatch(new ComputePixels(color.AsReadWrite(), new Uniform<int>(frame)), color.Size);
+    var path = GPU.DispatchAndGetPath(
+        new ComputePixels(color.AsReadWrite(), new Uniform<int>(frame)),
+        color.Size,
+        GpuExecutionBackend.Luisa);
+    if (frame == 0)
+    {
+        Console.WriteLine($"Dispatch path: {path}");
+    }
     presenter.Present(color);
     frame++;
 }

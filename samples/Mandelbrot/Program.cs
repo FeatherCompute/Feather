@@ -23,9 +23,10 @@ var path = GPU.DispatchAndGetPath(
         new Uniform<int>(width),
         new Uniform<int>(height),
         new Uniform<int>(maxIterations)),
-    new int2(width, height));
+    new int2(width, height),
+    GpuExecutionBackend.Luisa);
 stopwatch.Stop();
-SampleProof.AssertTypedEasyGpu(path);
+SampleProof.AssertLuisa(path);
 
 var pixels = image.ToArray();
 var imagePath = Path.GetFullPath(Path.Combine("artifacts", "images", "mandelbrot-feather.tga"));
@@ -250,11 +251,11 @@ internal static class SampleProof
         Console.WriteLine("EasyGPU GLSL bridge: OK");
     }
 
-    public static void AssertTypedEasyGpu(DispatchPath path)
+    public static void AssertLuisa(DispatchPath path)
     {
-        if (path != DispatchPath.TypedEasyGpu)
+        if (path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected TypedEasyGpu dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 
