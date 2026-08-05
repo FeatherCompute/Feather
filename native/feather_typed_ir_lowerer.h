@@ -55,6 +55,8 @@ struct LoweringInputs {
     uint32_t stage_input_binding = NoIndex;
     uint32_t stage_output_binding = NoIndex;
     uint32_t stage_coverage_binding = NoIndex;
+    uint32_t graphics_vertex_count = 0;
+    uint32_t graphics_first_instance = 0;
     std::vector<ResourceInfo> resources;
     std::vector<PushConstantInfo> push_constants;
 };

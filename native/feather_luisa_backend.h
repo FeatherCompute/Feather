@@ -64,6 +64,7 @@ struct RasterDispatchInputs {
     uint32_t depth_test = 0;
     uint32_t depth_write = 0;
     uint32_t depth_compare = 1;
+    uint32_t depth_clamp = 0;
     uint32_t clear_depth = 0;
     float clear_depth_value = 1.0f;
     uint32_t clear_color = 0;

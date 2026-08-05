@@ -1006,10 +1006,24 @@ class Lowerer {
         }
         else if (builtin == 16u) {
             auto* value = extract(xir_module_.create_dispatch_id(), Type::of<uint32_t>(), {index_constant(0u)});
+            if (inputs_.graphics_vertex_count != 0u) {
+                auto* count = xir_module_.create_constant(Type::of<uint32_t>(), &inputs_.graphics_vertex_count);
+                value = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MOD, {value, count});
+            }
             return builder_.static_cast_if_necessary(result_type, value);
         }
         else if (builtin == 17u) {
-            return builder_.static_cast_if_necessary(result_type, xir_module_.create_constant_zero(Type::of<uint32_t>()));
+            Value* value = xir_module_.create_constant_zero(Type::of<uint32_t>());
+            if (inputs_.graphics_vertex_count != 0u) {
+                auto* dispatch = extract(xir_module_.create_dispatch_id(), Type::of<uint32_t>(), {index_constant(0u)});
+                auto* count = xir_module_.create_constant(Type::of<uint32_t>(), &inputs_.graphics_vertex_count);
+                value = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_DIV, {dispatch, count});
+                if (inputs_.graphics_first_instance != 0u) {
+                    auto* first = xir_module_.create_constant(Type::of<uint32_t>(), &inputs_.graphics_first_instance);
+                    value = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {value, first});
+                }
+            }
+            return builder_.static_cast_if_necessary(result_type, value);
         }
         if (vector == nullptr) return fail("unsupported compute builtin"), nullptr;
         auto* value = extract(vector, Type::of<uint32_t>(), {index_constant(component)});

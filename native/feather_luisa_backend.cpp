@@ -731,7 +731,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                                        UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
                                        UInt scissor_x, UInt scissor_y, UInt scissor_width, UInt scissor_height,
                                        UInt cull_mode, UInt front_face, UInt depth_test, UInt depth_write,
-                                       UInt depth_compare, UInt clear_depth, Float clear_depth_value,
+                                       UInt depth_compare, UInt depth_clamp, UInt clear_depth, Float clear_depth_value,
                                        UInt clear_color, Float4 clear_color_value) noexcept {
         const auto pixel = dispatch_id().xy();
         const auto pixel_index = pixel.y * dispatch_size().x + pixel.x;
@@ -759,7 +759,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             const auto a = vertex_buffer.read<float4>(triangle_base);
             const auto b = vertex_buffer.read<float4>(triangle_base + varying_stride);
             const auto c = vertex_buffer.read<float4>(triangle_base + varying_stride * 2u);
-            const auto valid_w = abs(a.w) > 1e-7f & abs(b.w) > 1e-7f & abs(c.w) > 1e-7f;
+            const auto valid_w = a.w > 1e-7f & b.w > 1e-7f & c.w > 1e-7f;
             const auto pa = a.xy() / a.w;
             const auto pb = b.xy() / b.w;
             const auto pc = c.xy() / c.w;
@@ -772,11 +772,33 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             $elif (cull_mode == 3u) { culled = true; };
 
             $if (valid_w & !culled & in_scissor & abs(area) > 1e-7f) {
-                const auto w0 = ((pb.x - p.x) * (pc.y - p.y) - (pb.y - p.y) * (pc.x - p.x)) / area;
-                const auto w1 = ((pc.x - p.x) * (pa.y - p.y) - (pc.y - p.y) * (pa.x - p.x)) / area;
-                const auto w2 = 1.0f - w0 - w1;
-                $if (w0 >= 0.0f & w1 >= 0.0f & w2 >= 0.0f) {
-                    const auto candidate_depth = w0 * (a.z / a.w) + w1 * (b.z / b.w) + w2 * (c.z / c.w);
+                const auto edge0_raw = (pb.x - p.x) * (pc.y - p.y) - (pb.y - p.y) * (pc.x - p.x);
+                const auto edge1_raw = (pc.x - p.x) * (pa.y - p.y) - (pc.y - p.y) * (pa.x - p.x);
+                const auto edge2_raw = (pa.x - p.x) * (pb.y - p.y) - (pa.y - p.y) * (pb.x - p.x);
+                const auto positive = area > 0.0f;
+                const auto edge0 = ite(positive, edge0_raw, -edge0_raw);
+                const auto edge1 = ite(positive, edge1_raw, -edge1_raw);
+                const auto edge2 = ite(positive, edge2_raw, -edge2_raw);
+                const auto top_left_bc = ite(positive,
+                    (pc.y > pb.y) | ((pc.y == pb.y) & (pc.x < pb.x)),
+                    (pb.y > pc.y) | ((pb.y == pc.y) & (pb.x < pc.x)));
+                const auto top_left_ca = ite(positive,
+                    (pa.y > pc.y) | ((pa.y == pc.y) & (pa.x < pc.x)),
+                    (pc.y > pa.y) | ((pc.y == pa.y) & (pc.x < pa.x)));
+                const auto top_left_ab = ite(positive,
+                    (pb.y > pa.y) | ((pb.y == pa.y) & (pb.x < pa.x)),
+                    (pa.y > pb.y) | ((pa.y == pb.y) & (pa.x < pb.x)));
+                const auto covered = ((edge0 > 0.0f) | ((edge0 == 0.0f) & top_left_bc)) &
+                                     ((edge1 > 0.0f) | ((edge1 == 0.0f) & top_left_ca)) &
+                                     ((edge2 > 0.0f) | ((edge2 == 0.0f) & top_left_ab));
+                $if (covered) {
+                    const auto inverse_area = 1.0f / abs(area);
+                    const auto w0 = edge0 * inverse_area;
+                    const auto w1 = edge1 * inverse_area;
+                    const auto w2 = edge2 * inverse_area;
+                    Float candidate_depth = w0 * (a.z / a.w) + w1 * (b.z / b.w) + w2 * (c.z / c.w);
+                    const auto depth_in_clip = candidate_depth >= 0.0f & candidate_depth <= 1.0f;
+                    $if (depth_clamp != 0u) { candidate_depth = clamp(candidate_depth, 0.0f, 1.0f); };
                     Bool depth_pass = def(true);
                     $if (depth_test != 0u) {
                         $if (depth_compare == 0u) { depth_pass = false; }
@@ -788,6 +810,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         $elif (depth_compare == 6u) { depth_pass = candidate_depth >= current_depth; }
                         $else { depth_pass = true; };
                     };
+                    $if (depth_clamp == 0u & !depth_in_clip) { depth_pass = false; };
                     $if (depth_pass) {
                         const auto q0 = w0 / a.w;
                         const auto q1 = w1 / b.w;
@@ -817,7 +840,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                      raster.viewport_x, raster.viewport_y, raster.viewport_width, raster.viewport_height,
                      raster.scissor_x, raster.scissor_y, raster.scissor_width, raster.scissor_height,
                      raster.cull_mode, raster.front_face, raster.depth_test, raster.depth_write,
-                     raster.depth_compare, raster.clear_depth, raster.clear_depth_value,
+                     raster.depth_compare, raster.depth_clamp, raster.clear_depth, raster.clear_depth_value,
                      raster.clear_color,
                      make_float4(raster.clear_color_r, raster.clear_color_g,
                                  raster.clear_color_b, raster.clear_color_a))

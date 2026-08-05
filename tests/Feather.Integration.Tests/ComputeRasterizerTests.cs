@@ -337,6 +337,108 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
+    [ComputeRasterFact]
+    [Trait("Category", "Gpu")]
+    public void ComputeRasterizerExecutesVertexAndInstanceBuiltins()
+    {
+        const int size = 16;
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.6f, -0.8f, 0.5f, 1.0f),
+            new float4(0.6f, -0.8f, 0.5f, 1.0f),
+            new float4(0.0f, 0.8f, 0.5f, 1.0f)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedInstancedVertexShader, GeneratedInstancedFragmentShader, GeneratedInstancedVaryings>();
+        target.Upload([.. Enumerable.Repeat(float4.Zero, size * size)]);
+
+        pipeline.Draw(
+            new GeneratedInstancedVertexShader(vertices.AsReadOnly()),
+            new GeneratedInstancedFragmentShader(),
+            target,
+            vertexCount: 3,
+            drawDesc: new GraphicsDrawDesc { InstanceCount = 2 });
+
+        var pixels = new float4[size * size];
+        target.Read(pixels);
+        Assert.Contains(pixels, pixel => pixel.X < 0.2f && pixel.Y > 0.8f && pixel.W > 0.9f);
+        Assert.Contains(pixels, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.W > 0.9f);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
+    }
+
+    [ComputeRasterFact]
+    [Trait("Category", "Gpu")]
+    public void ComputeRasterizerUsesOrderIndependentTopLeftSharedEdges()
+    {
+        const int size = 4;
+        var red = new float4(1.0f, 0.0f, 0.0f, 1.0f);
+        var green = new float4(0.0f, 1.0f, 0.0f, 1.0f);
+        var positions = new[]
+        {
+            new float4(-1.0f, -1.0f, 0.5f, 1.0f),
+            new float4(1.0f, -1.0f, 0.5f, 1.0f),
+            new float4(1.0f, 1.0f, 0.5f, 1.0f),
+            new float4(-1.0f, -1.0f, 0.5f, 1.0f),
+            new float4(1.0f, 1.0f, 0.5f, 1.0f),
+            new float4(-1.0f, 1.0f, 0.5f, 1.0f)
+        };
+        using var forwardPositions = GPU.CreateBuffer<float4>(positions);
+        using var forwardColors = GPU.CreateBuffer<float4>([red, red, red, green, green, green]);
+        using var reversePositions = GPU.CreateBuffer<float4>([.. positions[3..], .. positions[..3]]);
+        using var reverseColors = GPU.CreateBuffer<float4>([green, green, green, red, red, red]);
+        using var forwardTarget = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var reverseTarget = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var pipeline = GPU.CreateGraphicsPipeline<ComputeRasterVaryingVertexShader, ComputeRasterVaryingFragmentShader, ComputeRasterVaryings>();
+        forwardTarget.Upload([.. Enumerable.Repeat(float4.Zero, size * size)]);
+        reverseTarget.Upload([.. Enumerable.Repeat(float4.Zero, size * size)]);
+
+        pipeline.Draw(
+            new ComputeRasterVaryingVertexShader(forwardPositions.AsReadOnly(), forwardColors.AsReadOnly()),
+            new ComputeRasterVaryingFragmentShader(), forwardTarget, vertexCount: 6);
+        pipeline.Draw(
+            new ComputeRasterVaryingVertexShader(reversePositions.AsReadOnly(), reverseColors.AsReadOnly()),
+            new ComputeRasterVaryingFragmentShader(), reverseTarget, vertexCount: 6);
+
+        var forward = new float4[size * size];
+        var reverse = new float4[size * size];
+        forwardTarget.Read(forward);
+        reverseTarget.Read(reverse);
+        Assert.Equal(forward, reverse);
+        Assert.DoesNotContain(float4.Zero, forward);
+    }
+
+    [ComputeRasterFact]
+    [Trait("Category", "Gpu")]
+    public void ComputeRasterizerClipsDepthUnlessDepthClampIsEnabled()
+    {
+        const int size = 4;
+        var sentinel = new float4(0.1f, 0.2f, 0.3f, 1.0f);
+        var color = new float4(0.9f, 0.8f, 0.1f, 1.0f);
+        using var vertices = GPU.CreateBuffer<float4>(FullTargetTriangle(-0.5f));
+        using var clippedTarget = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var clampedTarget = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var clipped = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>();
+        using var clamped = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>(
+            new GraphicsPipelineDesc { Raster = RasterState.Default with { DepthClamp = true } });
+        clippedTarget.Upload([.. Enumerable.Repeat(sentinel, size * size)]);
+        clampedTarget.Upload([.. Enumerable.Repeat(sentinel, size * size)]);
+
+        clipped.Draw(new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(color)),
+            clippedTarget, vertexCount: 3);
+        clamped.Draw(new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(color)),
+            clampedTarget, vertexCount: 3);
+
+        var clippedPixels = new float4[size * size];
+        var clampedPixels = new float4[size * size];
+        clippedTarget.Read(clippedPixels);
+        clampedTarget.Read(clampedPixels);
+        Assert.All(clippedPixels, pixel => Assert.Equal(sentinel, pixel));
+        Assert.All(clampedPixels, pixel => Assert.Equal(color, pixel));
+    }
+
     private static float4[] FullTargetTriangle(float depth)
         =>
         [

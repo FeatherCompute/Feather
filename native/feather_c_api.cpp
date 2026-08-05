@@ -10457,6 +10457,7 @@ bool luisa_graphics_varying_layout(const Feather::TypedIR::Module& module, uint3
 }
 
 FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, uint32_t vertex_count,
+                                        uint32_t instance_count, uint32_t first_instance,
                                         std::vector<unsigned char>* output, uint32_t* output_stride) {
     if (output == nullptr || output_stride == nullptr) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex stage output is missing.");
@@ -10480,7 +10481,11 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     adapter.buffers = pipeline.buffers;
     adapter.textures = pipeline.textures;
     adapter.samplers = pipeline.samplers;
-    adapter.logical_x = static_cast<int32_t>(vertex_count);
+    const auto invocation_count = static_cast<uint64_t>(vertex_count) * instance_count;
+    if (invocation_count == 0u || invocation_count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex invocation count is out of range.");
+    }
+    adapter.logical_x = static_cast<int32_t>(invocation_count);
     adapter.logical_y = 1;
     adapter.logical_z = 1;
     Feather::TypedIR::LoweringInputs lowering;
@@ -10496,12 +10501,14 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     }
     lowering.stage_output_binding = output_binding;
     lowering.bounds_check = true;
-    lowering.logical_x = static_cast<int32_t>(vertex_count);
+    lowering.logical_x = static_cast<int32_t>(invocation_count);
     lowering.logical_y = 1;
     lowering.logical_z = 1;
     lowering.group_x = 1;
     lowering.group_y = 1;
     lowering.group_z = 1;
+    lowering.graphics_vertex_count = vertex_count;
+    lowering.graphics_first_instance = first_instance;
     lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
         output_binding, kIrResourceKindBuffer, 2u, "__feather_vertex_output", output_type});
 
@@ -10529,13 +10536,15 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
                                 native->second.mip_levels, native->second.pixel_format, &native->second.bytes});
         }
     }
-    output->assign(static_cast<size_t>(vertex_count) * *output_stride, 0u);
+    output->assign(static_cast<size_t>(invocation_count) * *output_stride, 0u);
     buffers.push_back({output_binding, 2u, *output_stride, output});
 
     const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
-        1u, 1u, 1u, vertex_count, 1u, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        1u, 1u, 1u, static_cast<uint32_t>(invocation_count), 1u, 1u, 0u,
+        backend_value != nullptr && backend_value[0] != '\0'
+            ? backend_value
+            : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
@@ -10657,7 +10666,9 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, target.width, target.height, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        backend_value != nullptr && backend_value[0] != '\0'
+            ? backend_value
+            : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures,
@@ -10678,9 +10689,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
     }
-    if (draw.first_instance != 0u || draw.instance_count > 1u) {
-        return fail(FE_ERROR_UNSUPPORTED, "Compute raster vertex FEIR does not yet support instancing.");
-    }
+    const auto instance_count = draw.instance_count == 0u ? 1u : draw.instance_count;
     const auto vertex_handle = infer_graphics_vertex_buffer(pipeline);
     const auto vertex_it = g_buffers.find(vertex_handle);
     const auto target_it = g_textures.find(draw.color_targets[0]);
@@ -10751,18 +10760,30 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     const auto backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, target_it->second.width, target_it->second.height, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        backend_value != nullptr && backend_value[0] != '\0'
+            ? backend_value
+            : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
     std::vector<unsigned char> all_transformed_vertices;
     uint32_t transformed_stride = 0u;
+    const auto vertex_domain = maximum_vertex + 1u;
     const auto vertex_result = dispatch_graphics_vertex_stage(
-        pipeline, maximum_vertex + 1u, &all_transformed_vertices, &transformed_stride);
+        pipeline, vertex_domain, instance_count, draw.first_instance,
+        &all_transformed_vertices, &transformed_stride);
     if (vertex_result != FE_OK) return vertex_result;
-    std::vector<unsigned char> transformed_vertices(static_cast<size_t>(draw.count) * transformed_stride);
-    for (uint32_t i = 0u; i < draw.count; ++i) {
-        std::memcpy(transformed_vertices.data() + static_cast<size_t>(i) * transformed_stride,
-                    all_transformed_vertices.data() + static_cast<size_t>(raster_indices[i]) * transformed_stride,
-                    transformed_stride);
+    const auto raster_vertex_count = static_cast<uint64_t>(draw.count) * instance_count;
+    if (raster_vertex_count > std::numeric_limits<uint32_t>::max()) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster assembled vertex count is out of range.");
+    }
+    std::vector<unsigned char> transformed_vertices(static_cast<size_t>(raster_vertex_count) * transformed_stride);
+    for (uint32_t instance = 0u; instance < instance_count; ++instance) {
+        for (uint32_t i = 0u; i < draw.count; ++i) {
+            const auto destination = static_cast<size_t>(instance) * draw.count + i;
+            const auto source = static_cast<size_t>(instance) * vertex_domain + raster_indices[i];
+            std::memcpy(transformed_vertices.data() + destination * transformed_stride,
+                        all_transformed_vertices.data() + source * transformed_stride,
+                        transformed_stride);
+        }
     }
     Feather::Luisa::HostBufferBinding vertex_binding{
         0u, 1u, transformed_stride, &transformed_vertices};
@@ -10792,7 +10813,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
                               draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Clear) ||
                               draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Default));
     Feather::Luisa::RasterDispatchInputs raster{
-        draw.count,
+        static_cast<uint32_t>(raster_vertex_count),
         draw.viewport_enabled != 0u ? draw.viewport_x : 0u,
         draw.viewport_enabled != 0u ? draw.viewport_y : 0u,
         draw.viewport_enabled != 0u ? draw.viewport_width : target_it->second.width,
@@ -10806,6 +10827,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         pipeline.depth_test,
         pipeline.depth_write,
         pipeline.depth_compare,
+        pipeline.depth_clamp,
         clear_depth ? 1u : 0u,
         draw.clear_depth != 0u ? std::clamp(draw.clear_depth_value, 0.0f, 1.0f) : 1.0f,
         clear_color ? 1u : 0u,
