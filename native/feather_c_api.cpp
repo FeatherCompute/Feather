@@ -10515,6 +10515,68 @@ bool bind_luisa_graphics_push_constants(const ParsedIr& parsed, const GraphicsPi
     return true;
 }
 
+uint64_t luisa_graphics_shader_cache_key(
+    const std::vector<unsigned char>& ir, const Feather::TypedIR::LoweringInputs& lowering,
+    const std::vector<Feather::Luisa::HostBufferBinding>& buffers,
+    const std::vector<Feather::Luisa::HostTextureBinding>& textures, uint64_t stage_tag) {
+    uint64_t key = 1469598103934665603ull;
+    const auto mix = [&](uint64_t value) {
+        key ^= value;
+        key *= 1099511628211ull;
+    };
+    mix(stage_tag);
+    for (auto byte : ir) mix(byte);
+    mix(lowering.logical_x);
+    mix(lowering.logical_y);
+    mix(lowering.logical_z);
+    mix(lowering.graphics_vertex_count);
+    mix(lowering.graphics_first_instance);
+    for (const auto& resource : lowering.resources) {
+        mix(resource.binding);
+        mix(resource.kind);
+        mix(resource.access);
+        mix(resource.sampler_min_filter);
+        mix(resource.sampler_mag_filter);
+        mix(resource.sampler_mipmap_mode);
+        mix(resource.sampler_address_u);
+        mix(resource.sampler_address_v);
+    }
+    for (const auto& target : lowering.graphics_color_targets) {
+        mix(target.binding);
+        mix(target.return_field);
+        mix(target.blend.enable);
+        mix(target.blend.src_color);
+        mix(target.blend.dst_color);
+        mix(target.blend.color_op);
+        mix(target.blend.src_alpha);
+        mix(target.blend.dst_alpha);
+        mix(target.blend.alpha_op);
+        mix(target.blend.write_mask);
+    }
+    for (const auto& push : lowering.push_constants) {
+        mix(push.binding);
+        mix(push.size);
+        const auto* bytes = static_cast<const unsigned char*>(push.data);
+        for (size_t i = 0u; bytes != nullptr && i < push.size; ++i) mix(bytes[i]);
+    }
+    for (const auto& buffer : buffers) {
+        mix(buffer.binding);
+        mix(buffer.access);
+        mix(buffer.stride);
+        mix(buffer.bytes == nullptr ? 0u : buffer.bytes->size());
+    }
+    for (const auto& texture : textures) {
+        mix(texture.binding);
+        mix(texture.access);
+        mix(texture.width);
+        mix(texture.height);
+        mix(texture.depth);
+        mix(texture.mip_levels);
+        mix(texture.pixel_format);
+    }
+    return key == 0u ? 1u : key;
+}
+
 FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, uint32_t vertex_count,
                                         uint32_t instance_count, uint32_t first_instance,
                                         std::vector<unsigned char>* output, uint32_t* output_stride) {
@@ -10600,12 +10662,15 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     buffers.push_back({output_binding, 2u, *output_stride, output});
 
     const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    const auto shader_cache_key = luisa_graphics_shader_cache_key(
+        pipeline.vertex_ir, lowering, buffers, textures, 0x766572746578ull);
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, static_cast<uint32_t>(invocation_count), 1u, 1u, 0u,
         backend_value != nullptr && backend_value[0] != '\0'
             ? backend_value
             : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
+    dispatch.shader_cache_key = shader_cache_key;
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster vertex FEIR dispatch failed." : error);
@@ -10741,12 +10806,15 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     }
 
     const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    const auto shader_cache_key = luisa_graphics_shader_cache_key(
+        pipeline.fragment_ir, lowering, buffers, textures, 0x667261676d656e74ull);
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, first_target.width, first_target.height, 1u, 0u,
         backend_value != nullptr && backend_value[0] != '\0'
             ? backend_value
             : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
+    dispatch.shader_cache_key = shader_cache_key;
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures,
                                   dispatch, nullptr, {}, &error)) {
