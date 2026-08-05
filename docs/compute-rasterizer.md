@@ -164,19 +164,26 @@ bindings as the public graphics API.
 The raster stage currently provides:
 
 - non-indexed and `ushort`/`uint` indexed triangle lists, including
-  `FirstVertex`, `FirstIndex`, and `VertexOffset`;
+  `FirstVertex`, `FirstIndex`, `VertexOffset`, instancing, and first-instance
+  vertex builtins;
 - position-first all-float structured varyings, perspective-correct
-  interpolation, viewport, scissor, front-face selection, and culling;
-- optional D32Float compare/write with clear/load behavior;
-- one RGBA8, BGRA8, or RGBA32Float color target and clear/load behavior;
-- generated fragment push constants and sampled `Texture2D`/sampler bindings.
+  interpolation, top-left shared-edge ownership, viewport, scissor, front-face
+  selection, culling, depth clipping/clamp, and fill/line/point modes;
+- D32Float compare/write and packed D24S8 stencil compare/operations/masks with
+  clear/load behavior;
+- one to eight dense `[Color(n)] float4` outputs, per-attachment blending and
+  write masks, and RGBA8/RGBA32Float targets;
+- generated vertex/fragment push constants using their shared aligned layout;
+- sampled `Texture2D` with nearest/linear filtering, repeat/clamp addressing,
+  explicit level/gradient sampling, mip chains, and finite-difference Ddx/Ddy.
 
-Dedicated Vulkan/MoltenVK GPU tests prove coverage, interpolation, depth across
-draws, viewport/scissor/cull, actual vertex and fragment FEIR execution,
-sampled-texture execution, structured varyings, multiple triangles, and indexed
-assembly. The implementation still stages intermediate buffers through host
-memory and synchronizes each stage. This is a correctness architecture slice,
-not the device-resident tiled design described above.
+Twenty-one dedicated GPU tests pass on both native Metal and Vulkan/MoltenVK.
+They prove coverage/interpolation, depth and stencil across draws, viewport,
+scissor, cull and polygon modes, generated stage FEIR, sampling/derivatives,
+aligned cross-stage constants, blend/write masks, MRT, instancing, shared-edge
+ownership, and indexed assembly. The implementation still stages intermediate
+buffers through host memory and synchronizes each stage. This is a correctness
+architecture slice, not the device-resident tiled design described above.
 
 ## Presentation Status
 
@@ -194,20 +201,23 @@ presenter remains a hard requirement before EasyGPU deletion.
 one triangle to a 512x512 RGBA32Float target, performs one warmup and five
 synchronous measured draws in a fresh process, validates 105,800 visible
 pixels, and reports the median host wall time. Both routes use the same managed
-shader and workload. Results on Apple M5 via Vulkan SDK 1.4.350/MoltenVK:
+shader and workload. The following runs were collected serially in fresh
+processes on Apple M5; EasyGPU used its default route and compute raster used
+the native Metal Luisa backend:
 
 | Route | Dispatch path | Runs (ms) | Median (ms) | Relative |
 | --- | --- | --- | ---: | ---: |
-| EasyGPU | `TypedEasyGpu` | 0.304, 0.436, 0.219, 0.214, 0.256 | 0.256 | 1.0x |
-| Compute raster | `Luisa` | 23.303, 15.946, 16.959, 14.764, 14.347 | 15.946 | 62.3x |
+| EasyGPU | `TypedEasyGpu` | 2.892, 0.359, 0.345, 0.394, 0.732 | 0.394 | 1.0x |
+| Compute raster (Metal) | `Luisa` | 8.965, 8.190, 9.330, 7.763, 8.368 | 8.368 | 21.2x |
 
 These are end-to-end synchronous draw times, not GPU timestamp queries. The
 compute number includes three dispatches, repeated resource staging, host
 readback of transformed/interpolated values, and synchronization between
-stages. It establishes the current product cost but does not attribute the
-slowdown to raster ALU. Device-resident scratch, cached kernels, fused
-raster/fragment execution, and tile binning are required before a useful GPU
-throughput comparison.
+stages. Vertex and fragment shaders/resources are cached for identical FEIR,
+layout, dimensions, fixed state, and embedded push-constant values; this reduced
+the previous 15.946 ms median but does not remove staging. Device-resident
+scratch, runtime (rather than embedded) uniforms, fused raster/fragment
+execution, and tile binning remain required for a useful throughput comparison.
 
 ## Risks and Controls
 
@@ -234,30 +244,38 @@ throughput comparison.
 
 | Capability | M3.5 status | Cutover requirement |
 | --- | --- | --- |
-| Triangle-list RGBA offscreen | Supported; indexed/non-indexed | Optimize/tile |
-| Generated vertex/fragment FEIR | Supported for float varyings and float4 color | Add flat integer/bool fields and fragment builtins |
-| Barycentric interpolation | Perspective-correct float lanes | Add clipping-generated vertices and top-left tie rule |
-| Depth/cull/viewport/scissor | Supported for D32Float | Add depth clamp and full homogeneous clipping |
-| SampledTexture2D | `Sample` proven | Prove level/grad/mips and implement implicit derivatives |
-| Blend/MRT/stencil | Unsupported | Required |
-| MSAA, line/point/polygon modes | Unsupported | Required if API remains unchanged |
-| Instancing | Unsupported | Required |
-| Vulkan | Proven locally on MoltenVK | Prove native Vulkan CI/GPU host |
-| Metal | Not built in the tested configuration | Build and run the same GPU suite |
+| Triangle-list RGBA offscreen | Supported; indexed/non-indexed and instanced | Optimize/tile |
+| Generated vertex/fragment FEIR | Float varyings; float4/MRT color | Add flat integer/bool varyings and remaining fragment builtins |
+| Barycentric interpolation | Perspective-correct, top-left rule | Full homogeneous clipping and edge helper lanes |
+| Depth/cull/viewport/scissor | D32Float plus depth clamp/clip | Full homogeneous clipping |
+| SampledTexture2D | Sample/level/grad/mips/filter/address proven | Different U/V address modes; exact edge derivatives |
+| Blend/MRT/stencil | Supported; 8 MRT, D24S8 stencil | Broader conformance matrix |
+| Polygon modes | Fill/line/point supported | Conformance for API rasterization rules |
+| MSAA | Unsupported | Per-sample color/depth storage and resolve |
+| Instancing | Supported | Performance qualification |
+| Vulkan | 21/21 GPU tests on MoltenVK | Prove native Vulkan GPU host |
+| Metal | 21/21 GPU tests on Apple M5 | Performance qualification |
 | Window presentation | EasyGPU transition only | Backend-neutral presenter required |
 
 EasyGPU raster cannot be retired at this point. The blocking sequence is:
-device-resident stage handoff and kernel caching; clipping/flat interpolation
-and fragment builtins; blend/MRT/stencil/MSAA parity; neutral presentation;
-then cross-backend correctness and performance qualification.
+device-resident stage handoff and tile binning; full clipping/flat interpolation;
+MSAA; neutral presentation; then cross-backend conformance and performance
+qualification. The default route remains EasyGPU because changing
+`LastDispatchPath` is a public contract change covered by existing tests.
 
 ## Verification
 
-Local verification used `native/build-compute/libfeather.dylib` and its Vulkan
-runtime directory. The native `feather` target and benchmark sample build
-cleanly. With the compute route explicitly enabled, all 9 compute-raster GPU
-tests pass. With the default EasyGPU route, the full solution reports 401
-integration tests passed and the 9 opt-in compute GPU tests skipped; Graphics
-reports 7 passed and 3 opt-in window tests skipped. Existing generated graphics
-coverage separately reports 44/44 passed. Raw benchmark commands and output are
-stored under `artifacts/compute-rasterizer/`.
+Local verification used `native/build-raster/libfeather.dylib`. The native
+`feather` target and benchmark sample build cleanly. With
+`FEATHER_GRAPHICS_COMPUTE=1`, all 21 dedicated compute-raster tests pass on both
+`FEATHER_LUISA_BACKEND=metal` and `vk`. Existing generated graphics pixel tests
+also exercise the compute route, but their hard-coded `TypedEasyGpu` dispatch
+assertions intentionally prevent treating that run as the default contract.
+On the normal EasyGPU route, the unchanged `GeneratedGraphicsPipelineTests`
+pass 44/44 and `Feather.Graphics.Tests` pass 7 with 3 opt-in window tests
+skipped. The complete integration project reports 420 passed, 21 opt-in compute
+tests skipped, and 4 failures: all four are `LuisaBackendMetalTests` that still
+expect compiler failures fixed by the pinned LC 35a06cb0 Metal
+sample/swizzle/vector-element changes. No existing test was modified to hide
+that baseline mismatch. Raw audit and benchmark output is stored under ignored
+`artifacts/compute-rasterizer/`.
