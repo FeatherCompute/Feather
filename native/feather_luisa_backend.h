@@ -49,6 +49,30 @@ struct DispatchInputs {
     std::string runtime_directory;
 };
 
+struct RasterDispatchInputs {
+    uint32_t vertex_count = 3;
+    uint32_t viewport_x = 0;
+    uint32_t viewport_y = 0;
+    uint32_t viewport_width = 1;
+    uint32_t viewport_height = 1;
+    uint32_t scissor_x = 0;
+    uint32_t scissor_y = 0;
+    uint32_t scissor_width = 1;
+    uint32_t scissor_height = 1;
+    uint32_t cull_mode = 0;
+    uint32_t front_face = 0;
+    uint32_t depth_test = 0;
+    uint32_t depth_write = 0;
+    uint32_t depth_compare = 1;
+    uint32_t clear_depth = 0;
+    float clear_depth_value = 1.0f;
+    uint32_t clear_color = 0;
+    float clear_color_r = 0.0f;
+    float clear_color_g = 0.0f;
+    float clear_color_b = 0.0f;
+    float clear_color_a = 1.0f;
+};
+
 struct AdGradientBinding {
     uint32_t source_binding = 0;
     uint32_t element_count = 0;
@@ -69,9 +93,12 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
               std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
 
-// Experimental compute rasterizer vertical slice. This deliberately has a small, explicit
-// resource contract until graphics-stage FEIR lowering is implemented.
+// Experimental compute triangle assembly/raster stage between generated graphics FEIR stages.
 bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
-                            const DispatchInputs& dispatch, std::string* error = nullptr);
+                            HostTextureBinding* depth, const RasterDispatchInputs& raster,
+                            const DispatchInputs& dispatch,
+                            std::vector<unsigned char>* fragment_varyings,
+                            std::vector<unsigned char>* fragment_coverage,
+                            std::string* error = nullptr);
 
 } // namespace Feather::Luisa

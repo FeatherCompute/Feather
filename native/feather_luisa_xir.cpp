@@ -43,6 +43,8 @@ constexpr uint32_t kTypeResourceTexture3D = 2;
 constexpr uint32_t kTypeResourceSampler = 3;
 
 constexpr uint8_t kFunctionCallable = 5;
+constexpr uint8_t kFunctionVertex = 3;
+constexpr uint8_t kFunctionFragment = 4;
 
 constexpr uint8_t kStatementBlock = 1;
 constexpr uint8_t kStatementLocalDeclaration = 2;
@@ -107,7 +109,10 @@ class Lowerer {
         if (module_.entry_function >= module_.functions.size())
             return fail("FEIR entry function is missing"), nullptr;
         const auto& entry = module_.functions[module_.entry_function];
-        if (entry.kind > 2 || entry.body_statement_index >= module_.statements.size())
+        const auto graphics_stage = entry.kind == kFunctionVertex || entry.kind == kFunctionFragment;
+        if ((!graphics_stage && entry.kind > 2u) ||
+            (graphics_stage && inputs_.stage_output_binding == TypedIR::NoIndex) ||
+            entry.body_statement_index >= module_.statements.size())
             return fail("Luisa forward backend requires a compute FEIR entry"), nullptr;
         if (inputs_.group_x <= 0 || inputs_.group_y <= 0 || inputs_.group_z <= 0)
             return fail("FEIR thread-group dimensions must be positive"), nullptr;
@@ -127,8 +132,10 @@ class Lowerer {
                                                   static_cast<uint32_t>(inputs_.group_z)));
 
         if (!register_resources() || !register_ad_resources() || !stage_callables() || !lower_callable_bodies()) return nullptr;
+        if (graphics_stage && !register_graphics_stage(entry)) return nullptr;
         builder_.set_insertion_point(kernel_->create_body_block());
-        if (!emit_bounds_guard(entry.kind)) return nullptr;
+        if (!emit_bounds_guard(graphics_stage ? 0u : entry.kind)) return nullptr;
+        if (graphics_stage && !bind_graphics_stage_parameters(entry)) return nullptr;
         BasicBlock* ad_merge = nullptr;
         if (ad_inputs_ != nullptr) {
             auto* scope = builder_.autodiff_scope();
@@ -381,6 +388,71 @@ class Lowerer {
                 buffer_layouts_->push_back(BufferLayout{source.binding, source_type, element});
             }
         }
+        return true;
+    }
+
+    Resource* resource_by_binding(uint32_t binding) {
+        const auto found = std::find_if(resources_.begin(), resources_.end(), [&](auto& entry) {
+            return entry.second.binding == binding;
+        });
+        return found == resources_.end() ? nullptr : &found->second;
+    }
+
+    bool register_graphics_stage(const TypedIR::Function& entry) {
+        stage_output_ = resource_by_binding(inputs_.stage_output_binding);
+        const auto valid_output_kind = stage_output_ != nullptr &&
+                                       (stage_output_->kind == kResourceBuffer ||
+                                        (entry.kind == kFunctionFragment && stage_output_->kind == kResourceTexture2D));
+        if (!valid_output_kind || stage_output_->access != kAccessWrite ||
+            stage_output_->element_type != type(entry.return_type_id)) {
+            return fail("graphics stage output buffer does not match the FEIR return type");
+        }
+        if (entry.kind == kFunctionFragment) {
+            stage_input_ = resource_by_binding(inputs_.stage_input_binding);
+            stage_coverage_ = resource_by_binding(inputs_.stage_coverage_binding);
+            if (entry.parameter_count != 1u || entry.first_parameter == TypedIR::NoIndex ||
+                entry.first_parameter >= module_.parameters.size() || stage_input_ == nullptr ||
+                stage_input_->kind != kResourceBuffer ||
+                stage_input_->element_type != type(module_.parameters[entry.first_parameter].type_id) ||
+                stage_coverage_ == nullptr || stage_coverage_->kind != kResourceBuffer ||
+                stage_coverage_->element_type != Type::of<float>()) {
+                return fail("fragment stage requires one matching varying input buffer");
+            }
+        } else if (entry.parameter_count != 0u) {
+            return fail("vertex stage entry parameters are unsupported");
+        }
+        return true;
+    }
+
+    bool bind_graphics_stage_parameters(const TypedIR::Function& entry) {
+        if (entry.kind != kFunctionFragment) return true;
+        const auto& parameter = module_.parameters[entry.first_parameter];
+        const auto name = std::string{string(parameter.name_id)};
+        auto* parameter_type = type(parameter.type_id);
+        if (name.empty() || parameter.direction != 0u || parameter_type == nullptr) {
+            return fail("fragment varying parameter metadata is invalid");
+        }
+        auto* dispatch = xir_module_.create_dispatch_id();
+        auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+        auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
+        auto* width = extract(xir_module_.create_dispatch_size(), Type::of<uint32_t>(), {index_constant(0u)});
+        auto* row = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {y, width});
+        auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {row, x});
+        auto* value = builder_.call(parameter_type, ResourceReadOp::BUFFER_READ, {stage_input_->argument, index});
+        auto* local = builder_.alloca_local(parameter_type);
+        builder_.store(local, value);
+        locals_.emplace(name, local);
+        auto* coverage = builder_.call(Type::of<float>(), ResourceReadOp::BUFFER_READ,
+                                       {stage_coverage_->argument, index});
+        auto* zero = xir_module_.create_constant_zero(Type::of<float>());
+        auto* uncovered = builder_.call(Type::of<bool>(), ArithmeticOp::BINARY_EQUAL, {coverage, zero});
+        auto* guard = builder_.if_(uncovered);
+        auto* merge = guard->create_merge_block();
+        builder_.set_insertion_point(guard->create_true_block());
+        builder_.return_void();
+        builder_.set_insertion_point(guard->create_false_block());
+        builder_.br(merge);
+        builder_.set_insertion_point(merge);
         return true;
     }
 
@@ -932,6 +1004,13 @@ class Lowerer {
             return builder_.static_cast_if_necessary(result_type,
                                                       xir_module_.create_constant(Type::of<uint32_t>(), &sizes[builtin - 13u]));
         }
+        else if (builtin == 16u) {
+            auto* value = extract(xir_module_.create_dispatch_id(), Type::of<uint32_t>(), {index_constant(0u)});
+            return builder_.static_cast_if_necessary(result_type, value);
+        }
+        else if (builtin == 17u) {
+            return builder_.static_cast_if_necessary(result_type, xir_module_.create_constant_zero(Type::of<uint32_t>()));
+        }
         if (vector == nullptr) return fail("unsupported compute builtin"), nullptr;
         auto* value = extract(vector, Type::of<uint32_t>(), {index_constant(component)});
         return builder_.static_cast_if_necessary(result_type, value);
@@ -1370,7 +1449,23 @@ class Lowerer {
             else {
                 auto* value = lower_expression(statement.a);
                 if (value == nullptr) return false;
-                builder_.return_(value);
+                if (stage_output_ != nullptr) {
+                    auto* dispatch = xir_module_.create_dispatch_id();
+                    if (stage_output_->kind == kResourceTexture2D) {
+                        auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+                        auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
+                        auto* coordinate = builder_.call(
+                            Type::vector(Type::of<uint32_t>(), 2u), ArithmeticOp::AGGREGATE, {x, y});
+                        builder_.call(ResourceWriteOp::TEXTURE2D_WRITE,
+                                      {stage_output_->argument, coordinate, value});
+                    } else {
+                        auto* index = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+                        builder_.call(ResourceWriteOp::BUFFER_WRITE, {stage_output_->argument, index, value});
+                    }
+                    builder_.return_void();
+                } else {
+                    builder_.return_(value);
+                }
             }
             return true;
         case kStatementExpression:
@@ -1460,6 +1555,9 @@ class Lowerer {
     std::vector<AdRead> ad_reads_;
     bool inside_ad_scope_ = false;
     bool uses_group_semantics_ = false;
+    Resource* stage_input_ = nullptr;
+    Resource* stage_output_ = nullptr;
+    Resource* stage_coverage_ = nullptr;
     uint32_t logical_groups_per_block_ = 1u;
 };
 

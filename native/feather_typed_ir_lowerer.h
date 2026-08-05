@@ -52,6 +52,9 @@ struct LoweringInputs {
     int32_t* logical_x_data = nullptr;
     int32_t* logical_y_data = nullptr;
     int32_t* logical_z_data = nullptr;
+    uint32_t stage_input_binding = NoIndex;
+    uint32_t stage_output_binding = NoIndex;
+    uint32_t stage_coverage_binding = NoIndex;
     std::vector<ResourceInfo> resources;
     std::vector<PushConstantInfo> push_constants;
 };

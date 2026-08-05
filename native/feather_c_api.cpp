@@ -10388,21 +10388,318 @@ FeBufferHandle infer_graphics_vertex_buffer(const GraphicsPipelineState& pipelin
 }
 
 #if FEATHER_HAS_LUISA
-FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
-    if (pipeline.topology != 0u || draw.indexed != 0u || draw.color_target_count != 1u || draw.depth_target != 0u ||
-        pipeline.sample_count != 1u || pipeline.color_attachment_count != 1u || draw.viewport_enabled != 0u ||
-        draw.scissor_enabled != 0u || pipeline.cull_mode != 0u || pipeline.polygon_mode != 0u) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "compute raster vertical slice supports only a non-indexed, unculled, single-target triangle");
+std::string luisa_graphics_type_name(const Feather::TypedIR::Module& module, uint32_t type_id) {
+    if (type_id >= module.types.size()) return {};
+    const auto& type = module.types[type_id];
+    if (type.kind == 1u) {
+        if (type.a == 0u) return "bool";
+        if (type.a == 1u) return "int";
+        if (type.a == 2u) return "uint";
+        if (type.a == 3u) return "float";
+        return {};
     }
-    if (draw.count != 3u) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertical slice requires exactly three vertices.");
+    if (type.kind == 2u && type.b >= 2u && type.b <= 4u) {
+        auto element = luisa_graphics_type_name(module, type.a);
+        return element.empty() ? std::string{} : element + std::to_string(type.b);
+    }
+    if (type.kind == 4u && type.a < module.structs.size()) {
+        const auto& structure = module.structs[type.a];
+        const auto* qualified = typed_ir_string(module, structure.fully_qualified_name_id);
+        const auto* simple = typed_ir_string(module, structure.name_id);
+        return qualified != nullptr && !qualified->empty() ? *qualified
+             : simple != nullptr ? *simple : std::string{};
+    }
+    return {};
+}
+
+bool luisa_graphics_interpolatable_type(const Feather::TypedIR::Module& module, uint32_t type_id) {
+    if (type_id >= module.types.size()) return false;
+    const auto& type = module.types[type_id];
+    if (type.kind == 1u) return type.a == 3u && type.b == 32u;
+    if (type.kind == 2u) return type.b >= 2u && type.b <= 4u &&
+                                luisa_graphics_interpolatable_type(module, type.a);
+    if (type.kind == 3u) return type.b >= 2u && type.b <= 4u;
+    if (type.kind != 4u || type.a >= module.structs.size()) return false;
+    const auto& structure = module.structs[type.a];
+    if (structure.first_field == UINT32_MAX || structure.first_field > module.struct_fields.size() ||
+        structure.field_count > module.struct_fields.size() - structure.first_field) return false;
+    for (uint32_t i = 0u; i < structure.field_count; ++i) {
+        const auto& field = module.struct_fields[structure.first_field + i];
+        if (field.offset % sizeof(float) != 0u || field.size_in_bytes % sizeof(float) != 0u ||
+            !luisa_graphics_interpolatable_type(module, field.type_id)) return false;
+    }
+    return true;
+}
+
+bool luisa_graphics_varying_layout(const Feather::TypedIR::Module& module, uint32_t type_id,
+                                   uint32_t* stride, std::string* type_name) {
+    if (stride == nullptr || type_name == nullptr || type_id >= module.types.size()) return false;
+    *type_name = luisa_graphics_type_name(module, type_id);
+    const auto& type = module.types[type_id];
+    if (type.kind == 2u && *type_name == "float4") {
+        *stride = sizeof(float) * 4u;
+        return true;
+    }
+    if (type.kind != 4u || type.a >= module.structs.size()) return false;
+    const auto& structure = module.structs[type.a];
+    if (structure.size_in_bytes == 0u || structure.first_field == UINT32_MAX ||
+        structure.first_field > module.struct_fields.size() ||
+        structure.field_count > module.struct_fields.size() - structure.first_field) return false;
+    const auto position = std::find_if(
+        module.struct_fields.begin() + structure.first_field,
+        module.struct_fields.begin() + structure.first_field + structure.field_count,
+        [](const auto& field) { return (field.flags & kTypedStructFieldFlagPosition) != 0u; });
+    if (position == module.struct_fields.begin() + structure.first_field + structure.field_count ||
+        position->offset != 0u || luisa_graphics_type_name(module, position->type_id) != "float4") return false;
+    *stride = structure.size_in_bytes;
+    return !type_name->empty() && structure.size_in_bytes % sizeof(float) == 0u &&
+           luisa_graphics_interpolatable_type(module, type_id);
+}
+
+FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, uint32_t vertex_count,
+                                        std::vector<unsigned char>* output, uint32_t* output_stride) {
+    if (output == nullptr || output_stride == nullptr) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex stage output is missing.");
+    }
+    ParsedIr parsed;
+    if (!parse_feather_ir(pipeline.vertex_ir, &parsed) || !parsed.has_section7 ||
+        parsed.typed_module.entry_function >= parsed.typed_module.functions.size()) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster vertex stage requires typed FEIR.");
+    }
+    const auto& entry = parsed.typed_module.functions[parsed.typed_module.entry_function];
+    std::string output_type;
+    if (entry.kind != 3u || !luisa_graphics_varying_layout(
+                                parsed.typed_module, entry.return_type_id, output_stride, &output_type)) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "Compute raster vertex stage requires float4 or a position-first varying struct.");
+    }
+
+    KernelState adapter;
+    adapter.ir = pipeline.vertex_ir;
+    adapter.push_constants = pipeline.push_constants;
+    adapter.buffers = pipeline.buffers;
+    adapter.textures = pipeline.textures;
+    adapter.samplers = pipeline.samplers;
+    adapter.logical_x = static_cast<int32_t>(vertex_count);
+    adapter.logical_y = 1;
+    adapter.logical_z = 1;
+    Feather::TypedIR::LoweringInputs lowering;
+    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering, true)) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster could not bind vertex-stage FEIR resources.");
+    }
+    uint32_t output_binding = 0u;
+    for (const auto& resource : lowering.resources) {
+        if (resource.binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute raster cannot allocate a vertex-stage output binding.");
+        }
+        output_binding = std::max(output_binding, resource.binding + 1u);
+    }
+    lowering.stage_output_binding = output_binding;
+    lowering.bounds_check = true;
+    lowering.logical_x = static_cast<int32_t>(vertex_count);
+    lowering.logical_y = 1;
+    lowering.logical_z = 1;
+    lowering.group_x = 1;
+    lowering.group_y = 1;
+    lowering.group_z = 1;
+    lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
+        output_binding, kIrResourceKindBuffer, 2u, "__feather_vertex_output", output_type});
+
+    std::vector<Feather::Luisa::HostBufferBinding> buffers;
+    std::vector<Feather::Luisa::HostTextureBinding> textures;
+    buffers.reserve(lowering.resources.size());
+    for (const auto& resource : lowering.resources) {
+        if (resource.binding == output_binding) continue;
+        if (resource.kind == kIrResourceKindPushConstant || resource.kind == kIrResourceKindSampler) continue;
+        if (resource.kind == kIrResourceKindBuffer) {
+            const auto bound = pipeline.buffers.find(resource.binding);
+            const auto native = bound == pipeline.buffers.end() ? g_buffers.end() : g_buffers.find(bound->second);
+            if (native == g_buffers.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Compute raster vertex stage is missing a buffer.");
+            }
+            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes});
+        } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
+            const auto bound = pipeline.textures.find(resource.binding);
+            const auto native = bound == pipeline.textures.end() ? g_textures.end() : g_textures.find(bound->second);
+            if (native == g_textures.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Compute raster vertex stage is missing a texture.");
+            }
+            textures.push_back({resource.binding, resource.kind, resource.access,
+                                native->second.width, native->second.height, native->second.depth,
+                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes});
+        }
+    }
+    output->assign(static_cast<size_t>(vertex_count) * *output_stride, 0u);
+    buffers.push_back({output_binding, 2u, *output_stride, output});
+
+    const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    Feather::Luisa::DispatchInputs dispatch{
+        1u, 1u, 1u, vertex_count, 1u, 1u, 0u,
+        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        Feather::Luisa::RuntimeDirectory()};
+    std::string error;
+    if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
+        return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster vertex FEIR dispatch failed." : error);
+    }
+    return ok();
+}
+
+FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
+                                          TextureState& target,
+                                          std::vector<unsigned char>* varyings,
+                                          std::vector<unsigned char>* coverage) {
+    if (varyings == nullptr || coverage == nullptr) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster fragment inputs are missing.");
+    }
+    ParsedIr parsed;
+    if (!parse_feather_ir(pipeline.fragment_ir, &parsed) || !parsed.has_section7 ||
+        parsed.typed_module.entry_function >= parsed.typed_module.functions.size()) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster fragment stage requires typed FEIR.");
+    }
+    const auto& entry = parsed.typed_module.functions[parsed.typed_module.entry_function];
+    uint32_t varying_stride = 0u;
+    std::string varying_type;
+    if (entry.kind != 4u || entry.parameter_count != 1u || entry.first_parameter == UINT32_MAX ||
+        entry.first_parameter >= parsed.typed_module.parameters.size() ||
+        luisa_graphics_type_name(parsed.typed_module, entry.return_type_id) != "float4" ||
+        !luisa_graphics_varying_layout(parsed.typed_module,
+                                       parsed.typed_module.parameters[entry.first_parameter].type_id,
+                                       &varying_stride, &varying_type)) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "Compute raster fragment stage requires float varyings and float4 output.");
+    }
+    const auto pixel_count = static_cast<size_t>(target.width) * target.height;
+    if (varyings->size() != pixel_count * varying_stride ||
+        coverage->size() != pixel_count * sizeof(float)) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster fragment buffers have inconsistent dimensions.");
+    }
+
+    KernelState adapter;
+    adapter.ir = pipeline.fragment_ir;
+    adapter.push_constants = pipeline.push_constants;
+    adapter.buffers = pipeline.buffers;
+    adapter.textures = pipeline.textures;
+    adapter.samplers = pipeline.samplers;
+    adapter.logical_x = static_cast<int32_t>(target.width);
+    adapter.logical_y = static_cast<int32_t>(target.height);
+    adapter.logical_z = 1;
+    Feather::TypedIR::LoweringInputs lowering;
+    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering)) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster could not bind fragment-stage FEIR resources.");
+    }
+    uint32_t synthetic_binding = 0u;
+    for (const auto& resource : lowering.resources) {
+        if (resource.binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute raster cannot allocate fragment-stage bindings.");
+        }
+        synthetic_binding = std::max(synthetic_binding, resource.binding + 1u);
+    }
+    const auto input_binding = synthetic_binding++;
+    const auto coverage_binding = synthetic_binding++;
+    const auto output_binding = synthetic_binding;
+    lowering.stage_input_binding = input_binding;
+    lowering.stage_coverage_binding = coverage_binding;
+    lowering.stage_output_binding = output_binding;
+    lowering.bounds_check = true;
+    lowering.logical_x = static_cast<int32_t>(target.width);
+    lowering.logical_y = static_cast<int32_t>(target.height);
+    lowering.logical_z = 1;
+    lowering.group_x = 1;
+    lowering.group_y = 1;
+    lowering.group_z = 1;
+    lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
+        input_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_input", varying_type});
+    lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
+        coverage_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_coverage", "float"});
+    Feather::TypedIR::ResourceInfo output_resource;
+    output_resource.binding = output_binding;
+    output_resource.kind = kIrResourceKindTexture2D;
+    output_resource.access = 2u;
+    output_resource.name = "__feather_fragment_output";
+    output_resource.element_type = "float4";
+    output_resource.width = target.width;
+    output_resource.height = target.height;
+    if (!easygpu_runtime_pixel_format(target.pixel_format, &output_resource.texture_format)) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster fragment target format is unsupported.");
+    }
+    lowering.resources.push_back(std::move(output_resource));
+
+    std::vector<Feather::Luisa::HostBufferBinding> buffers;
+    std::vector<Feather::Luisa::HostTextureBinding> textures;
+    for (const auto& resource : lowering.resources) {
+        if (resource.binding == input_binding || resource.binding == coverage_binding ||
+            resource.binding == output_binding || resource.kind == kIrResourceKindPushConstant ||
+            resource.kind == kIrResourceKindSampler) continue;
+        if (resource.kind == kIrResourceKindBuffer) {
+            const auto bound = pipeline.buffers.find(resource.binding);
+            const auto native = bound == pipeline.buffers.end() ? g_buffers.end() : g_buffers.find(bound->second);
+            if (native == g_buffers.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Compute raster fragment stage is missing a buffer.");
+            }
+            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes});
+        } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
+            const auto bound = pipeline.textures.find(resource.binding);
+            const auto native = bound == pipeline.textures.end() ? g_textures.end() : g_textures.find(bound->second);
+            if (native == g_textures.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Compute raster fragment stage is missing a texture.");
+            }
+            textures.push_back({resource.binding, resource.kind, resource.access,
+                                native->second.width, native->second.height, native->second.depth,
+                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes});
+        }
+    }
+    buffers.push_back({input_binding, 1u, varying_stride, varyings});
+    buffers.push_back({coverage_binding, 1u, sizeof(float), coverage});
+    textures.push_back({output_binding, kIrResourceKindTexture2D, 2u,
+                        target.width, target.height, target.depth, target.mip_levels,
+                        target.pixel_format, &target.bytes});
+
+    const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    Feather::Luisa::DispatchInputs dispatch{
+        1u, 1u, 1u, target.width, target.height, 1u, 0u,
+        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        Feather::Luisa::RuntimeDirectory()};
+    std::string error;
+    if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures,
+                                  dispatch, nullptr, {}, &error)) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    error.empty() ? "Compute raster fragment FEIR dispatch failed." : error);
+    }
+    return ok();
+}
+
+FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
+    if (pipeline.topology != 0u || draw.indexed != 0u || draw.color_target_count != 1u ||
+        pipeline.sample_count != 1u || pipeline.color_attachment_count != 1u || pipeline.polygon_mode != 0u ||
+        pipeline.stencil_test != 0u || pipeline.blend_enable != 0u) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "compute raster vertical slice supports one non-indexed, single-sample, opaque triangle");
+    }
+    if (draw.count < 3u || draw.count % 3u != 0u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
+    }
+    if (draw.first_vertex != 0u || draw.first_instance != 0u || draw.instance_count > 1u) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster vertex FEIR slice does not yet support draw offsets or instancing.");
     }
     const auto vertex_handle = infer_graphics_vertex_buffer(pipeline);
     const auto vertex_it = g_buffers.find(vertex_handle);
     const auto target_it = g_textures.find(draw.color_targets[0]);
     if (vertex_it == g_buffers.end() || target_it == g_textures.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Compute raster draw requires valid vertex and color resources.");
+    }
+    if ((draw.viewport_enabled != 0u && (draw.viewport_width == 0u || draw.viewport_height == 0u)) ||
+        (draw.scissor_enabled != 0u && (draw.scissor_width == 0u || draw.scissor_height == 0u))) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster viewport and scissor must have positive dimensions.");
+    }
+    if (draw.color_load_op > static_cast<uint32_t>(GraphicsColorLoadOp::DontCare) ||
+        draw.depth_load_op > static_cast<uint32_t>(GraphicsDepthLoadOp::Clear)) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster attachment load op is invalid.");
+    }
+    if (draw.color_load_op == static_cast<uint32_t>(GraphicsColorLoadOp::Load) && draw.clear_color != 0u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc cannot specify ClearColor when ColorLoadOp is Load.");
+    }
+    if (draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Load) && draw.clear_depth != 0u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc cannot specify ClearDepth when DepthLoadOp is Load.");
     }
     const auto stride = pipeline.vertex_stride != 0u
                             ? pipeline.vertex_stride
@@ -10412,17 +10709,79 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         1u, 1u, 1u, target_it->second.width, target_it->second.height, 1u, 0u,
         backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
         Feather::Luisa::RuntimeDirectory()};
-    Feather::Luisa::HostBufferBinding vertex_binding{0u, 1u, static_cast<uint32_t>(stride), &vertex_it->second.bytes};
+    std::vector<unsigned char> transformed_vertices;
+    uint32_t transformed_stride = 0u;
+    const auto vertex_result = dispatch_graphics_vertex_stage(
+        pipeline, draw.count, &transformed_vertices, &transformed_stride);
+    if (vertex_result != FE_OK) return vertex_result;
+    Feather::Luisa::HostBufferBinding vertex_binding{
+        0u, 1u, transformed_stride, &transformed_vertices};
     Feather::Luisa::HostTextureBinding target_binding{
         0u, 2u, 3u, target_it->second.width, target_it->second.height, target_it->second.depth,
         target_it->second.mip_levels, target_it->second.pixel_format, &target_it->second.bytes};
+    Feather::Luisa::HostTextureBinding depth_binding{};
+    Feather::Luisa::HostTextureBinding* depth_binding_ptr = nullptr;
+    auto depth_it = g_textures.end();
+    if (draw.depth_target != 0u) {
+        depth_it = g_textures.find(draw.depth_target);
+        if (depth_it == g_textures.end() || depth_it->second.pixel_format != 101u ||
+            depth_it->second.width != target_it->second.width || depth_it->second.height != target_it->second.height) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute raster depth requires a matching Depth32Float target.");
+        }
+        depth_binding = Feather::Luisa::HostTextureBinding{
+            1u, 2u, 3u, depth_it->second.width, depth_it->second.height, depth_it->second.depth,
+            depth_it->second.mip_levels, depth_it->second.pixel_format, &depth_it->second.bytes};
+        depth_binding_ptr = &depth_binding;
+    } else if (pipeline.depth_test != 0u || pipeline.depth_write != 0u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster depth state requires a depth target.");
+    }
+    const auto clear_color = draw.clear_color != 0u ||
+                             draw.color_load_op == static_cast<uint32_t>(GraphicsColorLoadOp::Clear);
+    const auto clear_depth = depth_binding_ptr != nullptr &&
+                             (draw.clear_depth != 0u ||
+                              draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Clear) ||
+                              draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Default));
+    Feather::Luisa::RasterDispatchInputs raster{
+        draw.count,
+        draw.viewport_enabled != 0u ? draw.viewport_x : 0u,
+        draw.viewport_enabled != 0u ? draw.viewport_y : 0u,
+        draw.viewport_enabled != 0u ? draw.viewport_width : target_it->second.width,
+        draw.viewport_enabled != 0u ? draw.viewport_height : target_it->second.height,
+        draw.scissor_enabled != 0u ? draw.scissor_x : 0u,
+        draw.scissor_enabled != 0u ? draw.scissor_y : 0u,
+        draw.scissor_enabled != 0u ? draw.scissor_width : target_it->second.width,
+        draw.scissor_enabled != 0u ? draw.scissor_height : target_it->second.height,
+        pipeline.cull_mode,
+        pipeline.front_face,
+        pipeline.depth_test,
+        pipeline.depth_write,
+        pipeline.depth_compare,
+        clear_depth ? 1u : 0u,
+        draw.clear_depth != 0u ? std::clamp(draw.clear_depth_value, 0.0f, 1.0f) : 1.0f,
+        clear_color ? 1u : 0u,
+        draw.clear_color != 0u ? draw.clear_color_r : 0.0f,
+        draw.clear_color != 0u ? draw.clear_color_g : 0.0f,
+        draw.clear_color != 0u ? draw.clear_color_b : 0.0f,
+        draw.clear_color != 0u ? draw.clear_color_a : 1.0f};
+    std::vector<unsigned char> fragment_varyings;
+    std::vector<unsigned char> fragment_coverage;
     std::string error;
-    if (!Feather::Luisa::DispatchVerticalRaster(vertex_binding, target_binding, dispatch, &error)) {
+    if (!Feather::Luisa::DispatchVerticalRaster(
+            vertex_binding, target_binding, depth_binding_ptr, raster, dispatch,
+            &fragment_varyings, &fragment_coverage, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster dispatch failed." : error);
     }
+    const auto fragment_result = dispatch_graphics_fragment_stage(
+        pipeline, target_it->second, &fragment_varyings, &fragment_coverage);
+    if (fragment_result != FE_OK) return fragment_result;
     target_it->second.host_dirty = true;
     target_it->second.device_dirty = false;
     target_it->second.mipmaps_dirty = false;
+    if (depth_it != g_textures.end()) {
+        depth_it->second.host_dirty = true;
+        depth_it->second.device_dirty = false;
+        depth_it->second.mipmaps_dirty = false;
+    }
     return ok();
 }
 #endif

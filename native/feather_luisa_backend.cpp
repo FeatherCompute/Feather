@@ -664,18 +664,35 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
 }
 
 bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
-                            const DispatchInputs& dispatch, std::string* error) {
-    // Opt-in compute-only triangle rasterizer slice. The public graphics FEIR stages are
-    // intentionally not lowered here yet; this is the smallest executable proof of the
-    // edge-function/interpolation pipeline.
+                            HostTextureBinding* depth, const RasterDispatchInputs& raster,
+                            const DispatchInputs& dispatch,
+                            std::vector<unsigned char>* fragment_varyings,
+                            std::vector<unsigned char>* fragment_coverage,
+                            std::string* error) {
+    // Opt-in compute-only triangle assembly and raster stage between generated vertex and
+    // fragment FEIR dispatches.
     if (error != nullptr) error->clear();
-    if (vertices.bytes == nullptr || target.bytes == nullptr || vertices.stride < sizeof(float) * 4u ||
-        vertices.bytes->size() < vertices.stride * 3u || target.width == 0u || target.height == 0u) {
+    if (vertices.bytes == nullptr || target.bytes == nullptr || fragment_varyings == nullptr ||
+        fragment_coverage == nullptr || vertices.stride < sizeof(float) * 4u || raster.vertex_count < 3u ||
+        raster.vertex_count % 3u != 0u || vertices.bytes->size() < vertices.stride * raster.vertex_count ||
+        target.width == 0u || target.height == 0u ||
+        target.depth != 1u) {
         if (error != nullptr) *error = "vertical raster bindings are incomplete";
         return false;
     }
     if (target.pixel_format != 3u && target.pixel_format != 4u && target.pixel_format != 10u) {
         if (error != nullptr) *error = "vertical raster supports only Rgba8, Bgra8, and Rgba32Float targets";
+        return false;
+    }
+    const auto pixel_count = static_cast<size_t>(target.width) * target.height;
+    if (target.bytes->size() < pixel_count * (target.pixel_format == 10u ? sizeof(float4) : sizeof(uint32_t))) {
+        if (error != nullptr) *error = "vertical raster color storage is too small";
+        return false;
+    }
+    if (depth != nullptr &&
+        (depth->bytes == nullptr || depth->pixel_format != 101u || depth->width != target.width ||
+         depth->height != target.height || depth->bytes->size() < pixel_count * sizeof(float))) {
+        if (error != nullptr) *error = "vertical raster depth storage must be matching Depth32Float";
         return false;
     }
 
@@ -684,36 +701,137 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
     auto &device = runtime.device();
     auto &stream = runtime.stream();
 
-    std::array<float4, 3> host_vertices{};
-    for (size_t i = 0; i < host_vertices.size(); ++i) {
-        std::memcpy(&host_vertices[i], vertices.bytes->data() + i * vertices.stride, sizeof(float4));
+    if (vertices.stride % sizeof(float) != 0u) {
+        if (error != nullptr) *error = "vertical raster varying stride must be float-aligned";
+        return false;
     }
-    auto vertex_buffer = device.create_buffer<float4>(host_vertices.size());
+    auto vertex_buffer = device.create_byte_buffer(vertices.stride * raster.vertex_count);
+    std::vector<unsigned char> host_varyings(pixel_count * vertices.stride, 0u);
+    std::vector<float> host_coverage(pixel_count, 0.0f);
+    auto varying_buffer = device.create_byte_buffer(host_varyings.size());
+    auto coverage_buffer = device.create_buffer<float>(pixel_count);
+    std::vector<float> host_depth(pixel_count, 1.0f);
+    if (depth != nullptr) {
+        std::memcpy(host_depth.data(), depth->bytes->data(), pixel_count * sizeof(float));
+    }
+    auto depth_buffer = device.create_buffer<float>(pixel_count);
     auto storage = target.pixel_format == 10u ? PixelStorage::FLOAT4 : PixelStorage::BYTE4;
     auto image = device.create_image<float>(storage, make_uint2(target.width, target.height), 1u, true);
-    stream << vertex_buffer.copy_from(host_vertices.data())
+    stream << vertex_buffer.copy_from(vertices.bytes->data())
+           << varying_buffer.copy_from(host_varyings.data())
+           << coverage_buffer.copy_from(host_coverage.data())
+           << depth_buffer.copy_from(host_depth.data())
            << image.copy_from(target.bytes->data());
 
-    auto shader = device.compile<2>([](ImageFloat output, BufferFloat4 vertex_buffer) noexcept {
+    const auto varying_stride = vertices.stride;
+    const auto vertex_count = raster.vertex_count;
+    auto shader = device.compile<2>([varying_stride, vertex_count](ImageFloat output, ByteBufferVar vertex_buffer,
+                                       ByteBufferVar varying_buffer, BufferFloat coverage_buffer,
+                                       BufferFloat depth_buffer,
+                                       UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
+                                       UInt scissor_x, UInt scissor_y, UInt scissor_width, UInt scissor_height,
+                                       UInt cull_mode, UInt front_face, UInt depth_test, UInt depth_write,
+                                       UInt depth_compare, UInt clear_depth, Float clear_depth_value,
+                                       UInt clear_color, Float4 clear_color_value) noexcept {
         const auto pixel = dispatch_id().xy();
-        const auto size = make_float2(dispatch_size().xy());
-        const auto p = (make_float2(pixel) + 0.5f) / size * 2.0f - 1.0f;
-        const auto a = vertex_buffer.read(0u);
-        const auto b = vertex_buffer.read(1u);
-        const auto c = vertex_buffer.read(2u);
-        const auto area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-        $if (abs(area) > 1e-7f) {
-            const auto w0 = ((b.x - p.x) * (c.y - p.y) - (b.y - p.y) * (c.x - p.x)) / area;
-            const auto w1 = ((c.x - p.x) * (a.y - p.y) - (c.y - p.y) * (a.x - p.x)) / area;
-            const auto w2 = 1.0f - w0 - w1;
-            $if (w0 >= 0.0f & w1 >= 0.0f & w2 >= 0.0f) {
-                output.write(pixel, a * w0 + b * w1 + c * w2);
-            };
+        const auto pixel_index = pixel.y * dispatch_size().x + pixel.x;
+        coverage_buffer.write(pixel_index, 0.0f);
+        $if (clear_color != 0u) {
+            output.write(pixel, clear_color_value);
         };
+        Float current_depth = depth_buffer.read(pixel_index);
+        $if (clear_depth != 0u) {
+            current_depth = clear_depth_value;
+            depth_buffer.write(pixel_index, current_depth);
+        };
+
+        const auto in_scissor = pixel.x >= scissor_x & pixel.y >= scissor_y &
+                                 pixel.x < scissor_x + scissor_width & pixel.y < scissor_y + scissor_height;
+        const auto viewport_pixel = make_float2(pixel) + 0.5f -
+                                    make_float2(viewport_x.cast<float>(), viewport_y.cast<float>());
+        const auto viewport_size =
+            make_float2(viewport_width.cast<float>(), viewport_height.cast<float>());
+        const auto p = make_float2(
+            viewport_pixel.x / viewport_size.x * 2.0f - 1.0f,
+            1.0f - viewport_pixel.y / viewport_size.y * 2.0f);
+        for (uint32_t triangle = 0u; triangle < vertex_count / 3u; ++triangle) {
+            const auto triangle_base = triangle * 3u * varying_stride;
+            const auto a = vertex_buffer.read<float4>(triangle_base);
+            const auto b = vertex_buffer.read<float4>(triangle_base + varying_stride);
+            const auto c = vertex_buffer.read<float4>(triangle_base + varying_stride * 2u);
+            const auto valid_w = abs(a.w) > 1e-7f & abs(b.w) > 1e-7f & abs(c.w) > 1e-7f;
+            const auto pa = a.xy() / a.w;
+            const auto pb = b.xy() / b.w;
+            const auto pc = c.xy() / c.w;
+            const auto area = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
+            Bool front = area < 0.0f;// target-space Y points down
+            $if (front_face != 0u) { front = !front; };
+            Bool culled = def(false);
+            $if (cull_mode == 1u) { culled = front; }
+            $elif (cull_mode == 2u) { culled = !front; }
+            $elif (cull_mode == 3u) { culled = true; };
+
+            $if (valid_w & !culled & in_scissor & abs(area) > 1e-7f) {
+                const auto w0 = ((pb.x - p.x) * (pc.y - p.y) - (pb.y - p.y) * (pc.x - p.x)) / area;
+                const auto w1 = ((pc.x - p.x) * (pa.y - p.y) - (pc.y - p.y) * (pa.x - p.x)) / area;
+                const auto w2 = 1.0f - w0 - w1;
+                $if (w0 >= 0.0f & w1 >= 0.0f & w2 >= 0.0f) {
+                    const auto candidate_depth = w0 * (a.z / a.w) + w1 * (b.z / b.w) + w2 * (c.z / c.w);
+                    Bool depth_pass = def(true);
+                    $if (depth_test != 0u) {
+                        $if (depth_compare == 0u) { depth_pass = false; }
+                        $elif (depth_compare == 1u) { depth_pass = candidate_depth < current_depth; }
+                        $elif (depth_compare == 2u) { depth_pass = candidate_depth == current_depth; }
+                        $elif (depth_compare == 3u) { depth_pass = candidate_depth <= current_depth; }
+                        $elif (depth_compare == 4u) { depth_pass = candidate_depth > current_depth; }
+                        $elif (depth_compare == 5u) { depth_pass = candidate_depth != current_depth; }
+                        $elif (depth_compare == 6u) { depth_pass = candidate_depth >= current_depth; }
+                        $else { depth_pass = true; };
+                    };
+                    $if (depth_pass) {
+                        const auto q0 = w0 / a.w;
+                        const auto q1 = w1 / b.w;
+                        const auto q2 = w2 / c.w;
+                        const auto varying = (a * q0 + b * q1 + c * q2) / (q0 + q1 + q2);
+                        output.write(pixel, varying);
+                        const auto output_base = pixel_index * varying_stride;
+                        for (uint32_t lane = 0u; lane < varying_stride / sizeof(float); ++lane) {
+                            const auto offset = lane * static_cast<uint32_t>(sizeof(float));
+                            const auto va = vertex_buffer.read<float>(triangle_base + offset);
+                            const auto vb = vertex_buffer.read<float>(triangle_base + varying_stride + offset);
+                            const auto vc = vertex_buffer.read<float>(triangle_base + varying_stride * 2u + offset);
+                            varying_buffer.write(output_base + offset,
+                                                 (va * q0 + vb * q1 + vc * q2) / (q0 + q1 + q2));
+                        }
+                        coverage_buffer.write(pixel_index, 1.0f);
+                        $if (depth_write != 0u) {
+                            current_depth = candidate_depth;
+                            depth_buffer.write(pixel_index, current_depth);
+                        };
+                    };
+                };
+            };
+        }
     });
-    stream << shader(image, vertex_buffer).dispatch(target.width, target.height)
+    stream << shader(image, vertex_buffer, varying_buffer, coverage_buffer, depth_buffer,
+                     raster.viewport_x, raster.viewport_y, raster.viewport_width, raster.viewport_height,
+                     raster.scissor_x, raster.scissor_y, raster.scissor_width, raster.scissor_height,
+                     raster.cull_mode, raster.front_face, raster.depth_test, raster.depth_write,
+                     raster.depth_compare, raster.clear_depth, raster.clear_depth_value,
+                     raster.clear_color,
+                     make_float4(raster.clear_color_r, raster.clear_color_g,
+                                 raster.clear_color_b, raster.clear_color_a))
+                  .dispatch(target.width, target.height)
            << image.copy_to(target.bytes->data())
-           << synchronize();
+           << varying_buffer.copy_to(host_varyings.data())
+           << coverage_buffer.copy_to(host_coverage.data());
+    if (depth != nullptr) {
+        stream << depth_buffer.copy_to(depth->bytes->data());
+    }
+    stream << synchronize();
+    *fragment_varyings = std::move(host_varyings);
+    fragment_coverage->resize(pixel_count * sizeof(float));
+    std::memcpy(fragment_coverage->data(), host_coverage.data(), fragment_coverage->size());
     return true;
 }
 
