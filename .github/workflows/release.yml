@@ -61,7 +61,9 @@ jobs:
             glslang-dev \
             glslang-tools \
             libgl1-mesa-dev \
+            libspirv-cross-c-shared-dev \
             libssl-dev \
+            uuid-dev \
             libvulkan-dev \
             libx11-dev \
             libxcursor-dev \
@@ -93,6 +95,29 @@ jobs:
           vulkan-query-version: 1.4.304.1
           vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools, Glslang
           vulkan-use-cache: true
+
+      - name: Check Linux Vulkan toolchain
+        if: runner.os == 'Linux'
+        run: |
+          ldconfig -p | grep -E 'libvulkan|libglslang|libSPIRV|libspirv-cross' || true
+          test -e /usr/include/vulkan/vulkan.h
+          test -e /usr/lib/x86_64-linux-gnu/libvulkan.so
+
+      - name: Check macOS Vulkan toolchain
+        if: runner.os == 'macOS'
+        run: |
+          test -e "$(brew --prefix vulkan-headers)/include/vulkan/vulkan.h"
+          test -e "$(brew --prefix vulkan-loader)/lib/libvulkan.dylib"
+          test -e "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib"
+          test -e "$(brew --prefix openssl@3)/lib/libcrypto.dylib"
+
+      - name: Check Windows Vulkan toolchain
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          test -n "${VULKAN_SDK:-}"
+          find "$VULKAN_SDK" -maxdepth 4 -iname vulkan.h -print -quit | grep .
+          find "$VULKAN_SDK" -maxdepth 4 \( -iname vulkan-1.lib -o -iname vulkan.lib \) -print -quit | grep .
 
       - name: Build native runtime
         shell: bash
