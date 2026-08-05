@@ -1,4 +1,4 @@
-# Luisa Vulkan Performance
+# Luisa Performance
 
 This document records the reproducible baseline and each M7 runtime/code-generation
 experiment. EasyGPU remains Feather's default backend until the separate default-switch
@@ -114,3 +114,48 @@ not amortize its startup in that measurement. The post-M7 fixed-workload rerun w
 All six post-M7 runs printed the expected dispatch path and `PASS`. The gap is not yet within
 the M7 target; generated shader/GPU execution dominates after startup and needs a separate M8
 investigation.
+
+## TRACK-F: FEIR to multiple AST backends
+
+The experimental backend selector preserves one front end for every target:
+`FEIR -> XIR -> XIR2AST -> AST -> Context::create_device(backend)`.
+The default remains `vk` (the XIR-to-SPIR-V route). Set `FEATHER_LUISA_BACKEND=metal`
+to opt into the Apple Metal AST compiler; `cuda` and `hip` are accepted selector values
+and fail with an explicit unavailable-backend error when their native backend was not built.
+The existing callable inlining and XIR verification happen before XIR2AST and are shared
+by all selected backends.
+
+### Backend matrix
+
+| Backend | Build/configuration | Runtime result | Decision |
+| --- | --- | --- | --- |
+| Vulkan (`vk`) | ON by default; `XirSpirv` | Cornell and default HelloWorld PASS | Current default |
+| Metal (`metal`) | macOS only; `-DFEATHER_LUISA_ENABLE_METAL=ON` | Builds and Cornell PASS, but 19/23 Luisa tests pass; 4 test hosts crash in LC Metal compilation | Experimental, default OFF |
+| CUDA (`cuda`) | Requires `CUDAToolkit 12.1` (`cuda_driver`, `nvrtc_static`) | `nvcc`/toolkit absent on this host; explicit selector reports backend not built | Build-ready, unverified |
+| HIP (`hip`) | Requires HIP/ROCm, `hiprtc`, and HIPRT toolchain | `hipcc`/ROCm absent on this host; explicit selector reports backend not built | Build-ready, unverified |
+
+Metal smoke created `Metal device 'Apple M5' at index 0`; Cornell at 64x36@4 spp
+completed in 3,094 ms. The fixed full workload (2026-08-05, Apple M5, macOS 26.5.2,
+Release, three fresh processes per backend) produced:
+
+| Backend | Run 1 | Run 2 | Run 3 | Median | Relative to EasyGPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| EasyGPU | 28.854 s | 28.500 s | 29.092 s | 28.854 s | 1.00x |
+| Luisa Vulkan | 57.292 s | 56.710 s | 59.174 s | 57.292 s | 1.98x |
+| Luisa Metal | 35.519 s | 33.598 s | 31.206 s | 33.598 s | 1.16x |
+
+All nine Cornell runs printed `PASS`, with 1,041,954 lit pixels. Metal is faster than
+Vulkan but does not meet the <=15% target and is not stable enough for default use.
+The four Metal failures are deterministic compiler failures, not test assertion failures:
+
+- `TextureSamplingAndMixedResourceOrderMatchEasyGpu`: MSL rejects `.sample` on the generated
+  `texture2d<..., access::read>`; LC aborts at `metal_compiler.cpp:402`.
+- `TextureSampleGradExecutesThroughLuisaXir`: the same sampled-texture access mismatch.
+- `ShaderLibraryTextureAndSamplerCallablesMatchEasyGpu`: the same sampled-texture mismatch.
+- `VectorConstructionAndSwizzlesMatchEasyGpu`: MSL rejects non-const `vector_element_ref`
+  on swizzle temporaries such as `(v3).yx`; LC aborts at `metal_compiler.cpp:402`.
+
+Because these failures terminate the test host, the fallback contract is active: Metal is
+disabled by default in `native/CMakeLists.txt`; macOS CI passes
+`-DFEATHER_LUISA_ENABLE_METAL=ON` to retain compile coverage, while all runtime calls remain
+on Vulkan unless explicitly opted in. Fixing the pinned LC Metal compiler is an M8+ item.
