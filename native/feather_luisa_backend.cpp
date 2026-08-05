@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -50,6 +51,21 @@ constexpr uint8_t kResourceTexture2D = 2;
 constexpr uint8_t kResourceTexture3D = 6;
 constexpr uint8_t kAccessWrite = 2;
 constexpr uint8_t kAccessReadWrite = 3;
+
+void ensure_luisa_spirv_optimization_preset() noexcept {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // EasyGPU's production Ultra preset is stronger than SPIRV-Tools' maintained
+        // -O recipe. LC 0.9.0 has no Ultra enum, so use its strongest stable `full`
+        // recipe by default while preserving an explicit caller override.
+        if (std::getenv("LUISA_SPIRV_OPT_PASSES") != nullptr) return;
+#if defined(_WIN32)
+        _putenv_s("LUISA_SPIRV_OPT_PASSES", "full");
+#else
+        setenv("LUISA_SPIRV_OPT_PASSES", "full", 1);
+#endif
+    });
+}
 
 bool has_vulkan_backend(const std::filesystem::path& directory) {
 #if defined(_WIN32)
@@ -233,6 +249,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               std::span<AdGradientBinding> gradients, std::string* error) {
     if (error != nullptr)
         error->clear();
+    ensure_luisa_spirv_optimization_preset();
     xir::Module xir_module;
     std::vector<BufferLayout> buffer_layouts;
     std::vector<AdGradientLayout> gradient_layouts;

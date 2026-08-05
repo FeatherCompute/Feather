@@ -69,3 +69,18 @@ alternative (`HlslSpirv`), not a separate FEIR route. Our FEIR→XIR→AST bridg
 that entry point, but the pinned HLSL generator is not compatible with the generated AST
 for this kernel. The new `FEATHER_LUISA_VULKAN_CODEGEN` CMake cache option makes all three
 choices explicit without changing the default (`XirSpirv`).
+
+## SPIR-V optimization alignment
+
+EasyGPU `Ultra` is SPIRV-Tools' maintained performance recipe plus LICM, strength
+reduction, redundancy elimination, code sinking, and cleanup. LC 0.9.0 exposes no
+`Ultra` enum: its `full` preset is `RegisterPerformancePasses` plus private-to-local
+and copy-propagation, while `compute` is a smaller XIR-oriented pass list.
+
+On the same 64×36@4 spp smoke (fresh process; all runs passed), Luisa dispatch times
+were: `none` 4.377s (11,026 words), `lightweight` 4.394s (10,385), `compute` 4.310s
+(10,384), and `full` 4.256s (10,271). The strongest stable LC choice is therefore
+`full`. Feather now defaults the Luisa process to `LUISA_SPIRV_OPT_PASSES=full` when
+the caller has not supplied an override; an explicit environment value remains
+authoritative. This is the closest available LC equivalent to EasyGPU Ultra, not a
+claim of pass-for-pass identity.
