@@ -3,10 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Existing Luisa parity tests are the FEIR -> XIR -> SPIR-V -> Vulkan contract.
-# Metal parity runs separately and isolates known upstream compiler assertions.
-export FEATHER_LUISA_BACKEND=vk
-
 detect_rid() {
     local os arch
     os="$(uname -s)"
@@ -30,11 +26,15 @@ detect_rid() {
 
 RID="${FEATHER_RUNTIME_IDENTIFIER:-$(detect_rid)}"
 case "$RID" in
-    win-*) native_library="feather_native.dll" ;;
-    osx-*) native_library="libfeather.dylib" ;;
-    linux-*) native_library="libfeather.so" ;;
+    win-*) native_library="feather_native.dll"; luisa_backend="vk" ;;
+    osx-*) native_library="libfeather.dylib"; luisa_backend="metal" ;;
+    linux-*) native_library="libfeather.so"; luisa_backend="vk" ;;
     *) echo "Unsupported runtime identifier: $RID" >&2; exit 1 ;;
 esac
+
+# Keep the existing Vulkan parity contract on CI platforms. macOS runs Metal,
+# where the local Luisa Vulkan path is unavailable with the pinned LC version.
+export FEATHER_LUISA_BACKEND="$luisa_backend"
 
 staged_native="$ROOT/artifacts/native-assets/runtimes/$RID/native/$native_library"
 if [[ -z "${FEATHER_NATIVE_LIBRARY:-}" && -f "$staged_native" ]]; then
@@ -63,7 +63,17 @@ if [[ "${FEATHER_RUN_GPU_TESTS:-0}" == "1" ]]; then
     test_project "$ROOT/tests/Feather.Tests/Feather.Tests.csproj"
     test_project "$ROOT/tests/Feather.Gpu.Tests/Feather.Gpu.Tests.csproj"
     test_project "$ROOT/tests/Feather.Graphics.Tests/Feather.Graphics.Tests.csproj"
-    test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj"
+    if [[ "$luisa_backend" == "metal" ]]; then
+        # Existing LuisaBackend tests execute directly and contain four known LC
+        # Metal compiler aborts. LuisaBackendMetalTests isolates their expected
+        # failures while preserving the remaining parity coverage.
+        test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj" \
+            --filter "FullyQualifiedName!~LuisaBackend"
+        test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj" \
+            --filter "FullyQualifiedName~LuisaBackendMetalTests"
+    else
+        test_project "$ROOT/tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj"
+    fi
     test_project "$ROOT/tests/Feather.AD.Tests/Feather.AD.Tests.csproj"
     test_project "$ROOT/tests/Feather.NN.Tests/Feather.NN.Tests.csproj"
     test_project "$ROOT/tests/Feather.Blender.RenderHost.Tests/Feather.Blender.RenderHost.Tests.csproj"
