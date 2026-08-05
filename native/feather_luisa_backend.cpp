@@ -231,6 +231,7 @@ private:
     std::unique_ptr<Device> device_;
     std::unique_ptr<Stream> stream_;
     std::string runtime_directory_;
+    std::string backend_name_;
     std::unordered_map<uint64_t, std::unique_ptr<CachedKernel>> kernels_;
 
 public:
@@ -238,12 +239,13 @@ public:
     RuntimeState(const RuntimeState &) = delete;
     RuntimeState &operator=(const RuntimeState &) = delete;
 
-    void ensure(std::string_view runtime_directory) {
-        if (context_ != nullptr && runtime_directory_ == runtime_directory) return;
+    void ensure(std::string_view runtime_directory, std::string_view backend_name) {
+        if (context_ != nullptr && runtime_directory_ == runtime_directory && backend_name_ == backend_name) return;
         reset();
         runtime_directory_ = runtime_directory;
+        backend_name_ = backend_name;
         context_ = std::make_unique<Context>(runtime_directory_);
-        device_ = std::make_unique<Device>(context_->create_device("vk"));
+        device_ = std::make_unique<Device>(context_->create_device(backend_name_));
         stream_ = std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE));
     }
 
@@ -266,19 +268,21 @@ public:
         device_.reset();
         context_.reset();
         runtime_directory_.clear();
+        backend_name_.clear();
     }
 
     void abandon() noexcept {
         // Deliberately leak runtime objects during process teardown: their
         // destructors call into dynamically loaded Luisa/Vulkan code.
-    (void)context_.release();
-    (void)device_.release();
-    (void)stream_.release();
-    // The owner is intentionally leaked by runtime_state(); leave cached
-    // shaders and resources untouched so their destructors cannot run after
-    // the dynamically loaded Luisa backend has been unloaded.
-    runtime_directory_.clear();
-}
+        (void)context_.release();
+        (void)device_.release();
+        (void)stream_.release();
+        // The owner is intentionally leaked by runtime_state(); leave cached
+        // shaders and resources untouched so their destructors cannot run after
+        // the dynamically loaded Luisa backend has been unloaded.
+        runtime_directory_.clear();
+        backend_name_.clear();
+    }
 };
 
 RuntimeState &runtime_state() {
@@ -366,7 +370,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
     }
 
     auto &runtime = runtime_state();
-    runtime.ensure(dispatch.runtime_directory);
+    runtime.ensure(dispatch.runtime_directory, dispatch.backend_name);
     auto &device = runtime.device();
     auto &stream = runtime.stream();
     auto *cached = dispatch.shader_cache_key == 0u ? nullptr : runtime.find(dispatch.shader_cache_key);

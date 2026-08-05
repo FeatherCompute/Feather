@@ -38,6 +38,7 @@ struct DispatchInputs {
     uint32_t logical_y = 1;
     uint32_t logical_z = 1;
     uint64_t shader_cache_key = 0;
+    std::string backend_name = "vk";
     std::string runtime_directory;
 };
 

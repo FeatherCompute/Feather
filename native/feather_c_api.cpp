@@ -5610,6 +5610,34 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     }
 
     const auto* configured_runtime = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
+    const auto* configured_backend = std::getenv("FEATHER_LUISA_BACKEND");
+    auto backend_name = configured_backend == nullptr || configured_backend[0] == '\0'
+                            ? std::string_view{"vk"}
+                            : std::string_view{configured_backend};
+    if (backend_name == "vulkan") backend_name = "vk";
+    if (backend_name != "vk" && backend_name != "metal" &&
+        backend_name != "cuda" && backend_name != "hip") {
+        return fail(FE_ERROR_INVALID_ARGUMENT,
+                    "FEATHER_LUISA_BACKEND must be one of: vk, metal, cuda, hip.");
+    }
+#if !FEATHER_HAS_LUISA_METAL
+    if (backend_name == "metal") {
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                    "Luisa Metal backend was not built for this Feather runtime.");
+    }
+#endif
+#if !FEATHER_HAS_LUISA_CUDA
+    if (backend_name == "cuda") {
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                    "Luisa CUDA backend was not built; configure FEATHER_LUISA_ENABLE_CUDA with CUDA Toolkit 12.1+.");
+    }
+#endif
+#if !FEATHER_HAS_LUISA_HIP
+    if (backend_name == "hip") {
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                    "Luisa HIP backend was not built; configure FEATHER_LUISA_ENABLE_HIP with ROCm/HIP and hiprtc.");
+    }
+#endif
     uint64_t shader_cache_key = 1469598103934665603ull;
     const auto mix_cache_key = [&](uint64_t value) {
         shader_cache_key ^= value;
@@ -5658,6 +5686,7 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         .logical_y = logical_y,
         .logical_z = logical_z,
         .shader_cache_key = shader_cache_key,
+        .backend_name = std::string{backend_name},
         .runtime_directory = configured_runtime != nullptr && configured_runtime[0] != '\0'
                                  ? configured_runtime
                                  : Feather::Luisa::RuntimeDirectory()};
