@@ -460,3 +460,5 @@ if [[ "$RID" == linux-* ]]; then
 fi
 
 echo "Staged $target"
+echo "Staged native assets for $RID:"
+find "$(dirname "$target")" -maxdepth 1 -type f -exec basename {} \; | sort
