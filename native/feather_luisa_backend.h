@@ -61,6 +61,7 @@ struct RasterDispatchInputs {
     uint32_t scissor_height = 1;
     uint32_t cull_mode = 0;
     uint32_t front_face = 0;
+    uint32_t polygon_mode = 0;
     uint32_t depth_test = 0;
     uint32_t depth_write = 0;
     uint32_t depth_compare = 1;

@@ -10758,9 +10758,9 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
 
 FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     if (pipeline.topology != 0u || draw.color_target_count != pipeline.color_attachment_count ||
-        pipeline.sample_count != 1u || pipeline.polygon_mode != 0u) {
+        pipeline.sample_count != 1u) {
         return fail(FE_ERROR_UNSUPPORTED,
-                    "compute raster supports matching color targets and single-sample filled triangle lists");
+                    "compute raster supports matching color targets and single-sample triangle lists");
     }
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
@@ -10925,6 +10925,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         draw.scissor_enabled != 0u ? draw.scissor_height : target.height,
         pipeline.cull_mode,
         pipeline.front_face,
+        pipeline.polygon_mode,
         pipeline.depth_test,
         pipeline.depth_write,
         pipeline.depth_compare,

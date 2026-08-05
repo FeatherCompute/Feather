@@ -743,7 +743,8 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                                        BufferFloat depth_buffer, BufferUInt stencil_buffer,
                                        UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
                                        UInt scissor_x, UInt scissor_y, UInt scissor_width, UInt scissor_height,
-                                       UInt cull_mode, UInt front_face, UInt depth_test, UInt depth_write,
+                                       UInt cull_mode, UInt front_face, UInt polygon_mode,
+                                       UInt depth_test, UInt depth_write,
                                        UInt depth_compare, UInt depth_clamp, UInt stencil_test,
                                        UInt stencil_front_fail, UInt stencil_front_pass,
                                        UInt stencil_front_depth_fail, UInt stencil_front_compare,
@@ -812,9 +813,30 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                 const auto top_left_ab = ite(positive,
                     (pb.y > pa.y) | ((pb.y == pa.y) & (pb.x < pa.x)),
                     (pa.y > pb.y) | ((pa.y == pb.y) & (pa.x < pb.x)));
-                const auto covered = ((edge0 > 0.0f) | ((edge0 == 0.0f) & top_left_bc)) &
-                                     ((edge1 > 0.0f) | ((edge1 == 0.0f) & top_left_ca)) &
-                                     ((edge2 > 0.0f) | ((edge2 == 0.0f) & top_left_ab));
+                const auto filled = ((edge0 > 0.0f) | ((edge0 == 0.0f) & top_left_bc)) &
+                                    ((edge1 > 0.0f) | ((edge1 == 0.0f) & top_left_ca)) &
+                                    ((edge2 > 0.0f) | ((edge2 == 0.0f) & top_left_ab));
+                Bool covered = filled;
+                $if (polygon_mode == 1u) {
+                    const auto distance0 = edge0 / length(pc - pb);
+                    const auto distance1 = edge1 / length(pa - pc);
+                    const auto distance2 = edge2 / length(pb - pa);
+                    const auto nearest01 = ite(distance0 < distance1, distance0, distance1);
+                    const auto nearest = ite(nearest01 < distance2, nearest01, distance2);
+                    const auto viewport_min = ite(viewport_width < viewport_height,
+                                                   viewport_width, viewport_height);
+                    const auto line_width = 2.0f /
+                        viewport_min.cast<float>();
+                    covered = filled & (nearest <= line_width);
+                }
+                $elif (polygon_mode == 2u) {
+                    const auto half_pixel = make_float2(1.0f / viewport_width.cast<float>(),
+                                                        1.0f / viewport_height.cast<float>());
+                    const auto near_a = all(abs(p - pa) <= half_pixel);
+                    const auto near_b = all(abs(p - pb) <= half_pixel);
+                    const auto near_c = all(abs(p - pc) <= half_pixel);
+                    covered = near_a | near_b | near_c;
+                };
                 $if (covered) {
                     const auto inverse_area = 1.0f / abs(area);
                     const auto w0 = edge0 * inverse_area;
@@ -895,7 +917,8 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
     stream << shader(image, vertex_buffer, varying_buffer, coverage_buffer, depth_buffer, stencil_buffer,
                      raster.viewport_x, raster.viewport_y, raster.viewport_width, raster.viewport_height,
                      raster.scissor_x, raster.scissor_y, raster.scissor_width, raster.scissor_height,
-                     raster.cull_mode, raster.front_face, raster.depth_test, raster.depth_write,
+                     raster.cull_mode, raster.front_face, raster.polygon_mode,
+                     raster.depth_test, raster.depth_write,
                      raster.depth_compare, raster.depth_clamp, raster.stencil_test,
                      raster.stencil_front_fail, raster.stencil_front_pass,
                      raster.stencil_front_depth_fail, raster.stencil_front_compare,
