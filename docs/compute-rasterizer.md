@@ -181,9 +181,10 @@ Twenty-one dedicated GPU tests pass on both native Metal and Vulkan/MoltenVK.
 They prove coverage/interpolation, depth and stencil across draws, viewport,
 scissor, cull and polygon modes, generated stage FEIR, sampling/derivatives,
 aligned cross-stage constants, blend/write masks, MRT, instancing, shared-edge
-ownership, and indexed assembly. The implementation still stages intermediate
-buffers through host memory and synchronizes each stage. This is a correctness
-architecture slice, not the device-resident tiled design described above.
+ownership, and indexed assembly. The optimized path retains transformed
+vertices, raster scratch, and color targets on the device and submits the
+no-depth stages to one ordered stream. See [Compute Rasterizer Performance](rasterizer-perf.md)
+for the fresh-process benchmark and stage profile.
 
 ## Presentation Status
 
@@ -210,14 +211,10 @@ the native Metal Luisa backend:
 | EasyGPU | `TypedEasyGpu` | 2.892, 0.359, 0.345, 0.394, 0.732 | 0.394 | 1.0x |
 | Compute raster (Metal) | `Luisa` | 8.965, 8.190, 9.330, 7.763, 8.368 | 8.368 | 21.2x |
 
-These are end-to-end synchronous draw times, not GPU timestamp queries. The
-compute number includes three dispatches, repeated resource staging, host
-readback of transformed/interpolated values, and synchronization between
-stages. Vertex and fragment shaders/resources are cached for identical FEIR,
-layout, dimensions, fixed state, and embedded push-constant values; this reduced
-the previous 15.946 ms median but does not remove staging. Device-resident
-scratch, runtime (rather than embedded) uniforms, fused raster/fragment
-execution, and tile binning remain required for a useful throughput comparison.
+These rejected-round numbers are retained as the optimization baseline. The R1
+implementation removes intermediate host round trips and reaches the acceptance
+target; current raw runs and the complete evolution table live in
+[Compute Rasterizer Performance](rasterizer-perf.md).
 
 ## Risks and Controls
 

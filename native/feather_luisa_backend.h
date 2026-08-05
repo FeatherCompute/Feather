@@ -4,6 +4,7 @@
 #include "feather_typed_ir.h"
 #include "feather_typed_ir_lowerer.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -23,6 +24,9 @@ struct HostBufferBinding {
     uint8_t access = 0;
     uint32_t stride = 0;
     std::vector<unsigned char>* bytes = nullptr;
+    uint64_t resident_key = 0;
+    bool upload = true;
+    bool download = true;
 };
 
 struct HostTextureBinding {
@@ -35,6 +39,9 @@ struct HostTextureBinding {
     uint32_t mip_levels = 1;
     uint32_t pixel_format = 0;
     std::vector<unsigned char>* bytes = nullptr;
+    uint64_t resident_key = 0;
+    bool upload = true;
+    bool download = true;
 };
 
 struct DispatchInputs {
@@ -47,6 +54,7 @@ struct DispatchInputs {
     uint64_t shader_cache_key = 0;
     std::string backend_name = std::string{DefaultBackendName};
     std::string runtime_directory;
+    bool synchronize = true;
 };
 
 struct RasterDispatchInputs {
@@ -86,6 +94,8 @@ struct RasterDispatchInputs {
     float clear_color_g = 0.0f;
     float clear_color_b = 0.0f;
     float clear_color_a = 1.0f;
+    uint32_t vertices_per_instance = 3;
+    uint32_t vertex_domain = 3;
 };
 
 struct AdGradientBinding {
@@ -110,10 +120,15 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
 
 // Experimental compute triangle assembly/raster stage between generated graphics FEIR stages.
 bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
+                            std::span<const uint32_t> vertex_indices,
                             HostTextureBinding* depth, const RasterDispatchInputs& raster,
                             const DispatchInputs& dispatch,
+                            uint64_t varying_resident_key, uint64_t coverage_resident_key,
                             std::vector<unsigned char>* fragment_varyings,
                             std::vector<unsigned char>* fragment_coverage,
                             std::string* error = nullptr);
+
+bool DownloadResidentTexture(uint64_t resident_key, void* destination, size_t size,
+                             std::string* error = nullptr);
 
 } // namespace Feather::Luisa

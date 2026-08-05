@@ -13,6 +13,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 
 #if defined(_WIN32)
@@ -219,13 +220,38 @@ std::optional<PixelStorage> pixel_storage(uint32_t format) {
 
 using RuntimeTexture = std::variant<Image<float>, Volume<float>>;
 
+template<size_t>
+using RasterUIntArgument = uint32_t;
+
+template<typename>
+struct RasterShaderType;
+
+template<size_t... I>
+struct RasterShaderType<std::index_sequence<I...>> {
+    using type = Shader2D<ByteBuffer, Buffer<uint32_t>, ByteBuffer, Buffer<float>,
+                          Buffer<float>, Buffer<uint32_t>, RasterUIntArgument<I>..., float>;
+};
+
+using RasterShader = RasterShaderType<std::make_index_sequence<29u>>::type;
+
 class RuntimeState {
 public:
     struct CachedKernel {
         std::unique_ptr<Shader3D<>> shader;
-        std::vector<std::unique_ptr<ByteBuffer>> buffers;
-        std::vector<RuntimeTexture> textures;
-        std::vector<std::unique_ptr<ByteBuffer>> gradients;
+        std::vector<ByteBuffer*> buffers;
+        std::vector<RuntimeTexture*> textures;
+        std::vector<ByteBuffer*> gradients;
+        std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
+        std::vector<RuntimeTexture> owned_textures;
+        std::vector<std::unique_ptr<ByteBuffer>> owned_gradients;
+    };
+
+    struct ResidentTexture {
+        std::unique_ptr<RuntimeTexture> resource;
+        uint8_t kind = 0;
+        PixelStorage storage = PixelStorage::BYTE1;
+        uint3 size{};
+        uint32_t mip_levels = 1;
     };
 
 private:
@@ -235,6 +261,9 @@ private:
     std::string runtime_directory_;
     std::string backend_name_;
     std::unordered_map<uint64_t, std::unique_ptr<CachedKernel>> kernels_;
+    std::unordered_map<uint64_t, std::unique_ptr<RasterShader>> raster_shaders_;
+    std::unordered_map<uint64_t, std::unique_ptr<ByteBuffer>> resident_buffers_;
+    std::unordered_map<uint64_t, ResidentTexture> resident_textures_;
 
 public:
     RuntimeState() = default;
@@ -263,9 +292,82 @@ public:
         kernels_[key] = std::move(kernel);
     }
 
+    RasterShader* find_raster(uint64_t key) noexcept {
+        const auto found = raster_shaders_.find(key);
+        return found == raster_shaders_.end() ? nullptr : found->second.get();
+    }
+
+    RasterShader* insert_raster(uint64_t key, RasterShader shader) {
+        auto entry = std::make_unique<RasterShader>(std::move(shader));
+        auto* result = entry.get();
+        raster_shaders_[key] = std::move(entry);
+        return result;
+    }
+
+    ByteBuffer* resident_buffer(uint64_t key, size_t size) {
+        if (key == 0u || size == 0u) return nullptr;
+        if (const auto found = resident_buffers_.find(key); found != resident_buffers_.end()) {
+            return found->second->size_bytes() == size ? found->second.get() : nullptr;
+        }
+        auto buffer = std::make_unique<ByteBuffer>(device_->create_byte_buffer(size));
+        auto* result = buffer.get();
+        resident_buffers_.emplace(key, std::move(buffer));
+        return result;
+    }
+
+    RuntimeTexture* resident_texture(uint64_t key, uint8_t kind, PixelStorage storage,
+                                     uint3 size, uint32_t mip_levels) {
+        if (key == 0u || size.x == 0u || size.y == 0u || size.z == 0u) return nullptr;
+        if (const auto found = resident_textures_.find(key); found != resident_textures_.end()) {
+            const auto& entry = found->second;
+            return entry.kind == kind && entry.storage == storage && entry.size.x == size.x &&
+                           entry.size.y == size.y && entry.size.z == size.z &&
+                           entry.mip_levels == mip_levels
+                       ? entry.resource.get()
+                       : nullptr;
+        }
+        std::unique_ptr<RuntimeTexture> resource;
+        if (kind == kResourceTexture2D) {
+            resource = std::make_unique<RuntimeTexture>(
+                device_->create_image<float>(storage, make_uint2(size), mip_levels, true));
+        } else if (kind == kResourceTexture3D) {
+            resource = std::make_unique<RuntimeTexture>(
+                device_->create_volume<float>(storage, size, mip_levels, true));
+        } else {
+            return nullptr;
+        }
+        auto* result = resource.get();
+        resident_textures_.emplace(
+            key, ResidentTexture{std::move(resource), kind, storage, size, mip_levels});
+        return result;
+    }
+
+    bool download_texture(uint64_t key, void* destination, size_t size, std::string* error) {
+        const auto found = resident_textures_.find(key);
+        if (found == resident_textures_.end() || destination == nullptr) {
+            if (error != nullptr) *error = "Luisa resident texture is unavailable";
+            return false;
+        }
+        bool size_matches = false;
+        std::visit([&](auto& texture) {
+            const auto expected = pixel_storage_size(found->second.storage, found->second.size);
+            size_matches = expected == size;
+            if (size_matches) *stream_ << texture.copy_to(destination);
+        }, *found->second.resource);
+        if (!size_matches) {
+            if (error != nullptr) *error = "Luisa resident texture size changed";
+            return false;
+        }
+        *stream_ << synchronize();
+        return true;
+    }
+
     void reset() noexcept {
         if (stream_ != nullptr) stream_->synchronize();
         kernels_.clear();
+        raster_shaders_.clear();
+        resident_buffers_.clear();
+        resident_textures_.clear();
         stream_.reset();
         device_.reset();
         context_.reset();
@@ -306,6 +408,11 @@ void Abandon() noexcept {
     runtime_state().abandon();
 }
 
+bool DownloadResidentTexture(uint64_t resident_key, void* destination, size_t size, std::string* error) {
+    if (error != nullptr) error->clear();
+    return runtime_state().download_texture(resident_key, destination, size, error);
+}
+
 std::string RuntimeDirectory() {
 #if defined(_WIN32)
     HMODULE module = nullptr;
@@ -338,6 +445,10 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               std::span<AdGradientBinding> gradients, std::string* error) {
     if (error != nullptr)
         error->clear();
+    if (!dispatch.synchronize && !gradients.empty()) {
+        if (error != nullptr) *error = "asynchronous Luisa dispatch cannot return gradients";
+        return false;
+    }
     ensure_luisa_spirv_optimization_preset();
     xir::Module xir_module;
     std::vector<BufferLayout> buffer_layouts;
@@ -371,11 +482,11 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         return false;
     }
 
-    auto &runtime = runtime_state();
-    runtime.ensure(dispatch.runtime_directory, dispatch.backend_name);
-    auto &device = runtime.device();
-    auto &stream = runtime.stream();
-    auto *cached = dispatch.shader_cache_key == 0u ? nullptr : runtime.find(dispatch.shader_cache_key);
+    auto &state = runtime_state();
+    state.ensure(dispatch.runtime_directory, dispatch.backend_name);
+    auto &device = state.device();
+    auto &stream = state.stream();
+    auto *cached = dispatch.shader_cache_key == 0u ? nullptr : state.find(dispatch.shader_cache_key);
     bool cache_hit = cached != nullptr && cached->shader != nullptr;
     std::vector<ByteBuffer *> runtime_buffers;
     std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
@@ -417,7 +528,15 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                     if (error != nullptr) *error = "Luisa shader cache resource layout changed";
                     return false;
                 }
-                runtime = &cached->textures[texture_index];
+                runtime = cached->textures[texture_index];
+            } else if (found->resident_key != 0u) {
+                runtime = state.resident_texture(
+                    found->resident_key, resource.kind, *storage,
+                    make_uint3(found->width, found->height, found->depth), found->mip_levels);
+                if (runtime == nullptr) {
+                    if (error != nullptr) *error = "Luisa resident texture layout changed";
+                    return false;
+                }
             } else if (resource.kind == kResourceTexture2D) {
                 owned_textures.emplace_back(device.create_image<float>(
                     *storage, luisa::make_uint2(found->width, found->height), found->mip_levels, true));
@@ -429,7 +548,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             runtime_textures.push_back(runtime);
             std::visit([&](auto& texture) {
-                stream << texture.copy_from(found->bytes->data()) << synchronize();
+                if (found->upload) stream << texture.copy_from(found->bytes->data());
                 if (!cache_hit)
                     bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
             }, *runtime);
@@ -456,12 +575,14 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         const auto count = found->bytes->size() / found->stride;
         staged_bytes.emplace_back(count * layout->device_type->size(), 0u);
         auto& packed = staged_bytes.back();
-        for (size_t i = 0; i < count; ++i) {
-            if (!repack_value(module, layout->feir_type_id, layout->device_type,
-                              found->bytes->data() + i * found->stride,
-                              packed.data() + i * layout->device_type->size(), true)) {
-                if (error != nullptr) *error = "Luisa failed to repack a Feather buffer element";
-                return false;
+        if (found->upload) {
+            for (size_t i = 0; i < count; ++i) {
+                if (!repack_value(module, layout->feir_type_id, layout->device_type,
+                                  found->bytes->data() + i * found->stride,
+                                  packed.data() + i * layout->device_type->size(), true)) {
+                    if (error != nullptr) *error = "Luisa failed to repack a Feather buffer element";
+                    return false;
+                }
             }
         }
         ByteBuffer *runtime = nullptr;
@@ -470,12 +591,18 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 if (error != nullptr) *error = "Luisa shader cache buffer layout changed";
                 return false;
             }
-            runtime = cached->buffers[buffer_index].get();
+            runtime = cached->buffers[buffer_index];
+        } else if (found->resident_key != 0u) {
+            runtime = state.resident_buffer(found->resident_key, packed.size());
+            if (runtime == nullptr) {
+                if (error != nullptr) *error = "Luisa resident buffer layout changed";
+                return false;
+            }
         } else {
             owned_buffers.emplace_back(std::make_unique<ByteBuffer>(device.create_byte_buffer(packed.size())));
             runtime = owned_buffers.back().get();
         }
-        stream << runtime->copy_from(packed.data()) << synchronize();
+        if (found->upload) stream << runtime->copy_from(packed.data());
         if (!cache_hit)
             bound_arguments.emplace_back(
                 luisa::compute::Function::BufferBinding{runtime->handle(), 0u, runtime->size_bytes()});
@@ -503,13 +630,13 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 if (error != nullptr) *error = "Luisa shader cache gradient layout changed";
                 return false;
             }
-            runtime = cached->gradients[gradient_index].get();
+            runtime = cached->gradients[gradient_index];
         } else {
             owned_gradients.emplace_back(
                 std::make_unique<ByteBuffer>(device.create_byte_buffer(staged_gradients.back().size())));
             runtime = owned_gradients.back().get();
         }
-        stream << runtime->copy_from(staged_gradients.back().data()) << synchronize();
+        stream << runtime->copy_from(staged_gradients.back().data());
         if (!cache_hit)
             bound_arguments.emplace_back(
                 luisa::compute::Function::BufferBinding{runtime->handle(), 0u, runtime->size_bytes()});
@@ -602,17 +729,19 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         if (dispatch.shader_cache_key != 0u) {
             auto entry = std::make_unique<RuntimeState::CachedKernel>();
             entry->shader = std::move(shader);
-            entry->buffers = std::move(owned_buffers);
-            entry->textures = std::move(owned_textures);
-            entry->gradients = std::move(owned_gradients);
-            runtime.insert(dispatch.shader_cache_key, std::move(entry));
-            cached = runtime.find(dispatch.shader_cache_key);
+            entry->buffers = runtime_buffers;
+            entry->textures = runtime_textures;
+            entry->gradients = runtime_gradients;
+            entry->owned_buffers = std::move(owned_buffers);
+            entry->owned_textures = std::move(owned_textures);
+            entry->owned_gradients = std::move(owned_gradients);
+            state.insert(dispatch.shader_cache_key, std::move(entry));
+            cached = state.find(dispatch.shader_cache_key);
             cache_hit = true;
         }
     }
     auto &cached_shader = cache_hit ? *cached->shader : *shader;
-    stream << cached_shader().dispatch(luisa::make_uint3(dispatch.logical_x, dispatch.logical_y, dispatch.logical_z))
-           << synchronize();
+    stream << cached_shader().dispatch(luisa::make_uint3(dispatch.logical_x, dispatch.logical_y, dispatch.logical_z));
 
     size_t staged_index = 0;
     for (const auto& resource : lowering.resources) {
@@ -620,10 +749,33 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             continue;
         auto* found = staged_bindings[staged_index];
         auto* runtime = runtime_buffers[staged_index++];
-        if (resource.access != kAccessWrite && resource.access != kAccessReadWrite)
+        if ((resource.access != kAccessWrite && resource.access != kAccessReadWrite) || !found->download)
             continue;
         auto& packed = staged_bytes[staged_index - 1u];
-        stream << runtime->copy_to(packed.data()) << synchronize();
+        stream << runtime->copy_to(packed.data());
+    }
+    size_t output_texture_index = 0;
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kResourceTexture2D && resource.kind != kResourceTexture3D) continue;
+        auto* found = staged_textures[output_texture_index];
+        auto* runtime = runtime_textures[output_texture_index++];
+        if ((resource.access != kAccessWrite && resource.access != kAccessReadWrite) || !found->download) continue;
+        std::visit([&](auto& texture) {
+            stream << texture.copy_to(found->bytes->data());
+        }, *runtime);
+    }
+    for (size_t i = 0; i < gradient_layouts.size(); ++i) {
+        auto& packed = staged_gradients[i];
+        stream << runtime_gradients[i]->copy_to(packed.data());
+    }
+    if (dispatch.synchronize) stream << synchronize();
+
+    staged_index = 0;
+    for (const auto& resource : lowering.resources) {
+        if (resource.kind != kResourceBuffer) continue;
+        auto* found = staged_bindings[staged_index];
+        auto& packed = staged_bytes[staged_index++];
+        if ((resource.access != kAccessWrite && resource.access != kAccessReadWrite) || !found->download) continue;
         const auto layout = std::find_if(buffer_layouts.begin(), buffer_layouts.end(),
                                          [&](const auto& candidate) { return candidate.binding == resource.binding; });
         const auto count = found->bytes->size() / found->stride;
@@ -636,19 +788,8 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
         }
     }
-    size_t output_texture_index = 0;
-    for (const auto& resource : lowering.resources) {
-        if (resource.kind != kResourceTexture2D && resource.kind != kResourceTexture3D) continue;
-        auto* found = staged_textures[output_texture_index];
-        auto* runtime = runtime_textures[output_texture_index++];
-        if (resource.access != kAccessWrite && resource.access != kAccessReadWrite) continue;
-        std::visit([&](auto& texture) {
-            stream << texture.copy_to(found->bytes->data()) << synchronize();
-        }, *runtime);
-    }
     for (size_t i = 0; i < gradient_layouts.size(); ++i) {
         auto& packed = staged_gradients[i];
-        stream << runtime_gradients[i]->copy_to(packed.data()) << synchronize();
         auto found = std::find_if(gradients.begin(), gradients.end(), [&](const auto& gradient) {
             return gradient.source_binding == gradient_layouts[i].source_binding;
         });
@@ -664,8 +805,10 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
 }
 
 bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
+                            std::span<const uint32_t> vertex_indices,
                             HostTextureBinding* depth, const RasterDispatchInputs& raster,
                             const DispatchInputs& dispatch,
+                            uint64_t varying_resident_key, uint64_t coverage_resident_key,
                             std::vector<unsigned char>* fragment_varyings,
                             std::vector<unsigned char>* fragment_coverage,
                             std::string* error) {
@@ -674,7 +817,12 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
     if (error != nullptr) error->clear();
     if (vertices.bytes == nullptr || target.bytes == nullptr || fragment_varyings == nullptr ||
         fragment_coverage == nullptr || vertices.stride < sizeof(float) * 4u || raster.vertex_count < 3u ||
-        raster.vertex_count % 3u != 0u || vertices.bytes->size() < vertices.stride * raster.vertex_count ||
+        raster.vertex_count % 3u != 0u || vertices.resident_key == 0u || vertex_indices.empty() ||
+        raster.vertices_per_instance == 0u || raster.vertex_domain == 0u ||
+        raster.vertex_count % raster.vertices_per_instance != 0u ||
+        vertex_indices.size() != raster.vertices_per_instance ||
+        vertices.bytes->size() < vertices.stride * raster.vertex_domain *
+                                     (raster.vertex_count / raster.vertices_per_instance) ||
         target.width == 0u || target.height == 0u ||
         target.depth != 1u) {
         if (error != nullptr) *error = "vertical raster bindings are incomplete";
@@ -706,13 +854,26 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
         if (error != nullptr) *error = "vertical raster varying stride must be float-aligned";
         return false;
     }
-    auto vertex_buffer = device.create_byte_buffer(vertices.stride * raster.vertex_count);
+    auto* vertex_buffer = runtime.resident_buffer(vertices.resident_key, vertices.bytes->size());
+    const auto index_resident_key = coverage_resident_key ^ 0x696e6469636573ull;
+    auto* index_bytes = runtime.resident_buffer(index_resident_key, vertex_indices.size_bytes());
+    if (vertex_buffer == nullptr || index_bytes == nullptr) {
+        if (error != nullptr) *error = "vertical raster resident vertex/index buffers are unavailable";
+        return false;
+    }
+    auto index_buffer = index_bytes->view().as<uint32_t>();
     std::vector<unsigned char> host_varyings(pixel_count * vertices.stride, 0u);
     std::vector<float> host_coverage(pixel_count, 0.0f);
-    auto varying_buffer = device.create_byte_buffer(host_varyings.size());
-    auto coverage_buffer = device.create_buffer<float>(pixel_count);
-    std::vector<float> host_depth(pixel_count, 1.0f);
-    std::vector<uint32_t> host_stencil(pixel_count, 0u);
+    auto* varying_buffer = runtime.resident_buffer(varying_resident_key, host_varyings.size());
+    auto* coverage_bytes = runtime.resident_buffer(coverage_resident_key, host_coverage.size() * sizeof(float));
+    if (varying_buffer == nullptr || coverage_bytes == nullptr) {
+        if (error != nullptr) *error = "vertical raster resident fragment buffers are unavailable";
+        return false;
+    }
+    auto coverage_buffer = coverage_bytes->view().as<float>();
+    const auto depth_element_count = depth == nullptr ? 1u : pixel_count;
+    std::vector<float> host_depth(depth_element_count, 1.0f);
+    std::vector<uint32_t> host_stencil(depth_element_count, 0u);
     if (depth != nullptr) {
         if (depth->pixel_format == 101u) {
             std::memcpy(host_depth.data(), depth->bytes->data(), pixel_count * sizeof(float));
@@ -725,21 +886,40 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             }
         }
     }
-    auto depth_buffer = device.create_buffer<float>(pixel_count);
-    auto stencil_buffer = device.create_buffer<uint32_t>(pixel_count);
-    auto storage = target.pixel_format == 10u ? PixelStorage::FLOAT4 : PixelStorage::BYTE4;
-    auto image = device.create_image<float>(storage, make_uint2(target.width, target.height), 1u, true);
-    stream << vertex_buffer.copy_from(vertices.bytes->data())
-           << varying_buffer.copy_from(host_varyings.data())
-           << coverage_buffer.copy_from(host_coverage.data())
-           << depth_buffer.copy_from(host_depth.data())
-           << stencil_buffer.copy_from(host_stencil.data())
-           << image.copy_from(target.bytes->data());
+    const auto depth_resident_key = coverage_resident_key ^ 0x6465707468ull;
+    const auto stencil_resident_key = coverage_resident_key ^ 0x7374656e63696cull;
+    auto* depth_bytes = runtime.resident_buffer(depth_resident_key, depth_element_count * sizeof(float));
+    auto* stencil_bytes = runtime.resident_buffer(stencil_resident_key, depth_element_count * sizeof(uint32_t));
+    if (depth_bytes == nullptr || stencil_bytes == nullptr) {
+        if (error != nullptr) *error = "vertical raster resident depth buffers are unavailable";
+        return false;
+    }
+    auto depth_buffer = depth_bytes->view().as<float>();
+    auto stencil_buffer = stencil_bytes->view().as<uint32_t>();
+    stream << index_bytes->copy_from(vertex_indices.data());
+    if (depth != nullptr) {
+        stream << depth_buffer.copy_from(host_depth.data())
+               << stencil_buffer.copy_from(host_stencil.data());
+    }
 
     const auto varying_stride = vertices.stride;
     const auto vertex_count = raster.vertex_count;
-    auto shader = device.compile<2>([varying_stride, vertex_count](ImageFloat output, ByteBufferVar vertex_buffer,
-                                       ByteBufferVar varying_buffer, BufferFloat coverage_buffer,
+    const auto has_depth = depth != nullptr;
+    uint64_t raster_shader_key = 1469598103934665603ull;
+    const auto mix_shader_key = [&](uint64_t value) {
+        raster_shader_key ^= value;
+        raster_shader_key *= 1099511628211ull;
+    };
+    mix_shader_key(varying_stride);
+    mix_shader_key(vertex_count);
+    mix_shader_key(raster.vertices_per_instance);
+    mix_shader_key(raster.vertex_domain);
+    mix_shader_key(has_depth ? 1u : 0u);
+    auto* shader = runtime.find_raster(raster_shader_key);
+    if (shader == nullptr) {
+        auto compiled = device.compile<2>([varying_stride, vertex_count, vertices_per_instance = raster.vertices_per_instance,
+                                           vertex_domain = raster.vertex_domain, has_depth](ByteBufferVar vertex_buffer,
+                                       BufferUInt index_buffer, ByteBufferVar varying_buffer, BufferFloat coverage_buffer,
                                        BufferFloat depth_buffer, BufferUInt stencil_buffer,
                                        UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
                                        UInt scissor_x, UInt scissor_y, UInt scissor_width, UInt scissor_height,
@@ -751,20 +931,20 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                                        UInt stencil_back_fail, UInt stencil_back_pass,
                                        UInt stencil_back_depth_fail, UInt stencil_back_compare,
                                        UInt stencil_read_mask, UInt stencil_write_mask, UInt stencil_reference,
-                                       UInt clear_depth, UInt clear_stencil, Float clear_depth_value,
-                                       UInt clear_color, Float4 clear_color_value) noexcept {
+                                       UInt clear_depth, UInt clear_stencil, Float clear_depth_value) noexcept {
         const auto pixel = dispatch_id().xy();
         const auto pixel_index = pixel.y * dispatch_size().x + pixel.x;
         coverage_buffer.write(pixel_index, 0.0f);
-        $if (clear_color != 0u) {
-            output.write(pixel, clear_color_value);
-        };
-        Float current_depth = depth_buffer.read(pixel_index);
+        Float current_depth = def(1.0f);
+        UInt current_stencil = def(0u);
+        if (has_depth) {
+            current_depth = depth_buffer.read(pixel_index);
+            current_stencil = stencil_buffer.read(pixel_index);
+        }
         $if (clear_depth != 0u) {
             current_depth = clear_depth_value;
             depth_buffer.write(pixel_index, current_depth);
         };
-        UInt current_stencil = stencil_buffer.read(pixel_index);
         $if (clear_stencil != 0u) {
             current_stencil = 0u;
             stencil_buffer.write(pixel_index, current_stencil);
@@ -780,10 +960,15 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             viewport_pixel.x / viewport_size.x * 2.0f - 1.0f,
             1.0f - viewport_pixel.y / viewport_size.y * 2.0f);
         for (uint32_t triangle = 0u; triangle < vertex_count / 3u; ++triangle) {
-            const auto triangle_base = triangle * 3u * varying_stride;
-            const auto a = vertex_buffer.read<float4>(triangle_base);
-            const auto b = vertex_buffer.read<float4>(triangle_base + varying_stride);
-            const auto c = vertex_buffer.read<float4>(triangle_base + varying_stride * 2u);
+            const auto raster_base = triangle * 3u;
+            const auto instance = raster_base / vertices_per_instance;
+            const auto local_base = raster_base % vertices_per_instance;
+            const auto source_a = instance * vertex_domain + index_buffer.read(local_base);
+            const auto source_b = instance * vertex_domain + index_buffer.read(local_base + 1u);
+            const auto source_c = instance * vertex_domain + index_buffer.read(local_base + 2u);
+            const auto a = vertex_buffer.read<float4>(source_a * varying_stride);
+            const auto b = vertex_buffer.read<float4>(source_b * varying_stride);
+            const auto c = vertex_buffer.read<float4>(source_c * varying_stride);
             const auto valid_w = a.w > 1e-7f & b.w > 1e-7f & c.w > 1e-7f;
             const auto pa = a.xy() / a.w;
             const auto pb = b.xy() / b.w;
@@ -898,9 +1083,9 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         const auto output_base = pixel_index * varying_stride;
                         for (uint32_t lane = 0u; lane < varying_stride / sizeof(float); ++lane) {
                             const auto offset = lane * static_cast<uint32_t>(sizeof(float));
-                            const auto va = vertex_buffer.read<float>(triangle_base + offset);
-                            const auto vb = vertex_buffer.read<float>(triangle_base + varying_stride + offset);
-                            const auto vc = vertex_buffer.read<float>(triangle_base + varying_stride * 2u + offset);
+                            const auto va = vertex_buffer.read<float>(source_a * varying_stride + offset);
+                            const auto vb = vertex_buffer.read<float>(source_b * varying_stride + offset);
+                            const auto vc = vertex_buffer.read<float>(source_c * varying_stride + offset);
                             varying_buffer.write(output_base + offset,
                                                  (va * q0 + vb * q1 + vc * q2) / (q0 + q1 + q2));
                         }
@@ -914,7 +1099,9 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             };
         }
     });
-    stream << shader(image, vertex_buffer, varying_buffer, coverage_buffer, depth_buffer, stencil_buffer,
+        shader = runtime.insert_raster(raster_shader_key, std::move(compiled));
+    }
+    stream << (*shader)(*vertex_buffer, index_buffer, *varying_buffer, coverage_buffer, depth_buffer, stencil_buffer,
                      raster.viewport_x, raster.viewport_y, raster.viewport_width, raster.viewport_height,
                      raster.scissor_x, raster.scissor_y, raster.scissor_width, raster.scissor_height,
                      raster.cull_mode, raster.front_face, raster.polygon_mode,
@@ -925,20 +1112,18 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                      raster.stencil_back_fail, raster.stencil_back_pass,
                      raster.stencil_back_depth_fail, raster.stencil_back_compare,
                      raster.stencil_read_mask, raster.stencil_write_mask, raster.stencil_reference,
-                     raster.clear_depth, raster.clear_stencil, raster.clear_depth_value,
-                     raster.clear_color,
-                     make_float4(raster.clear_color_r, raster.clear_color_g,
-                                 raster.clear_color_b, raster.clear_color_a))
-                  .dispatch(target.width, target.height)
-           << image.copy_to(target.bytes->data())
-           << varying_buffer.copy_to(host_varyings.data())
-           << coverage_buffer.copy_to(host_coverage.data());
+                     raster.clear_depth, raster.clear_stencil, raster.clear_depth_value)
+                  .dispatch(target.width, target.height);
     if (depth != nullptr) {
-        if (depth->pixel_format == 101u) stream << depth_buffer.copy_to(depth->bytes->data());
-        else stream << depth_buffer.copy_to(host_depth.data())
-                    << stencil_buffer.copy_to(host_stencil.data());
+        if (depth->pixel_format == 101u) stream << depth_bytes->copy_to(depth->bytes->data());
+        else stream << depth_bytes->copy_to(host_depth.data())
+                    << stencil_bytes->copy_to(host_stencil.data());
     }
-    stream << synchronize();
+    const auto* profile_stages = std::getenv("FEATHER_RASTER_PROFILE_STAGES");
+    if (depth != nullptr || (profile_stages != nullptr && profile_stages[0] != '\0' &&
+                             std::strcmp(profile_stages, "0") != 0)) {
+        stream << synchronize();
+    }
     if (depth != nullptr && depth->pixel_format == 100u) {
         auto* packed = reinterpret_cast<uint32_t*>(depth->bytes->data());
         for (size_t i = 0u; i < pixel_count; ++i) {
@@ -949,7 +1134,6 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
     }
     *fragment_varyings = std::move(host_varyings);
     fragment_coverage->resize(pixel_count * sizeof(float));
-    std::memcpy(fragment_coverage->data(), host_coverage.data(), fragment_coverage->size());
     return true;
 }
 
