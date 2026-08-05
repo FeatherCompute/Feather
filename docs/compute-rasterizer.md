@@ -152,6 +152,63 @@ remain unchanged.
    current readback presenter as a transition; replace the presenter with a
    backend-neutral shared texture/swapchain path before deleting EasyGPU.
 
+## Implemented Slice (M3.5)
+
+The implementation is available behind `FEATHER_GRAPHICS_COMPUTE=1`; the
+default remains EasyGPU. It executes generated vertex FEIR as a one-dimensional
+Luisa compute dispatch, rasterizes a triangle list with a pixel-owned Luisa DSL
+kernel, and executes generated fragment FEIR as a two-dimensional compute
+dispatch. Stage resources and packed push constants use the same generated
+bindings as the public graphics API.
+
+The raster stage currently provides:
+
+- non-indexed and `ushort`/`uint` indexed triangle lists, including
+  `FirstVertex`, `FirstIndex`, and `VertexOffset`;
+- position-first all-float structured varyings, perspective-correct
+  interpolation, viewport, scissor, front-face selection, and culling;
+- optional D32Float compare/write with clear/load behavior;
+- one RGBA8, BGRA8, or RGBA32Float color target and clear/load behavior;
+- generated fragment push constants and sampled `Texture2D`/sampler bindings.
+
+Dedicated Vulkan/MoltenVK GPU tests prove coverage, interpolation, depth across
+draws, viewport/scissor/cull, actual vertex and fragment FEIR execution,
+sampled-texture execution, structured varyings, multiple triangles, and indexed
+assembly. The implementation still stages intermediate buffers through host
+memory and synchronizes each stage. This is a correctness architecture slice,
+not the device-resident tiled design described above.
+
+## Presentation Status
+
+`WindowGraphicsTriangle`, `WindowGraphicsTexturedQuad`, and
+`GpuTexturePresenter` still present through EasyGPU window infrastructure. A
+compute-rendered Feather texture can be synchronized back into the shared host
+texture state and then presented by that existing path, but this incurs
+readback/re-upload and does not remove the EasyGPU dependency. No window code
+was redirected in this milestone. A backend-neutral Luisa swapchain/shared-image
+presenter remains a hard requirement before EasyGPU deletion.
+
+## Benchmark
+
+`samples/GraphicsRasterBenchmark` is the reproducible microbenchmark. It draws
+one triangle to a 512x512 RGBA32Float target, performs one warmup and five
+synchronous measured draws in a fresh process, validates 105,800 visible
+pixels, and reports the median host wall time. Both routes use the same managed
+shader and workload. Results on Apple M5 via Vulkan SDK 1.4.350/MoltenVK:
+
+| Route | Dispatch path | Runs (ms) | Median (ms) | Relative |
+| --- | --- | --- | ---: | ---: |
+| EasyGPU | `TypedEasyGpu` | 0.304, 0.436, 0.219, 0.214, 0.256 | 0.256 | 1.0x |
+| Compute raster | `Luisa` | 23.303, 15.946, 16.959, 14.764, 14.347 | 15.946 | 62.3x |
+
+These are end-to-end synchronous draw times, not GPU timestamp queries. The
+compute number includes three dispatches, repeated resource staging, host
+readback of transformed/interpolated values, and synchronization between
+stages. It establishes the current product cost but does not attribute the
+slowdown to raster ALU. Device-resident scratch, cached kernels, fused
+raster/fragment execution, and tile binning are required before a useful GPU
+throughput comparison.
+
 ## Risks and Controls
 
 - **Stage lowering:** FEIR currently lowers compute entries, not graphics
@@ -173,16 +230,34 @@ remain unchanged.
 - **Presentation:** window creation/presentation still depends on EasyGPU. This
   is an explicit transition state and does not block offscreen compute raster.
 
-## Initial Capability Matrix
+## Current Capability Matrix
 
-| Capability | Vertical slice | Parity target | Cutover requirement |
-| --- | --- | --- | --- |
-| Triangle list, RGBA offscreen | Compute | Compute | Required |
-| Vertex/fragment generated FEIR | Minimal `float4` | Structured/callables | Required |
-| Barycentric interpolation | Perspective float | Structured + flat | Required |
-| Depth/cull/viewport/clip | Pending | Compute | Required |
-| SampledTexture2D | Pending | Explicit LOD/grad, then implicit | Required |
-| Indexed draws, MRT, blend, stencil | Pending | Compute | Required |
-| MSAA, line/point polygon modes | Pending | Compute | Required for full parity |
-| Vulkan and Metal | XIR design | Both backends | Required |
-| Window presentation | EasyGPU transition | Readback transition | Backend-neutral before removal |
+| Capability | M3.5 status | Cutover requirement |
+| --- | --- | --- |
+| Triangle-list RGBA offscreen | Supported; indexed/non-indexed | Optimize/tile |
+| Generated vertex/fragment FEIR | Supported for float varyings and float4 color | Add flat integer/bool fields and fragment builtins |
+| Barycentric interpolation | Perspective-correct float lanes | Add clipping-generated vertices and top-left tie rule |
+| Depth/cull/viewport/scissor | Supported for D32Float | Add depth clamp and full homogeneous clipping |
+| SampledTexture2D | `Sample` proven | Prove level/grad/mips and implement implicit derivatives |
+| Blend/MRT/stencil | Unsupported | Required |
+| MSAA, line/point/polygon modes | Unsupported | Required if API remains unchanged |
+| Instancing | Unsupported | Required |
+| Vulkan | Proven locally on MoltenVK | Prove native Vulkan CI/GPU host |
+| Metal | Not built in the tested configuration | Build and run the same GPU suite |
+| Window presentation | EasyGPU transition only | Backend-neutral presenter required |
+
+EasyGPU raster cannot be retired at this point. The blocking sequence is:
+device-resident stage handoff and kernel caching; clipping/flat interpolation
+and fragment builtins; blend/MRT/stencil/MSAA parity; neutral presentation;
+then cross-backend correctness and performance qualification.
+
+## Verification
+
+Local verification used `native/build-compute/libfeather.dylib` and its Vulkan
+runtime directory. The native `feather` target and benchmark sample build
+cleanly. With the compute route explicitly enabled, all 9 compute-raster GPU
+tests pass. With the default EasyGPU route, the full solution reports 401
+integration tests passed and the 9 opt-in compute GPU tests skipped; Graphics
+reports 7 passed and 3 opt-in window tests skipped. Existing generated graphics
+coverage separately reports 44/44 passed. Raw benchmark commands and output are
+stored under `artifacts/compute-rasterizer/`.

@@ -1,0 +1,11 @@
+command:
+DYLD_LIBRARY_PATH=/usr/local/lib:/tmp/feather-raster/native/build-compute/bin FEATHER_NATIVE_LIBRARY=/tmp/feather-raster/native/build-compute/libfeather.dylib FEATHER_GRAPHICS_COMPUTE=1 dotnet run --project samples/GraphicsRasterBenchmark/GraphicsRasterBenchmark.csproj --no-build --no-restore
+
+iteration=1 elapsed_ms=23.303
+iteration=2 elapsed_ms=15.946
+iteration=3 elapsed_ms=16.959
+iteration=4 elapsed_ms=14.764
+iteration=5 elapsed_ms=14.347
+path=Luisa
+size=512x512 warmup=1 iterations=5 visible_pixels=105800
+median_ms=15.946

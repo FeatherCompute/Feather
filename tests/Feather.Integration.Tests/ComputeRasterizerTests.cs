@@ -14,7 +14,7 @@ public sealed class ComputeRasterizerCollection
 [Collection(ComputeRasterizerCollection.Name)]
 public class ComputeRasterizerTests
 {
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerCoversTriangleAndInterpolatesVertexValues()
     {
@@ -31,20 +31,11 @@ public class ComputeRasterizerTests
         using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>();
         target.Upload([.. Enumerable.Repeat(sentinel, size * size)]);
 
-        var previous = Environment.GetEnvironmentVariable("FEATHER_GRAPHICS_COMPUTE");
-        try
-        {
-            Environment.SetEnvironmentVariable("FEATHER_GRAPHICS_COMPUTE", "1");
-            pipeline.Draw(
-                new GeneratedVertexShader(vertices.AsReadOnly()),
-                new GeneratedFragmentShader(sampler),
-                target,
-                vertexCount: 3);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("FEATHER_GRAPHICS_COMPUTE", previous);
-        }
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedFragmentShader(sampler),
+            target,
+            vertexCount: 3);
 
         var pixels = new float4[size * size];
         target.Read(pixels);
@@ -59,7 +50,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerLoadsAndTestsDepthAcrossDraws()
     {
@@ -106,7 +97,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerAppliesViewportScissorAndCull()
     {
@@ -165,7 +156,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, visible.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerExecutesVertexFeirBeforeRasterization()
     {
@@ -196,7 +187,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerExecutesFragmentFeirForCoveredPixels()
     {
@@ -221,7 +212,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerSamplesTextureInFragmentFeir()
     {
@@ -252,7 +243,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerInterpolatesStructuredVaryings()
     {
@@ -280,7 +271,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerAssemblesMultipleTriangles()
     {
@@ -314,7 +305,7 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
-    [Fact]
+    [ComputeRasterFact]
     [Trait("Category", "Gpu")]
     public void ComputeRasterizerDrawsIndexedTriangleList()
     {
@@ -401,4 +392,15 @@ public readonly partial struct ComputeRasterVaryingVertexShader(
 public readonly partial struct ComputeRasterVaryingFragmentShader : IFragmentShader<ComputeRasterVaryings>
 {
     public float4 Execute(ComputeRasterVaryings input) => input.Color;
+}
+
+public sealed class ComputeRasterFactAttribute : FactAttribute
+{
+    public ComputeRasterFactAttribute()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("FEATHER_GRAPHICS_COMPUTE"), "1", StringComparison.Ordinal))
+        {
+            Skip = "Set FEATHER_GRAPHICS_COMPUTE=1 to run compute raster GPU tests.";
+        }
+    }
 }
