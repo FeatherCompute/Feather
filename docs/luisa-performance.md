@@ -36,9 +36,9 @@ rounding difference, not a quality-setting difference.
 
 ## Baseline cost decomposition
 
-The current Luisa implementation constructs a `Context`, Vulkan `Device`, and compute
-`Stream`, creates and uploads device buffers, translates and compiles the shader, dispatches,
-downloads writable buffers, and destroys everything inside every `Dispatch` call.
+The pre-M7 Luisa implementation constructed a `Context`, Vulkan `Device`, and compute
+`Stream`, created and uploaded device buffers, translated and compiled the shader, dispatched,
+downloaded writable buffers, and destroyed everything inside every `Dispatch` call.
 
 A 1024 x 1024 construction experiment at one sample per pixel measured 33 ms on EasyGPU
 and 4.956 s on Luisa. Luisa's timestamps placed context/plugin/device startup at about 4 ms
@@ -50,8 +50,8 @@ these components are not separately instrumented in the baseline.
 Comparing the 10,240-sample median with the one-sample construction run shows that fixed
 startup cannot explain the 26.372 s median gap: after subtracting the 4.923 s one-sample
 Luisa/EasyGPU delta, about 21.45 s remains attributable primarily to generated shader quality
-and GPU execution. Later sections will replace this structural estimate with measurements
-after code-generation, runtime residency, and staging experiments.
+and GPU execution. The resident-runtime and staging results below confirm that the single-
+dispatch Cornell benchmark does not amortize startup.
 
 ## Vulkan code-generation survey
 
@@ -84,3 +84,26 @@ were: `none` 4.377s (11,026 words), `lightweight` 4.394s (10,385), `compute` 4.3
 the caller has not supplied an override; an explicit environment value remains
 authoritative. This is the closest available LC equivalent to EasyGPU Ultra, not a
 claim of pass-for-pass identity.
+
+## Resident runtime and staging result
+
+M7 now owns one Luisa `Context`/Vulkan `Device`/compute `Stream` per native Feather context.
+The owner is explicitly reset during context shutdown and intentionally abandoned on process
+exit, before any dynamically loaded backend can be unloaded. A shader cache keyed by the
+generated kernel handle and bound resource handles retains the compiled shader and its device
+buffers/images; repeated dispatches therefore reuse shader compilation and device allocation.
+The `WindowCompute` sample was run for multiple frames: its log contained one context/device
+creation and one SPIR-V compilation, followed by successful continuous dispatches.
+
+The retained device buffers/images are the device-resident staging pool. Host packing and the
+required upload/download copies remain because Feather and Luisa do not expose a safe shared
+Vulkan allocation/import contract (queue-family ownership, image layout, and synchronization
+would otherwise be undefined). No cross-runtime Vulkan import was attempted.
+
+`wait:false` remains rejected by the native Luisa path; keeping synchronous readback semantics is
+required by the current API. Multi-frame asynchronous submission is deferred to M8+.
+
+The Cornell benchmark is one synchronous dispatch per fresh process, so resident runtime does
+not amortize its startup in that measurement. The honest comparison remains EasyGPU 30.077 s
+median versus Luisa XIR-SPIR-V 56.449 s median (1.88x). The gap is not yet within the M7 target;
+generated shader/GPU execution dominates after startup and needs a separate M8 investigation.

@@ -37,6 +37,7 @@ struct DispatchInputs {
     uint32_t logical_x = 1;
     uint32_t logical_y = 1;
     uint32_t logical_z = 1;
+    uint64_t shader_cache_key = 0;
     std::string runtime_directory;
 };
 
@@ -48,6 +49,12 @@ struct AdGradientBinding {
 };
 
 std::string RuntimeDirectory();
+
+// Owns the Luisa Context/Device/Stream lifetime for Feather's native context.
+// Shutdown is called from context/runtime teardown; Abandon is used on process
+// exit when C++ destructors may run after the dynamic backend has unloaded.
+void Shutdown();
+void Abandon() noexcept;
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> buffers, std::span<HostTextureBinding> textures,

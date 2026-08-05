@@ -240,10 +240,34 @@ public static class GPU
 
     private static DispatchPath DispatchExplicit<TKernel>(TKernel kernel, GpuDispatchSize size, GpuExecutionBackend backend, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
+        => ExplicitKernelDispatcher<TKernel>.Dispatch(kernel, size, backend, wait);
+
+    private static class ExplicitKernelDispatcher<TKernel>
+        where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        using var compiled = GpuKernel.Create<TKernel>(Context, backend);
-        GpuKernel.Dispatch(Context, compiled, kernel, size, wait);
-        return compiled.LastDispatchPath;
+        private static readonly object Gate = new();
+        private static GpuKernel? easyGpuKernel;
+        private static GpuKernel? luisaKernel;
+
+        public static DispatchPath Dispatch(TKernel kernel, GpuDispatchSize size, GpuExecutionBackend backend, bool wait)
+        {
+            if (GpuKernel.IrTransformForTesting is not null)
+            {
+                using var uncachedKernel = GpuKernel.Create<TKernel>(Context, backend);
+                GpuKernel.Dispatch(Context, uncachedKernel, kernel, size, wait);
+                return uncachedKernel.LastDispatchPath;
+            }
+
+            lock (Gate)
+            {
+                ref var cachedKernel = ref (backend == GpuExecutionBackend.Luisa
+                    ? ref luisaKernel
+                    : ref easyGpuKernel);
+                cachedKernel ??= GpuKernel.Create<TKernel>(Context, backend);
+                GpuKernel.Dispatch(Context, cachedKernel, kernel, size, wait);
+                return cachedKernel.LastDispatchPath;
+            }
+        }
     }
 
     private static class CachedKernelDispatcher<TKernel>

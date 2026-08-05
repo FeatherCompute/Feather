@@ -718,6 +718,9 @@ void release_ad_gradient_buffers_with_backend(KernelState& kernel, GPU::Backend:
 }
 
 void destroy_backend_resources_for_shutdown() {
+#if FEATHER_HAS_LUISA
+    Feather::Luisa::Shutdown();
+#endif
     auto* backend = GPU::Runtime::Context::GetBackend();
     if (backend != nullptr) {
         try {
@@ -790,6 +793,9 @@ void destroy_backend_resources_for_shutdown() {
 }
 
 void abandon_native_resources_for_process_exit() {
+#if FEATHER_HAS_LUISA
+    Feather::Luisa::Abandon();
+#endif
 #if FEATHER_BUILD_WINDOW
     for (auto& [handle, presenter] : g_texture_presenters) {
         (void)handle;
@@ -5446,9 +5452,10 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
     return true;
 }
 
-FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait) {
 #if !FEATHER_HAS_LUISA
+    (void)kernel_handle;
     (void)kernel;
     (void)group_x;
     (void)group_y;
@@ -5463,6 +5470,11 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
         return fail(FE_ERROR_UNSUPPORTED,
                     "Luisa dispatch requires wait=true until asynchronous staging lifetimes are implemented.");
     }
+    // Luisa's resident stream and resource cache are per native context. Keep
+    // command recording and cache mutation serialized when managed callers
+    // dispatch from multiple worker threads.
+    static std::mutex luisa_dispatch_mutex;
+    std::scoped_lock dispatch_lock{luisa_dispatch_mutex};
     ParsedIr ir;
     if (!parse_feather_ir(kernel.ir, &ir) || !ir.has_section7) {
         return fail(FE_ERROR_UNSUPPORTED, "Luisa dispatch requires a valid section 7 typed IR payload.");
@@ -5598,6 +5610,46 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
     }
 
     const auto* configured_runtime = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
+    uint64_t shader_cache_key = 1469598103934665603ull;
+    const auto mix_cache_key = [&](uint64_t value) {
+        shader_cache_key ^= value;
+        shader_cache_key *= 1099511628211ull;
+    };
+    mix_cache_key(kernel_handle);
+    mix_cache_key(kernel.auto_diff ? 1u : 0u);
+    // AD gradient buffers are sized from the logical dispatch extent. Include
+    // it in the identity so a resized dispatch gets fresh device storage.
+    mix_cache_key(logical_x);
+    mix_cache_key(logical_y);
+    mix_cache_key(logical_z);
+    for (const auto& resource : lowering.resources) {
+        mix_cache_key(resource.kind);
+        mix_cache_key(resource.binding);
+        if (resource.kind == kIrResourceKindBuffer) {
+            const auto bound = kernel.buffers.find(resource.binding);
+            if (bound != kernel.buffers.end()) {
+                mix_cache_key(bound->second);
+                const auto buffer = g_buffers.find(bound->second);
+                if (buffer != g_buffers.end()) {
+                    mix_cache_key(buffer->second.bytes.size());
+                    mix_cache_key(buffer->second.stride);
+                }
+            }
+        } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
+            const auto bound = kernel.textures.find(resource.binding);
+            if (bound != kernel.textures.end()) {
+                mix_cache_key(bound->second);
+                const auto texture = g_textures.find(bound->second);
+                if (texture != g_textures.end()) {
+                    mix_cache_key(texture->second.width);
+                    mix_cache_key(texture->second.height);
+                    mix_cache_key(texture->second.depth);
+                    mix_cache_key(texture->second.mip_levels);
+                    mix_cache_key(texture->second.pixel_format);
+                }
+            }
+        }
+    }
     Feather::Luisa::DispatchInputs dispatch{
         .group_x = group_x,
         .group_y = group_y,
@@ -5605,6 +5657,7 @@ FeResult dispatch_luisa_kernel(KernelState& kernel, uint32_t group_x, uint32_t g
         .logical_x = logical_x,
         .logical_y = logical_y,
         .logical_z = logical_z,
+        .shader_cache_key = shader_cache_key,
         .runtime_directory = configured_runtime != nullptr && configured_runtime[0] != '\0'
                                  ? configured_runtime
                                  : Feather::Luisa::RuntimeDirectory()};
@@ -11037,7 +11090,17 @@ FE_API FeResult fe_context_initialize(FeContextHandle context) {
 }
 
 FE_API FeResult fe_context_shutdown(FeContextHandle context) {
-    return context == kDefaultContext || context == 0 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+    if (context != kDefaultContext && context != 0) {
+        return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+    }
+#if FEATHER_HAS_LUISA
+    try {
+        Feather::Luisa::Shutdown();
+    } catch (...) {
+        return fail(FE_ERROR_UNKNOWN, "Luisa runtime shutdown failed.");
+    }
+#endif
+    return ok();
 }
 
 FE_API FeResult fe_runtime_flush_caches(void) {
@@ -12245,7 +12308,7 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
 
         it->second.last_dispatch_path = FE_DISPATCH_PATH_NONE;
         if (it->second.execution_backend == FE_EXECUTION_BACKEND_LUISA) {
-            result = dispatch_luisa_kernel(it->second, group_x, group_y, group_z,
+            result = dispatch_luisa_kernel(kernel, it->second, group_x, group_y, group_z,
                                            logical_x, logical_y, logical_z, wait);
             it->second.last_dispatch_path =
                 result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;

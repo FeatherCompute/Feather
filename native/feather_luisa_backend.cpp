@@ -6,10 +6,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <variant>
 
 #if defined(_WIN32)
@@ -215,7 +217,88 @@ std::optional<PixelStorage> pixel_storage(uint32_t format) {
 
 using RuntimeTexture = std::variant<Image<float>, Volume<float>>;
 
+class RuntimeState {
+public:
+    struct CachedKernel {
+        std::unique_ptr<Shader3D<>> shader;
+        std::vector<std::unique_ptr<ByteBuffer>> buffers;
+        std::vector<RuntimeTexture> textures;
+        std::vector<std::unique_ptr<ByteBuffer>> gradients;
+    };
+
+private:
+    std::unique_ptr<Context> context_;
+    std::unique_ptr<Device> device_;
+    std::unique_ptr<Stream> stream_;
+    std::string runtime_directory_;
+    std::unordered_map<uint64_t, std::unique_ptr<CachedKernel>> kernels_;
+
+public:
+    RuntimeState() = default;
+    RuntimeState(const RuntimeState &) = delete;
+    RuntimeState &operator=(const RuntimeState &) = delete;
+
+    void ensure(std::string_view runtime_directory) {
+        if (context_ != nullptr && runtime_directory_ == runtime_directory) return;
+        reset();
+        runtime_directory_ = runtime_directory;
+        context_ = std::make_unique<Context>(runtime_directory_);
+        device_ = std::make_unique<Device>(context_->create_device("vk"));
+        stream_ = std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE));
+    }
+
+    Device &device() noexcept { return *device_; }
+    Stream &stream() noexcept { return *stream_; }
+
+    CachedKernel *find(uint64_t key) noexcept {
+        const auto it = kernels_.find(key);
+        return it == kernels_.end() ? nullptr : it->second.get();
+    }
+
+    void insert(uint64_t key, std::unique_ptr<CachedKernel> kernel) {
+        kernels_[key] = std::move(kernel);
+    }
+
+    void reset() noexcept {
+        if (stream_ != nullptr) stream_->synchronize();
+        kernels_.clear();
+        stream_.reset();
+        device_.reset();
+        context_.reset();
+        runtime_directory_.clear();
+    }
+
+    void abandon() noexcept {
+        // Deliberately leak runtime objects during process teardown: their
+        // destructors call into dynamically loaded Luisa/Vulkan code.
+    (void)context_.release();
+    (void)device_.release();
+    (void)stream_.release();
+    // The owner is intentionally leaked by runtime_state(); leave cached
+    // shaders and resources untouched so their destructors cannot run after
+    // the dynamically loaded Luisa backend has been unloaded.
+    runtime_directory_.clear();
+}
+};
+
+RuntimeState &runtime_state() {
+    // The native backend may be unloaded before C++ static destructors run.
+    // Keep the owner itself alive until process exit; explicit Shutdown handles
+    // normal context teardown and Abandon releases only the dynamically loaded
+    // runtime objects on the process-exit path.
+    static auto *state = new RuntimeState();
+    return *state;
+}
+
 } // namespace
+
+void Shutdown() {
+    runtime_state().reset();
+}
+
+void Abandon() noexcept {
+    runtime_state().abandon();
+}
 
 std::string RuntimeDirectory() {
 #if defined(_WIN32)
@@ -282,26 +365,37 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         return false;
     }
 
-    Context context{dispatch.runtime_directory};
-    auto device = context.create_device("vk");
-    auto stream = device.create_stream(StreamTag::COMPUTE);
-    std::vector<ByteBuffer> runtime_buffers;
+    auto &runtime = runtime_state();
+    runtime.ensure(dispatch.runtime_directory);
+    auto &device = runtime.device();
+    auto &stream = runtime.stream();
+    auto *cached = dispatch.shader_cache_key == 0u ? nullptr : runtime.find(dispatch.shader_cache_key);
+    bool cache_hit = cached != nullptr && cached->shader != nullptr;
+    std::vector<ByteBuffer *> runtime_buffers;
+    std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
     std::vector<std::vector<unsigned char>> staged_bytes;
     std::vector<HostBufferBinding*> staged_bindings;
     std::vector<luisa::compute::Function::Binding> bound_arguments;
-    std::vector<RuntimeTexture> runtime_textures;
+    std::vector<RuntimeTexture *> runtime_textures;
+    std::vector<RuntimeTexture> owned_textures;
     std::vector<HostTextureBinding*> staged_textures;
-    std::vector<ByteBuffer> runtime_gradients;
+    std::vector<ByteBuffer *> runtime_gradients;
+    std::vector<std::unique_ptr<ByteBuffer>> owned_gradients;
     std::vector<std::vector<unsigned char>> staged_gradients;
     runtime_buffers.reserve(host_buffers.size());
+    owned_buffers.reserve(host_buffers.size());
     staged_bytes.reserve(host_buffers.size());
     staged_bindings.reserve(host_buffers.size());
     bound_arguments.reserve(lowering.resources.size());
     runtime_textures.reserve(host_textures.size());
+    owned_textures.reserve(host_textures.size());
     staged_textures.reserve(host_textures.size());
     runtime_gradients.reserve(gradient_layouts.size());
+    owned_gradients.reserve(gradient_layouts.size());
     staged_gradients.reserve(gradient_layouts.size());
 
+    size_t buffer_index = 0;
+    size_t texture_index = 0;
     for (const auto& resource : lowering.resources) {
         if (resource.kind == kResourceTexture2D || resource.kind == kResourceTexture3D) {
             auto found = std::find_if(host_textures.begin(), host_textures.end(),
@@ -311,19 +405,30 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 if (error != nullptr) *error = "Luisa texture binding is missing or uses an unsupported pixel format";
                 return false;
             }
-            if (resource.kind == kResourceTexture2D) {
-                runtime_textures.emplace_back(device.create_image<float>(
+            RuntimeTexture *runtime = nullptr;
+            if (cache_hit) {
+                if (texture_index >= cached->textures.size()) {
+                    if (error != nullptr) *error = "Luisa shader cache resource layout changed";
+                    return false;
+                }
+                runtime = &cached->textures[texture_index];
+            } else if (resource.kind == kResourceTexture2D) {
+                owned_textures.emplace_back(device.create_image<float>(
                     *storage, luisa::make_uint2(found->width, found->height), found->mip_levels, true));
+                runtime = &owned_textures.back();
             } else {
-                runtime_textures.emplace_back(device.create_volume<float>(
+                owned_textures.emplace_back(device.create_volume<float>(
                     *storage, luisa::make_uint3(found->width, found->height, found->depth), found->mip_levels, true));
+                runtime = &owned_textures.back();
             }
-            auto& runtime = runtime_textures.back();
+            runtime_textures.push_back(runtime);
             std::visit([&](auto& texture) {
                 stream << texture.copy_from(found->bytes->data()) << synchronize();
-                bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
-            }, runtime);
+                if (!cache_hit)
+                    bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
+            }, *runtime);
             staged_textures.push_back(&*found);
+            ++texture_index;
             continue;
         }
         if (resource.kind != kResourceBuffer)
@@ -353,14 +458,27 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 return false;
             }
         }
-        runtime_buffers.emplace_back(device.create_byte_buffer(packed.size()));
-        auto& runtime = runtime_buffers.back();
-        stream << runtime.copy_from(packed.data()) << synchronize();
-        bound_arguments.emplace_back(
-            luisa::compute::Function::BufferBinding{runtime.handle(), 0u, runtime.size_bytes()});
+        ByteBuffer *runtime = nullptr;
+        if (cache_hit) {
+            if (buffer_index >= cached->buffers.size() || cached->buffers[buffer_index]->size_bytes() != packed.size()) {
+                if (error != nullptr) *error = "Luisa shader cache buffer layout changed";
+                return false;
+            }
+            runtime = cached->buffers[buffer_index].get();
+        } else {
+            owned_buffers.emplace_back(std::make_unique<ByteBuffer>(device.create_byte_buffer(packed.size())));
+            runtime = owned_buffers.back().get();
+        }
+        stream << runtime->copy_from(packed.data()) << synchronize();
+        if (!cache_hit)
+            bound_arguments.emplace_back(
+                luisa::compute::Function::BufferBinding{runtime->handle(), 0u, runtime->size_bytes()});
+        runtime_buffers.push_back(runtime);
         staged_bindings.push_back(&*found);
+        ++buffer_index;
     }
 
+    size_t gradient_index = 0;
     for (const auto& layout : gradient_layouts) {
         auto found = std::find_if(gradients.begin(), gradients.end(), [&](const auto& gradient) {
             return gradient.source_binding == layout.source_binding;
@@ -372,14 +490,28 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
         const auto value_count = static_cast<size_t>(dispatch.logical_x) * layout.element_count;
         staged_gradients.emplace_back(value_count * layout.device_type->size(), 0u);
-        runtime_gradients.emplace_back(device.create_byte_buffer(staged_gradients.back().size()));
-        auto& runtime = runtime_gradients.back();
-        stream << runtime.copy_from(staged_gradients.back().data()) << synchronize();
-        bound_arguments.emplace_back(
-            luisa::compute::Function::BufferBinding{runtime.handle(), 0u, runtime.size_bytes()});
+        ByteBuffer *runtime = nullptr;
+        if (cache_hit) {
+            if (gradient_index >= cached->gradients.size() ||
+                cached->gradients[gradient_index]->size_bytes() != staged_gradients.back().size()) {
+                if (error != nullptr) *error = "Luisa shader cache gradient layout changed";
+                return false;
+            }
+            runtime = cached->gradients[gradient_index].get();
+        } else {
+            owned_gradients.emplace_back(
+                std::make_unique<ByteBuffer>(device.create_byte_buffer(staged_gradients.back().size())));
+            runtime = owned_gradients.back().get();
+        }
+        stream << runtime->copy_from(staged_gradients.back().data()) << synchronize();
+        if (!cache_hit)
+            bound_arguments.emplace_back(
+                luisa::compute::Function::BufferBinding{runtime->handle(), 0u, runtime->size_bytes()});
+        runtime_gradients.push_back(runtime);
+        ++gradient_index;
     }
 
-    if (ad_inputs == nullptr) {
+    if (!cache_hit && ad_inputs == nullptr) {
         // The XIR-to-AST translator applies the kernel's bound arguments positionally to every
         // function it translates, so a callable's own parameters would be mistaken for resource
         // bindings. Destructuring before inlining permits multi-block callable bodies to be
@@ -410,7 +542,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             return false;
         }
     }
-    if (ad_inputs != nullptr) {
+    if (!cache_hit && ad_inputs != nullptr) {
         xir_to_ast_normalize_module(&xir_module);
         auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
         if (destructured.error_count != 0u) {
@@ -448,17 +580,32 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
         xir_to_ast_normalize_module(&xir_module);
     }
-    auto ast = xir_to_ast_translate(
-        *kernel, XIR2ASTConfig{.strict = true,
-                               .bound_arguments = luisa::span<const luisa::compute::Function::Binding>{
-                                   bound_arguments.data(), bound_arguments.size()}});
-    if (ast == nullptr) {
-        if (error != nullptr)
-            *error = "Luisa failed to translate generated XIR to its executable AST";
-        return false;
+    std::unique_ptr<Shader3D<>> shader;
+    if (!cache_hit) {
+        auto ast = xir_to_ast_translate(
+            *kernel, XIR2ASTConfig{.strict = true,
+                                   .bound_arguments = luisa::span<const luisa::compute::Function::Binding>{
+                                       bound_arguments.data(), bound_arguments.size()}});
+        if (ast == nullptr) {
+            if (error != nullptr)
+                *error = "Luisa failed to translate generated XIR to its executable AST";
+            return false;
+        }
+        shader = std::make_unique<Shader3D<>>(
+            device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, ShaderOption{}));
+        if (dispatch.shader_cache_key != 0u) {
+            auto entry = std::make_unique<RuntimeState::CachedKernel>();
+            entry->shader = std::move(shader);
+            entry->buffers = std::move(owned_buffers);
+            entry->textures = std::move(owned_textures);
+            entry->gradients = std::move(owned_gradients);
+            runtime.insert(dispatch.shader_cache_key, std::move(entry));
+            cached = runtime.find(dispatch.shader_cache_key);
+            cache_hit = true;
+        }
     }
-    auto shader = device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, ShaderOption{});
-    stream << shader().dispatch(luisa::make_uint3(dispatch.logical_x, dispatch.logical_y, dispatch.logical_z))
+    auto &cached_shader = cache_hit ? *cached->shader : *shader;
+    stream << cached_shader().dispatch(luisa::make_uint3(dispatch.logical_x, dispatch.logical_y, dispatch.logical_z))
            << synchronize();
 
     size_t staged_index = 0;
@@ -466,11 +613,11 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         if (resource.kind != kResourceBuffer)
             continue;
         auto* found = staged_bindings[staged_index];
-        auto& runtime = runtime_buffers[staged_index++];
+        auto* runtime = runtime_buffers[staged_index++];
         if (resource.access != kAccessWrite && resource.access != kAccessReadWrite)
             continue;
         auto& packed = staged_bytes[staged_index - 1u];
-        stream << runtime.copy_to(packed.data()) << synchronize();
+        stream << runtime->copy_to(packed.data()) << synchronize();
         const auto layout = std::find_if(buffer_layouts.begin(), buffer_layouts.end(),
                                          [&](const auto& candidate) { return candidate.binding == resource.binding; });
         const auto count = found->bytes->size() / found->stride;
@@ -483,19 +630,19 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
         }
     }
-    size_t texture_index = 0;
+    size_t output_texture_index = 0;
     for (const auto& resource : lowering.resources) {
         if (resource.kind != kResourceTexture2D && resource.kind != kResourceTexture3D) continue;
-        auto* found = staged_textures[texture_index];
-        auto& runtime = runtime_textures[texture_index++];
+        auto* found = staged_textures[output_texture_index];
+        auto* runtime = runtime_textures[output_texture_index++];
         if (resource.access != kAccessWrite && resource.access != kAccessReadWrite) continue;
         std::visit([&](auto& texture) {
             stream << texture.copy_to(found->bytes->data()) << synchronize();
-        }, runtime);
+        }, *runtime);
     }
     for (size_t i = 0; i < gradient_layouts.size(); ++i) {
         auto& packed = staged_gradients[i];
-        stream << runtime_gradients[i].copy_to(packed.data()) << synchronize();
+        stream << runtime_gradients[i]->copy_to(packed.data()) << synchronize();
         auto found = std::find_if(gradients.begin(), gradients.end(), [&](const auto& gradient) {
             return gradient.source_binding == gradient_layouts[i].source_binding;
         });
