@@ -5,8 +5,6 @@ namespace Feather.Integration.Tests;
 public class LuisaBackendMetalTests
 {
     private const string Prefix = "Feather.Integration.Tests.";
-    private const string TextureFailure = "no member named 'sample'";
-    private const string SwizzleFailure = "non-const reference cannot bind to vector element";
 
     public static IEnumerable<object?[]> ParityCases =>
     [
@@ -19,22 +17,18 @@ public class LuisaBackendMetalTests
         Case("LuisaBackendResourceDispatchTests.FullIntegerAtomicMatrixMatchesEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.TwoAndThreeDimensionalDispatchIdsMatchEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.Texture2DAndTexture3DLoadStoreMatchEasyGpu"),
-        // LC emits texture_sample* calls through metal_codegen_ast.cpp:1161-1173, while
-        // metal_device_lib.metal:262-277 instantiates .sample() on access::read textures.
-        Case("LuisaBackendResourceDispatchTests.TextureSamplingAndMixedResourceOrderMatchEasyGpu", TextureFailure),
-        Case("LuisaBackendResourceDispatchTests.TextureSampleGradExecutesThroughLuisaXir", TextureFailure),
+        Case("LuisaBackendResourceDispatchTests.TextureSamplingAndMixedResourceOrderMatchEasyGpu"),
+        Case("LuisaBackendResourceDispatchTests.TextureSampleGradExecutesThroughLuisaXir"),
         Case("LuisaBackendResourceDispatchTests.NestedScalarCallablesMatchEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.ShaderLibraryBufferCallablesMatchEasyGpu"),
-        Case("LuisaBackendResourceDispatchTests.ShaderLibraryTextureAndSamplerCallablesMatchEasyGpu", TextureFailure),
+        Case("LuisaBackendResourceDispatchTests.ShaderLibraryTextureAndSamplerCallablesMatchEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.MutableGpuStructCallablesAndWritebackMatchEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.StructArraysAndNestedWritebackMatchEasyGpu"),
         Case("LuisaBackendResourceDispatchTests.NonDivisibleLogicalBoundsMatchEasyGpu"),
         Case("LuisaBackendTests.VectorAddExecutesThroughLuisaXirVulkan"),
         Case("LuisaBackendTypeFeatureTests.ScalarsComparisonsLogicAndBitOperationsMatchEasyGpu"),
         Case("LuisaBackendTypeFeatureTests.UnsignedConstantsBitOperationsComparisonsAndConversionsMatchEasyGpu"),
-        // LC emits swizzle temporaries in metal_codegen_ast.cpp:791-812, then passes them
-        // to the non-const vector_element_ref overload in metal_device_lib.metal:191-194.
-        Case("LuisaBackendTypeFeatureTests.VectorConstructionAndSwizzlesMatchEasyGpu", SwizzleFailure),
+        Case("LuisaBackendTypeFeatureTests.VectorConstructionAndSwizzlesMatchEasyGpu"),
         Case("LuisaBackendTypeFeatureTests.MatrixConstructionAndLinearAlgebraMatchEasyGpu"),
         Case("LuisaBackendTypeFeatureTests.StructAggregateLoadsAndNestedFieldExtractionMatchEasyGpu")
     ];
