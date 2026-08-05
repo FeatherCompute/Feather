@@ -606,6 +606,12 @@ class Lowerer {
         return op < ops.size() ? std::optional{ops[op]} : std::nullopt;
     }
 
+    // Shifts keep the right-hand operand independent of the result shape, so they must not be splatted.
+    static bool is_shift_op(ArithmeticOp op) {
+        return op == ArithmeticOp::BINARY_SHIFT_LEFT || op == ArithmeticOp::BINARY_SHIFT_RIGHT ||
+               op == ArithmeticOp::BINARY_ROTATE_LEFT || op == ArithmeticOp::BINARY_ROTATE_RIGHT;
+    }
+
     static std::optional<ArithmeticOp> compare_op(uint32_t op) {
         constexpr std::array ops{ArithmeticOp::BINARY_EQUAL, ArithmeticOp::BINARY_NOT_EQUAL,
                                  ArithmeticOp::BINARY_LESS, ArithmeticOp::BINARY_LESS_EQUAL,
@@ -616,6 +622,17 @@ class Lowerer {
     Value* extract(Value* base, const Type* result_type, std::vector<Value*> indices) {
         indices.insert(indices.begin(), base);
         return builder_.call(result_type, ArithmeticOp::EXTRACT, indices);
+    }
+
+    // C# permits mixed vector/scalar arithmetic such as `float3 * float`, while XIR requires every
+    // operand of an elementwise arithmetic instruction to match the result type exactly. Broadcast the
+    // scalar side into a vector of the result shape so the generated module passes verification.
+    Value* splat_to(Value* value, const Type* result_type) {
+        if (value == nullptr || result_type == nullptr) return value;
+        if (!result_type->is_vector() || !value->type()->is_scalar()) return value;
+        auto* element = builder_.static_cast_if_necessary(result_type->element(), value);
+        std::vector<Value*> components(result_type->dimension(), element);
+        return builder_.call(result_type, ArithmeticOp::AGGREGATE, components);
     }
 
     Value* convert(Value* value, const Type* result_type) {
@@ -759,14 +776,18 @@ class Lowerer {
             if (left == nullptr || right == nullptr || !op) return fail("invalid FEIR binary operation"), nullptr;
             if (expression.op == 2u && (left->type()->is_matrix() || right->type()->is_matrix()))
                 return matrix_multiply(left, right, result_type);
-            return builder_.call(result_type, *op, {left, right});
+            if (is_shift_op(*op)) return builder_.call(result_type, *op, {splat_to(left, result_type), right});
+            return builder_.call(result_type, *op, {splat_to(left, result_type), splat_to(right, result_type)});
         }
         case kExpressionComparison: {
             auto* left = lower_expression(expression.a);
             auto* right = lower_expression(expression.b);
             auto op = compare_op(expression.op);
-            return left == nullptr || right == nullptr || !op ? (fail("invalid FEIR comparison"), nullptr)
-                                                               : builder_.call(result_type, *op, {left, right});
+            if (left == nullptr || right == nullptr || !op) return fail("invalid FEIR comparison"), nullptr;
+            // Comparisons yield a boolean result, so the operands are broadcast to the wider operand
+            // shape rather than to the result type.
+            const auto* operand_type = left->type()->is_vector() ? left->type() : right->type();
+            return builder_.call(result_type, *op, {splat_to(left, operand_type), splat_to(right, operand_type)});
         }
         case kExpressionLogical: {
             auto* left = lower_expression(expression.a);
@@ -1301,6 +1322,13 @@ class Lowerer {
             auto target = address(statement.a);
             if (!target) return false;
             auto* value_type = type(module_.lvalues[statement.a].type_id);
+            if (value_type == nullptr && target->resource != nullptr && target->indices.empty() &&
+                (target->resource->kind == kResourceTexture2D || target->resource->kind == kResourceTexture3D)) {
+                // Luisa textures are represented as float4 even when Feather exposes an RGBA
+                // struct with byte channels. A whole texel assignment therefore uses the
+                // resource's mapped element type rather than the host-side struct layout.
+                value_type = target->root_type;
+            }
             if (value_type == nullptr) return fail("invalid FEIR assignment type");
             Value* value = nullptr;
             if (statement.kind == kStatementAssignment) value = lower_expression(statement.b);
@@ -1313,7 +1341,10 @@ class Lowerer {
                     op = (statement.op & 1u) != 0u ? ArithmeticOp::BINARY_ADD : ArithmeticOp::BINARY_SUB;
                 } else right = lower_expression(statement.b);
                 if (old == nullptr || right == nullptr || !op) return fail("invalid FEIR compound assignment");
-                value = builder_.call(value_type, *op, {old, right});
+                if (*op == ArithmeticOp::BINARY_MUL && (old->type()->is_matrix() || right->type()->is_matrix()))
+                    value = matrix_multiply(old, right, value_type);
+                else if (is_shift_op(*op)) value = builder_.call(value_type, *op, {old, right});
+                else value = builder_.call(value_type, *op, {splat_to(old, value_type), splat_to(right, value_type)});
             }
             return value != nullptr && write_address(*target, value_type, value);
         }

@@ -29,6 +29,7 @@
 #include <luisa/runtime/shader.h>
 #include <luisa/runtime/stream.h>
 #include <luisa/runtime/volume.h>
+#include <luisa/xir/instructions/arithmetic.h>
 #include <luisa/xir/module.h>
 #include <luisa/xir/passes/autodiff.h>
 #include <luisa/xir/passes/destructure_cfg.h>
@@ -244,6 +245,22 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         if (error != nullptr) {
             *error = "generated Luisa XIR failed verification: ";
             error->append(verification.errors.front().message.data(), verification.errors.front().message.size());
+            if (const auto* instruction = verification.errors.front().instruction;
+                instruction != nullptr && instruction->isa<xir::ArithmeticInst>()) {
+                const auto* arithmetic = static_cast<const xir::ArithmeticInst*>(instruction);
+                error->append(" [FEDIAG op=");
+                error->append(luisa::to_string(arithmetic->op()));
+                error->append(" result=");
+                error->append(arithmetic->type() == nullptr ? "<null>" : arithmetic->type()->description());
+                for (auto operand_use : arithmetic->operand_uses()) {
+                    const auto* value = operand_use->value();
+                    error->append(" arg=");
+                    error->append(value == nullptr || value->type() == nullptr
+                                      ? "<null>"
+                                      : value->type()->description());
+                }
+                error->append("]");
+            }
         }
         return false;
     }
@@ -345,8 +362,39 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             luisa::compute::Function::BufferBinding{runtime.handle(), 0u, runtime.size_bytes()});
     }
 
-    xir_to_ast_normalize_module(&xir_module);
+    if (ad_inputs == nullptr) {
+        // The XIR-to-AST translator applies the kernel's bound arguments positionally to every
+        // function it translates, so a callable's own parameters would be mistaken for resource
+        // bindings. Destructuring before inlining permits multi-block callable bodies to be
+        // inlined into the kernel, leaving only the function the bindings actually describe.
+        auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
+        if (destructured.error_count != 0u) {
+            if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before callable inlining";
+            return false;
+        }
+        auto inlined = inline_all_pass_run_on_module(&xir_module);
+        if (inlined.skipped_recursive_callable_count != 0u ||
+            inlined.skipped_structured_call_count != 0u ||
+            inlined.skipped_constrained_call_count != 0u ||
+            inlined.skipped_metadata_call_count != 0u ||
+            inlined.skipped_declaration_call_count != 0u ||
+            inlined.rejected_malformed_call_count != 0u) {
+            if (error != nullptr) *error = "Luisa could not inline the generated FEIR callable graph";
+            return false;
+        }
+        xir_to_ast_normalize_module(&xir_module);
+        auto inlined_verification = xir_verify_module(&xir_module);
+        if (!inlined_verification.succeeded()) {
+            if (error != nullptr) {
+                *error = "Luisa inlined XIR failed verification: ";
+                error->append(inlined_verification.errors.front().message.data(),
+                              inlined_verification.errors.front().message.size());
+            }
+            return false;
+        }
+    }
     if (ad_inputs != nullptr) {
+        xir_to_ast_normalize_module(&xir_module);
         auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
         if (destructured.error_count != 0u) {
             if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
