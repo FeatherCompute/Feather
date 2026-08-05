@@ -69,4 +69,9 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
               std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
 
+// Experimental compute rasterizer vertical slice. This deliberately has a small, explicit
+// resource contract until graphics-stage FEIR lowering is implemented.
+bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
+                            const DispatchInputs& dispatch, std::string* error = nullptr);
+
 } // namespace Feather::Luisa

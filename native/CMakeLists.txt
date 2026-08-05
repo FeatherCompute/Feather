@@ -108,7 +108,9 @@ endif()
 # Feather target has been created so the existing native asset layout remains
 # stable while M1 verifies the Vulkan/XIR toolchain.
 if(FEATHER_BUILD_LUISA_COMPUTE)
-    set(LUISA_COMPUTE_ENABLE_DSL OFF CACHE BOOL "" FORCE)
+    # The opt-in compute rasterizer vertical slice uses the same Luisa C++ DSL
+    # entry point as the runtime's own compute probes.
+    set(LUISA_COMPUTE_ENABLE_DSL ON CACHE BOOL "" FORCE)
     set(LUISA_COMPUTE_ENABLE_TENSOR OFF CACHE BOOL "" FORCE)
     set(LUISA_COMPUTE_ENABLE_DX OFF CACHE BOOL "" FORCE)
     set(LUISA_COMPUTE_ENABLE_METAL ${FEATHER_LUISA_ENABLE_METAL} CACHE BOOL "" FORCE)
@@ -155,7 +157,7 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
     endif()
 
     target_sources(feather PRIVATE feather_luisa_backend.cpp feather_luisa_xir.cpp)
-    target_link_libraries(feather PRIVATE luisa-compute-runtime luisa-compute-xir)
+    target_link_libraries(feather PRIVATE luisa-compute-runtime luisa-compute-xir luisa-compute-dsl)
     target_compile_definitions(feather PRIVATE FEATHER_HAS_LUISA=1)
     set(_feather_luisa_backend_targets luisa-compute-backend-vk)
     foreach(_feather_backend IN ITEMS metal cuda hip)
@@ -174,7 +176,7 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
     endif()
     if(DEFINED _feather_luisa_origin)
         set_target_properties(feather luisa-compute-core luisa-compute-ast
-            luisa-compute-runtime luisa-compute-xir ${_feather_luisa_backend_targets} PROPERTIES
+            luisa-compute-runtime luisa-compute-xir luisa-compute-dsl ${_feather_luisa_backend_targets} PROPERTIES
             BUILD_RPATH "${_feather_luisa_origin}"
             INSTALL_RPATH "${_feather_luisa_origin}"
         )

@@ -2,6 +2,7 @@
 #include "feather_luisa_xir.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -24,6 +25,7 @@
 
 #include <luisa/ast/function.h>
 #include <luisa/ast/type.h>
+#include <luisa/dsl/sugar.h>
 #include <luisa/runtime/buffer.h>
 #include <luisa/runtime/byte_buffer.h>
 #include <luisa/runtime/context.h>
@@ -658,6 +660,60 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                         packed.data() + value * gradient_layouts[i].device_type->size(), packed_stride);
         }
     }
+    return true;
+}
+
+bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
+                            const DispatchInputs& dispatch, std::string* error) {
+    // Opt-in compute-only triangle rasterizer slice. The public graphics FEIR stages are
+    // intentionally not lowered here yet; this is the smallest executable proof of the
+    // edge-function/interpolation pipeline.
+    if (error != nullptr) error->clear();
+    if (vertices.bytes == nullptr || target.bytes == nullptr || vertices.stride < sizeof(float) * 4u ||
+        vertices.bytes->size() < vertices.stride * 3u || target.width == 0u || target.height == 0u) {
+        if (error != nullptr) *error = "vertical raster bindings are incomplete";
+        return false;
+    }
+    if (target.pixel_format != 3u && target.pixel_format != 4u && target.pixel_format != 10u) {
+        if (error != nullptr) *error = "vertical raster supports only Rgba8, Bgra8, and Rgba32Float targets";
+        return false;
+    }
+
+    auto &runtime = runtime_state();
+    runtime.ensure(dispatch.runtime_directory, dispatch.backend_name);
+    auto &device = runtime.device();
+    auto &stream = runtime.stream();
+
+    std::array<float4, 3> host_vertices{};
+    for (size_t i = 0; i < host_vertices.size(); ++i) {
+        std::memcpy(&host_vertices[i], vertices.bytes->data() + i * vertices.stride, sizeof(float4));
+    }
+    auto vertex_buffer = device.create_buffer<float4>(host_vertices.size());
+    auto storage = target.pixel_format == 10u ? PixelStorage::FLOAT4 : PixelStorage::BYTE4;
+    auto image = device.create_image<float>(storage, make_uint2(target.width, target.height), 1u, true);
+    stream << vertex_buffer.copy_from(host_vertices.data())
+           << image.copy_from(target.bytes->data());
+
+    auto shader = device.compile<2>([](ImageFloat output, BufferFloat4 vertex_buffer) noexcept {
+        const auto pixel = dispatch_id().xy();
+        const auto size = make_float2(dispatch_size().xy());
+        const auto p = (make_float2(pixel) + 0.5f) / size * 2.0f - 1.0f;
+        const auto a = vertex_buffer.read(0u);
+        const auto b = vertex_buffer.read(1u);
+        const auto c = vertex_buffer.read(2u);
+        const auto area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        $if (abs(area) > 1e-7f) {
+            const auto w0 = ((b.x - p.x) * (c.y - p.y) - (b.y - p.y) * (c.x - p.x)) / area;
+            const auto w1 = ((c.x - p.x) * (a.y - p.y) - (c.y - p.y) * (a.x - p.x)) / area;
+            const auto w2 = 1.0f - w0 - w1;
+            $if (w0 >= 0.0f & w1 >= 0.0f & w2 >= 0.0f) {
+                output.write(pixel, a * w0 + b * w1 + c * w2);
+            };
+        };
+    });
+    stream << shader(image, vertex_buffer).dispatch(target.width, target.height)
+           << image.copy_to(target.bytes->data())
+           << synchronize();
     return true;
 }
 

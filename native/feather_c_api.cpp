@@ -10387,6 +10387,46 @@ FeBufferHandle infer_graphics_vertex_buffer(const GraphicsPipelineState& pipelin
     return lowest;
 }
 
+#if FEATHER_HAS_LUISA
+FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
+    if (pipeline.topology != 0u || draw.indexed != 0u || draw.color_target_count != 1u || draw.depth_target != 0u ||
+        pipeline.sample_count != 1u || pipeline.color_attachment_count != 1u || draw.viewport_enabled != 0u ||
+        draw.scissor_enabled != 0u || pipeline.cull_mode != 0u || pipeline.polygon_mode != 0u) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "compute raster vertical slice supports only a non-indexed, unculled, single-target triangle");
+    }
+    if (draw.count != 3u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertical slice requires exactly three vertices.");
+    }
+    const auto vertex_handle = infer_graphics_vertex_buffer(pipeline);
+    const auto vertex_it = g_buffers.find(vertex_handle);
+    const auto target_it = g_textures.find(draw.color_targets[0]);
+    if (vertex_it == g_buffers.end() || target_it == g_textures.end()) {
+        return fail(FE_ERROR_INVALID_HANDLE, "Compute raster draw requires valid vertex and color resources.");
+    }
+    const auto stride = pipeline.vertex_stride != 0u
+                            ? pipeline.vertex_stride
+                            : (vertex_it->second.stride != 0u ? vertex_it->second.stride : sizeof(float) * 4u);
+    const auto backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    Feather::Luisa::DispatchInputs dispatch{
+        1u, 1u, 1u, target_it->second.width, target_it->second.height, 1u, 0u,
+        backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
+        Feather::Luisa::RuntimeDirectory()};
+    Feather::Luisa::HostBufferBinding vertex_binding{0u, 1u, static_cast<uint32_t>(stride), &vertex_it->second.bytes};
+    Feather::Luisa::HostTextureBinding target_binding{
+        0u, 2u, 3u, target_it->second.width, target_it->second.height, target_it->second.depth,
+        target_it->second.mip_levels, target_it->second.pixel_format, &target_it->second.bytes};
+    std::string error;
+    if (!Feather::Luisa::DispatchVerticalRaster(vertex_binding, target_binding, dispatch, &error)) {
+        return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster dispatch failed." : error);
+    }
+    target_it->second.host_dirty = true;
+    target_it->second.device_dirty = false;
+    target_it->second.mipmaps_dirty = false;
+    return ok();
+}
+#endif
+
 FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     trace_graphics_step("draw begin");
     GPU::Backend::PrimitiveTopology topology;
@@ -12866,8 +12906,19 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
 
         const auto should_profile = profiler_enabled_locked();
         const auto start = std::chrono::steady_clock::now();
-        auto result = draw_graphics_pipeline_easygpu(it->second, *desc);
-        auto dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_TYPED_EASYGPU : FE_DISPATCH_PATH_REJECTED;
+        FeResult result = FE_ERROR_UNSUPPORTED;
+        FeDispatchPath dispatch_path = FE_DISPATCH_PATH_REJECTED;
+        const auto* compute_raster = std::getenv("FEATHER_GRAPHICS_COMPUTE");
+#if FEATHER_HAS_LUISA
+        if (compute_raster != nullptr && compute_raster[0] != '\0' && std::strcmp(compute_raster, "0") != 0) {
+            result = draw_graphics_pipeline_compute_raster(it->second, *desc);
+            dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
+        } else
+#endif
+        {
+            result = draw_graphics_pipeline_easygpu(it->second, *desc);
+            dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_TYPED_EASYGPU : FE_DISPATCH_PATH_REJECTED;
+        }
 
         it->second.last_dispatch_path = dispatch_path;
         if (should_profile && result == FE_OK) {
