@@ -10758,10 +10758,9 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
 
 FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     if (pipeline.topology != 0u || draw.color_target_count != pipeline.color_attachment_count ||
-        pipeline.sample_count != 1u || pipeline.polygon_mode != 0u ||
-        pipeline.stencil_test != 0u) {
+        pipeline.sample_count != 1u || pipeline.polygon_mode != 0u) {
         return fail(FE_ERROR_UNSUPPORTED,
-                    "compute raster supports matching color targets and single-sample triangle lists without stencil");
+                    "compute raster supports matching color targets and single-sample filled triangle lists");
     }
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
@@ -10893,9 +10892,13 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     auto depth_it = g_textures.end();
     if (draw.depth_target != 0u) {
         depth_it = g_textures.find(draw.depth_target);
-        if (depth_it == g_textures.end() || depth_it->second.pixel_format != 101u ||
+        const auto required_depth_format = pipeline.stencil_test != 0u ? 100u : 101u;
+        if (depth_it == g_textures.end() || depth_it->second.pixel_format != required_depth_format ||
             depth_it->second.width != target.width || depth_it->second.height != target.height) {
-            return fail(FE_ERROR_UNSUPPORTED, "Compute raster depth requires a matching Depth32Float target.");
+            return fail(FE_ERROR_UNSUPPORTED,
+                        pipeline.stencil_test != 0u
+                            ? "Compute raster stencil requires a matching Depth24Stencil8 target."
+                            : "Compute raster depth requires a matching Depth32Float target.");
         }
         depth_binding = Feather::Luisa::HostTextureBinding{
             1u, 2u, 3u, depth_it->second.width, depth_it->second.height, depth_it->second.depth,
@@ -10926,7 +10929,20 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         pipeline.depth_write,
         pipeline.depth_compare,
         pipeline.depth_clamp,
+        pipeline.stencil_test,
+        pipeline.stencil_front.fail_op,
+        pipeline.stencil_front.pass_op,
+        pipeline.stencil_front.depth_fail_op,
+        pipeline.stencil_front.compare_op,
+        pipeline.stencil_back.fail_op,
+        pipeline.stencil_back.pass_op,
+        pipeline.stencil_back.depth_fail_op,
+        pipeline.stencil_back.compare_op,
+        pipeline.stencil_read_mask,
+        pipeline.stencil_write_mask,
+        pipeline.stencil_reference,
         clear_depth ? 1u : 0u,
+        clear_depth && pipeline.stencil_test != 0u ? 1u : 0u,
         draw.clear_depth != 0u ? std::clamp(draw.clear_depth_value, 0.0f, 1.0f) : 1.0f,
         clear_color ? 1u : 0u,
         draw.clear_color != 0u ? draw.clear_color_r : 0.0f,

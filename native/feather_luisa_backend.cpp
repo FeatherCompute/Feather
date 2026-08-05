@@ -690,9 +690,10 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
         return false;
     }
     if (depth != nullptr &&
-        (depth->bytes == nullptr || depth->pixel_format != 101u || depth->width != target.width ||
+        (depth->bytes == nullptr || (depth->pixel_format != 100u && depth->pixel_format != 101u) ||
+         depth->width != target.width ||
          depth->height != target.height || depth->bytes->size() < pixel_count * sizeof(float))) {
-        if (error != nullptr) *error = "vertical raster depth storage must be matching Depth32Float";
+        if (error != nullptr) *error = "vertical raster depth storage must be matching Depth32Float or Depth24Stencil8";
         return false;
     }
 
@@ -711,27 +712,45 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
     auto varying_buffer = device.create_byte_buffer(host_varyings.size());
     auto coverage_buffer = device.create_buffer<float>(pixel_count);
     std::vector<float> host_depth(pixel_count, 1.0f);
+    std::vector<uint32_t> host_stencil(pixel_count, 0u);
     if (depth != nullptr) {
-        std::memcpy(host_depth.data(), depth->bytes->data(), pixel_count * sizeof(float));
+        if (depth->pixel_format == 101u) {
+            std::memcpy(host_depth.data(), depth->bytes->data(), pixel_count * sizeof(float));
+        } else {
+            const auto* packed = reinterpret_cast<const uint32_t*>(depth->bytes->data());
+            constexpr auto inverse_depth24 = 1.0f / 16777215.0f;
+            for (size_t i = 0u; i < pixel_count; ++i) {
+                host_depth[i] = static_cast<float>(packed[i] & 0x00ffffffu) * inverse_depth24;
+                host_stencil[i] = packed[i] >> 24u;
+            }
+        }
     }
     auto depth_buffer = device.create_buffer<float>(pixel_count);
+    auto stencil_buffer = device.create_buffer<uint32_t>(pixel_count);
     auto storage = target.pixel_format == 10u ? PixelStorage::FLOAT4 : PixelStorage::BYTE4;
     auto image = device.create_image<float>(storage, make_uint2(target.width, target.height), 1u, true);
     stream << vertex_buffer.copy_from(vertices.bytes->data())
            << varying_buffer.copy_from(host_varyings.data())
            << coverage_buffer.copy_from(host_coverage.data())
            << depth_buffer.copy_from(host_depth.data())
+           << stencil_buffer.copy_from(host_stencil.data())
            << image.copy_from(target.bytes->data());
 
     const auto varying_stride = vertices.stride;
     const auto vertex_count = raster.vertex_count;
     auto shader = device.compile<2>([varying_stride, vertex_count](ImageFloat output, ByteBufferVar vertex_buffer,
                                        ByteBufferVar varying_buffer, BufferFloat coverage_buffer,
-                                       BufferFloat depth_buffer,
+                                       BufferFloat depth_buffer, BufferUInt stencil_buffer,
                                        UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
                                        UInt scissor_x, UInt scissor_y, UInt scissor_width, UInt scissor_height,
                                        UInt cull_mode, UInt front_face, UInt depth_test, UInt depth_write,
-                                       UInt depth_compare, UInt depth_clamp, UInt clear_depth, Float clear_depth_value,
+                                       UInt depth_compare, UInt depth_clamp, UInt stencil_test,
+                                       UInt stencil_front_fail, UInt stencil_front_pass,
+                                       UInt stencil_front_depth_fail, UInt stencil_front_compare,
+                                       UInt stencil_back_fail, UInt stencil_back_pass,
+                                       UInt stencil_back_depth_fail, UInt stencil_back_compare,
+                                       UInt stencil_read_mask, UInt stencil_write_mask, UInt stencil_reference,
+                                       UInt clear_depth, UInt clear_stencil, Float clear_depth_value,
                                        UInt clear_color, Float4 clear_color_value) noexcept {
         const auto pixel = dispatch_id().xy();
         const auto pixel_index = pixel.y * dispatch_size().x + pixel.x;
@@ -743,6 +762,11 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
         $if (clear_depth != 0u) {
             current_depth = clear_depth_value;
             depth_buffer.write(pixel_index, current_depth);
+        };
+        UInt current_stencil = stencil_buffer.read(pixel_index);
+        $if (clear_stencil != 0u) {
+            current_stencil = 0u;
+            stencil_buffer.write(pixel_index, current_stencil);
         };
 
         const auto in_scissor = pixel.x >= scissor_x & pixel.y >= scissor_y &
@@ -799,8 +823,25 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                     Float candidate_depth = w0 * (a.z / a.w) + w1 * (b.z / b.w) + w2 * (c.z / c.w);
                     const auto depth_in_clip = candidate_depth >= 0.0f & candidate_depth <= 1.0f;
                     $if (depth_clamp != 0u) { candidate_depth = clamp(candidate_depth, 0.0f, 1.0f); };
+                    const auto stencil_fail_op = ite(front, stencil_front_fail, stencil_back_fail);
+                    const auto stencil_pass_op = ite(front, stencil_front_pass, stencil_back_pass);
+                    const auto stencil_depth_fail_op = ite(front, stencil_front_depth_fail, stencil_back_depth_fail);
+                    const auto stencil_compare = ite(front, stencil_front_compare, stencil_back_compare);
+                    Bool stencil_pass = def(true);
+                    $if (stencil_test != 0u) {
+                        const auto reference = stencil_reference & stencil_read_mask;
+                        const auto stencil = current_stencil & stencil_read_mask;
+                        $if (stencil_compare == 0u) { stencil_pass = false; }
+                        $elif (stencil_compare == 1u) { stencil_pass = reference < stencil; }
+                        $elif (stencil_compare == 2u) { stencil_pass = reference == stencil; }
+                        $elif (stencil_compare == 3u) { stencil_pass = reference <= stencil; }
+                        $elif (stencil_compare == 4u) { stencil_pass = reference > stencil; }
+                        $elif (stencil_compare == 5u) { stencil_pass = reference != stencil; }
+                        $elif (stencil_compare == 6u) { stencil_pass = reference >= stencil; }
+                        $else { stencil_pass = true; };
+                    };
                     Bool depth_pass = def(true);
-                    $if (depth_test != 0u) {
+                    $if (stencil_pass & (depth_test != 0u)) {
                         $if (depth_compare == 0u) { depth_pass = false; }
                         $elif (depth_compare == 1u) { depth_pass = candidate_depth < current_depth; }
                         $elif (depth_compare == 2u) { depth_pass = candidate_depth == current_depth; }
@@ -811,7 +852,23 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         $else { depth_pass = true; };
                     };
                     $if (depth_clamp == 0u & !depth_in_clip) { depth_pass = false; };
-                    $if (depth_pass) {
+                    $if (stencil_test != 0u) {
+                        UInt operation = ite(stencil_pass, stencil_pass_op, stencil_fail_op);
+                        $if (stencil_pass & !depth_pass) { operation = stencil_depth_fail_op; };
+                        UInt stencil_result = current_stencil;
+                        $if (operation == 1u) { stencil_result = 0u; }
+                        $elif (operation == 2u) { stencil_result = stencil_reference; }
+                        $elif (operation == 3u) { stencil_result = min(current_stencil + 1u, 255u); }
+                        $elif (operation == 4u) { stencil_result = ite(current_stencil == 0u, 0u, current_stencil - 1u); }
+                        $elif (operation == 5u) { stencil_result = ~current_stencil; }
+                        $elif (operation == 6u) { stencil_result = (current_stencil + 1u) & 255u; }
+                        $elif (operation == 7u) { stencil_result = (current_stencil - 1u) & 255u; };
+                        current_stencil = (current_stencil & ~stencil_write_mask) |
+                                          (stencil_result & stencil_write_mask);
+                        current_stencil &= 255u;
+                        stencil_buffer.write(pixel_index, current_stencil);
+                    };
+                    $if (stencil_pass & depth_pass) {
                         const auto q0 = w0 / a.w;
                         const auto q1 = w1 / b.w;
                         const auto q2 = w2 / c.w;
@@ -835,11 +892,17 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
             };
         }
     });
-    stream << shader(image, vertex_buffer, varying_buffer, coverage_buffer, depth_buffer,
+    stream << shader(image, vertex_buffer, varying_buffer, coverage_buffer, depth_buffer, stencil_buffer,
                      raster.viewport_x, raster.viewport_y, raster.viewport_width, raster.viewport_height,
                      raster.scissor_x, raster.scissor_y, raster.scissor_width, raster.scissor_height,
                      raster.cull_mode, raster.front_face, raster.depth_test, raster.depth_write,
-                     raster.depth_compare, raster.depth_clamp, raster.clear_depth, raster.clear_depth_value,
+                     raster.depth_compare, raster.depth_clamp, raster.stencil_test,
+                     raster.stencil_front_fail, raster.stencil_front_pass,
+                     raster.stencil_front_depth_fail, raster.stencil_front_compare,
+                     raster.stencil_back_fail, raster.stencil_back_pass,
+                     raster.stencil_back_depth_fail, raster.stencil_back_compare,
+                     raster.stencil_read_mask, raster.stencil_write_mask, raster.stencil_reference,
+                     raster.clear_depth, raster.clear_stencil, raster.clear_depth_value,
                      raster.clear_color,
                      make_float4(raster.clear_color_r, raster.clear_color_g,
                                  raster.clear_color_b, raster.clear_color_a))
@@ -848,9 +911,19 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
            << varying_buffer.copy_to(host_varyings.data())
            << coverage_buffer.copy_to(host_coverage.data());
     if (depth != nullptr) {
-        stream << depth_buffer.copy_to(depth->bytes->data());
+        if (depth->pixel_format == 101u) stream << depth_buffer.copy_to(depth->bytes->data());
+        else stream << depth_buffer.copy_to(host_depth.data())
+                    << stencil_buffer.copy_to(host_stencil.data());
     }
     stream << synchronize();
+    if (depth != nullptr && depth->pixel_format == 100u) {
+        auto* packed = reinterpret_cast<uint32_t*>(depth->bytes->data());
+        for (size_t i = 0u; i < pixel_count; ++i) {
+            const auto encoded_depth = static_cast<uint32_t>(
+                std::clamp(host_depth[i], 0.0f, 1.0f) * 16777215.0f + 0.5f);
+            packed[i] = (host_stencil[i] << 24u) | (encoded_depth & 0x00ffffffu);
+        }
+    }
     *fragment_varyings = std::move(host_varyings);
     fragment_coverage->resize(pixel_count * sizeof(float));
     std::memcpy(fragment_coverage->data(), host_coverage.data(), fragment_coverage->size());
