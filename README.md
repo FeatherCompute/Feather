@@ -65,7 +65,7 @@ dotnet add package FeatherCompute --prerelease
 Or pin the current preview release explicitly:
 
 ```bash
-dotnet add package FeatherCompute --version 0.2.0-preview.6
+dotnet add package FeatherCompute --version 0.3.0-preview.1
 ```
 
 The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
@@ -73,7 +73,7 @@ The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
 projects only need this one package. It brings in the source generator, native
 loader, and published native assets through companion packages.
 
-Current preview packages include native assets for:
+Current preview packages include EasyGPU and LuisaCompute Vulkan/XIR native assets for:
 
 - `linux-x64`
 - `osx-arm64`
@@ -82,6 +82,10 @@ Current preview packages include native assets for:
 Other runtime identifiers can still use Feather from source or with
 `FEATHER_NATIVE_LIBRARY=/absolute/path/to/<native-library>` pointing at a
 custom native build.
+
+Compute kernels can select the Luisa Vulkan/XIR backend; EasyGPU remains the
+default. Raster graphics remain on EasyGPU because the pinned LuisaCompute
+release does not expose an XIR raster entry point.
 
 Build from the repository root:
 

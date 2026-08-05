@@ -8,8 +8,8 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
-    <VersionPrefix>0.2.0</VersionPrefix>
-    <VersionSuffix>preview.7</VersionSuffix>
+    <VersionPrefix>0.3.0</VersionPrefix>
+    <VersionSuffix>preview.1</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -18,8 +18,8 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <FeatherPackRepositoryDocs Condition="'$(FeatherPackRepositoryDocs)' == ''">true</FeatherPackRepositoryDocs>
     <PackageReadmeFile Condition="'$(FeatherPackRepositoryDocs)' == 'true'">README.md</PackageReadmeFile>
-    <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Extends SceneMaterial with Ior, DiffuseRoughness and TransmissionWeight, so a pass can shade the full Principled model rather than base colour and roughness alone; adds RenderContext.IsInteractive, letting one pass pick sample and bounce budgets for the viewport and for a final frame; pools rasterizer render targets across frames; and fixes integer-vector uniforms, bool uniforms, descriptor stages and a range check that capped render resolution.</PackageReleaseNotes>
+    <PackageTags>gpu;compute;graphics;roslyn;easygpu;luisa;vulkan;autodiff</PackageTags>
+    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend. Adds the LuisaCompute Vulkan XIR execution backend for compute kernels and autodiff while retaining EasyGPU as the default backend. Raster graphics continue to execute through EasyGPU because the pinned LuisaCompute release has no XIR raster entry point.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true' and '$(FeatherPackRepositoryDocs)' == 'true'">

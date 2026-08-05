@@ -65,6 +65,11 @@ stage_luisa_runtime() {
             while IFS= read -r -d '' source_file; do
                 cp -f "$source_file" "$native_dir/"
             done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f -name 'libluisa*.so*' -print0)
+            # Luisa's Linux Vulkan target copies the DXC runtime beside its backend.
+            # It is a runtime dependency rather than a system graphics driver.
+            while IFS= read -r -d '' source_file; do
+                cp -f "$source_file" "$native_dir/"
+            done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f -name 'libdxcompiler.so*' -print0)
             ;;
         osx-*)
             while IFS= read -r -d '' source_file; do
@@ -82,6 +87,84 @@ stage_luisa_runtime() {
 }
 
 stage_luisa_runtime
+
+is_linux_system_abi_dependency() {
+    local dependency_name="$1"
+
+    case "$dependency_name" in
+        linux-vdso.so.*|ld-linux*.so.*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libstdc++.so.*|libgcc_s.so.*|libutil.so.*|libresolv.so.*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+print_linux_dependencies() {
+    local binary="$1"
+
+    if ldd "$binary" | grep -F 'not found' >/dev/null; then
+        echo "Unresolved Linux native dependency in $binary:" >&2
+        ldd "$binary" >&2
+        return 1
+    fi
+
+    ldd "$binary" | awk '
+        /=> \/[^[:space:]]+/ { print $3; next }
+        /^\/[^[:space:]]+/ { print $1 }
+    '
+}
+
+stage_linux_dependencies() {
+    local native_dir pending processed current dependency dependency_name staged_dependency
+
+    if ! command -v patchelf >/dev/null 2>&1; then
+        echo "Linux native asset staging requires patchelf to make the staged dependency closure relocatable." >&2
+        exit 1
+    fi
+
+    native_dir="$(dirname "$target")"
+    pending="$native_dir/.feather-native-pending"
+    processed="$native_dir/.feather-native-processed"
+    : > "$pending"
+    : > "$processed"
+    while IFS= read -r -d '' current; do
+        append_unique_line "$pending" "$current"
+    done < <(find "$native_dir" -maxdepth 1 -type f \( -name '*.so' -o -name '*.so.*' \) -print0)
+
+    while [[ -s "$pending" ]]; do
+        current="$(sed -n '1p' "$pending")"
+        sed '1d' "$pending" > "$pending.tmp"
+        mv "$pending.tmp" "$pending"
+
+        if grep -Fqx "$current" "$processed"; then
+            continue
+        fi
+        append_unique_line "$processed" "$current"
+
+        while IFS= read -r dependency; do
+            dependency_name="$(basename "$dependency")"
+            if is_linux_system_abi_dependency "$dependency_name"; then
+                continue
+            fi
+
+            staged_dependency="$native_dir/$dependency_name"
+            if [[ "$dependency" != "$staged_dependency" ]]; then
+                cp -f "$dependency" "$staged_dependency"
+            fi
+            append_unique_line "$pending" "$staged_dependency"
+        done < <(print_linux_dependencies "$current")
+    done
+
+    # Libraries copied from the build host may not have an origin rpath of their
+    # own. Keep every staged shared object resolvable from its package directory.
+    while IFS= read -r -d '' current; do
+        patchelf --set-rpath '$ORIGIN' "$current"
+    done < <(find "$native_dir" -maxdepth 1 -type f \( -name '*.so' -o -name '*.so.*' \) -print0)
+
+    rm -f "$pending" "$processed"
+}
 
 is_macos_system_dependency() {
     local dependency="$1"
@@ -242,6 +325,19 @@ remove_macos_host_rpaths() {
     done < <(print_macos_rpaths "$binary")
 }
 
+remove_macos_build_rpaths() {
+    local binary="$1"
+    local rpath
+
+    while IFS= read -r rpath; do
+        case "$rpath" in
+            "$BUILD_DIR"*)
+                install_name_tool -delete_rpath "$rpath" "$binary" 2>/dev/null || true
+                ;;
+        esac
+    done < <(print_macos_rpaths "$binary")
+}
+
 normalize_macos_install_id() {
     local binary="$1"
     local install_id
@@ -318,6 +414,7 @@ stage_macos_dependencies() {
         done < <(print_macos_dependencies "$current")
 
         remove_macos_host_rpaths "$current"
+        remove_macos_build_rpaths "$current"
     done
 
     rm -f "$pending" "$processed"
@@ -344,10 +441,22 @@ stage_macos_dependencies() {
         find "$native_dir" -maxdepth 1 -type f -name '*.dylib' -print0 | xargs -0 otool -l >&2
         exit 1
     fi
+
+    if find "$native_dir" -maxdepth 1 -type f \( -name '*.dylib' -o -name '*.so' \) -print0 |
+        xargs -0 otool -l |
+        grep -F "$BUILD_DIR" >/dev/null; then
+        echo "macOS native asset contains build-tree rpaths:" >&2
+        find "$native_dir" -maxdepth 1 -type f \( -name '*.dylib' -o -name '*.so' \) -print0 | xargs -0 otool -l >&2
+        exit 1
+    fi
 }
 
 if [[ "$RID" == osx-* ]]; then
     stage_macos_dependencies
+fi
+
+if [[ "$RID" == linux-* ]]; then
+    stage_linux_dependencies
 fi
 
 echo "Staged $target"

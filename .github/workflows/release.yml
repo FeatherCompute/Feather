@@ -6,7 +6,7 @@ on:
       version:
         description: NuGet package version to build.
         required: true
-        default: 0.2.0-preview.3
+        default: 0.3.0-preview.1
       publish:
         description: Push packages to nuget.org.
         required: true
@@ -68,6 +68,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxrandr-dev \
+            patchelf \
             spirv-cross \
             spirv-tools \
             vulkan-tools
@@ -78,8 +79,10 @@ jobs:
           brew update
           brew install \
             glslang \
+            molten-vk \
             openssl@3 \
             spirv-tools \
+            vulkan-headers \
             vulkan-loader
           echo "FEATHER_NATIVE_CMAKE_ARGS=${FEATHER_NATIVE_CMAKE_ARGS} -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
@@ -185,6 +188,21 @@ jobs:
           grep -F "runtimes/linux-x64/native/libfeather.so" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libfeather.dylib" artifacts/native-assets-package.txt
           grep -F "runtimes/win-x64/native/feather_native.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libluisa-backend-vk.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libluisa-core.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libluisa-ast.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libluisa-runtime.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/linux-x64/native/libluisa-xir.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libluisa-backend-vk.so" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libluisa-core.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libluisa-ast.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libluisa-runtime.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libluisa-xir.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/luisa-backend-vk.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/luisa-core.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/luisa-ast.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/luisa-runtime.dll" artifacts/native-assets-package.txt
+          grep -F "runtimes/win-x64/native/luisa-xir.dll" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libglslang" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libSPIRV" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libvulkan" artifacts/native-assets-package.txt
@@ -197,6 +215,9 @@ jobs:
           grep -F "tools/net10.0/any/runtimes/linux-x64/native/libfeather.so" artifacts/render-host-package.txt
           grep -F "tools/net10.0/any/runtimes/osx-arm64/native/libfeather.dylib" artifacts/render-host-package.txt
           grep -F "tools/net10.0/any/runtimes/win-x64/native/feather_native.dll" artifacts/render-host-package.txt
+          grep -F "tools/net10.0/any/runtimes/linux-x64/native/libluisa-backend-vk.so" artifacts/render-host-package.txt
+          grep -F "tools/net10.0/any/runtimes/osx-arm64/native/libluisa-backend-vk.so" artifacts/render-host-package.txt
+          grep -F "tools/net10.0/any/runtimes/win-x64/native/luisa-backend-vk.dll" artifacts/render-host-package.txt
 
       - name: Upload packages
         uses: actions/upload-artifact@v4

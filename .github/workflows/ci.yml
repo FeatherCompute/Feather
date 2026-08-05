@@ -44,6 +44,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxrandr-dev \
+            patchelf \
             mesa-vulkan-drivers \
             spirv-cross \
             spirv-tools \
@@ -132,6 +133,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxrandr-dev \
+            patchelf \
             spirv-cross \
             spirv-tools \
             vulkan-tools

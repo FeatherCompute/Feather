@@ -102,10 +102,18 @@ identifier:
 ./eng/pack.sh
 ```
 
-`eng/stage-native-assets.sh` copies the native build output to
+`eng/stage-native-assets.sh` copies the native build output and the Luisa Vulkan
+runtime closure (`luisa-backend-vk`, `luisa-core`, `luisa-ast`, `luisa-runtime`,
+and `luisa-xir`) to
 `artifacts/native-assets/runtimes/<rid>/native`. `Feather.NativeAssets.csproj`
 packs files from that staging directory into `FeatherCompute.NativeAssets`. Do
 not commit generated native binaries under `src/`.
+
+The staging script resolves non-system runtime dependencies from those native
+outputs. macOS install names and rpaths are normalized to `@loader_path`; Linux
+stages the `ldd` closure while leaving the platform ABI libraries out of the
+package. This includes Luisa's Linux `libdxcompiler.so` companion when its
+Vulkan build emits it. Vulkan drivers remain system-provided.
 
 The same staging tree is packed under the RenderHost tool's
 `tools/net10.0/any/runtimes/<rid>/native` directory. A local tool package built
@@ -160,19 +168,23 @@ The workflow currently builds packaged native assets for:
 - `osx-arm64`
 - `win-x64`
 
-It validates that `FeatherCompute.NativeAssets` contains all three native files,
-that `FeatherCompute` contains the analyzer, and that the RenderHost tool carries
-the same three native runtimes before uploading or publishing all five packages.
+It validates that `FeatherCompute.NativeAssets` contains Feather and the Luisa
+Vulkan backend/runtime assets for all three release RIDs, that
+`FeatherCompute` contains the analyzer, and that the RenderHost tool carries the
+same native runtimes before uploading or publishing all five packages.
 
 For preview releases, use an immutable prerelease version such as:
 
 ```text
-0.2.0-preview.N
+0.3.0-preview.N
 ```
 
 NuGet package versions are immutable once published, so run the workflow once
 with `publish=false`, download and inspect the package artifacts, then rerun the
 same version with `publish=true`.
+
+The preview's Luisa path is compute-only. Feather.Graphics raster pipelines stay
+on EasyGPU because LuisaCompute 0.9.0 has no XIR raster entry point.
 
 ## Related Docs
 
