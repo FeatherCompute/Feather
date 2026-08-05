@@ -104,6 +104,13 @@ would otherwise be undefined). No cross-runtime Vulkan import was attempted.
 required by the current API. Multi-frame asynchronous submission is deferred to M8+.
 
 The Cornell benchmark is one synchronous dispatch per fresh process, so resident runtime does
-not amortize its startup in that measurement. The honest comparison remains EasyGPU 30.077 s
-median versus Luisa XIR-SPIR-V 56.449 s median (1.88x). The gap is not yet within the M7 target;
-generated shader/GPU execution dominates after startup and needs a separate M8 investigation.
+not amortize its startup in that measurement. The post-M7 fixed-workload rerun was:
+
+| Backend | Run 1 | Run 2 | Run 3 | Median | Relative |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| EasyGPU | 28.517 s | 29.108 s | 30.032 s | 29.108 s | 1.00x |
+| Luisa Vulkan, XIR-SPIR-V | 62.267 s | 60.093 s | 61.092 s | 61.092 s | 2.10x |
+
+All six post-M7 runs printed the expected dispatch path and `PASS`. The gap is not yet within
+the M7 target; generated shader/GPU execution dominates after startup and needs a separate M8
+investigation.
