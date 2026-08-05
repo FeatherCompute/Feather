@@ -5612,7 +5612,7 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     const auto* configured_runtime = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
     const auto* configured_backend = std::getenv("FEATHER_LUISA_BACKEND");
     auto backend_name = configured_backend == nullptr || configured_backend[0] == '\0'
-                            ? std::string_view{"vk"}
+                            ? Feather::Luisa::DefaultBackendName
                             : std::string_view{configured_backend};
     if (backend_name == "vulkan") backend_name = "vk";
     if (backend_name != "vk" && backend_name != "metal" &&

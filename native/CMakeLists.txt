@@ -25,7 +25,7 @@ set(EASYGPU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 option(FEATHER_BUILD_WINDOW "Build Feather native window and texture presentation support" ON)
 option(FEATHER_BUILD_OPTIMIZATION_BENCHMARK "Build the Vulkan shader optimization benchmark" OFF)
 option(FEATHER_BUILD_LUISA_COMPUTE "Build LuisaCompute backends for the XIR path" ON)
-option(FEATHER_LUISA_ENABLE_METAL "Build LuisaCompute's experimental Metal backend" OFF)
+option(FEATHER_LUISA_ENABLE_METAL "Build LuisaCompute's experimental Metal backend" ${APPLE})
 option(FEATHER_LUISA_ENABLE_CUDA "Build LuisaCompute's experimental CUDA backend" OFF)
 option(FEATHER_LUISA_ENABLE_HIP "Build LuisaCompute's experimental HIP backend" OFF)
 set(FEATHER_LUISA_VULKAN_CODEGEN "XirSpirv" CACHE STRING

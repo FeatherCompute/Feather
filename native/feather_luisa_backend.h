@@ -7,9 +7,16 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Feather::Luisa {
+
+#if defined(__APPLE__)
+inline constexpr std::string_view DefaultBackendName = "metal";
+#else
+inline constexpr std::string_view DefaultBackendName = "vk";
+#endif
 
 struct HostBufferBinding {
     uint32_t binding = 0;
@@ -38,7 +45,7 @@ struct DispatchInputs {
     uint32_t logical_y = 1;
     uint32_t logical_z = 1;
     uint64_t shader_cache_key = 0;
-    std::string backend_name = "vk";
+    std::string backend_name = std::string{DefaultBackendName};
     std::string runtime_directory;
 };
 

@@ -149,7 +149,7 @@ jobs:
             spirv-tools \
             vulkan-headers \
             vulkan-loader
-          echo "FEATHER_NATIVE_CMAKE_ARGS=${FEATHER_NATIVE_CMAKE_ARGS} -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) -DFEATHER_LUISA_ENABLE_METAL=ON" >> "$GITHUB_ENV"
+          echo "FEATHER_NATIVE_CMAKE_ARGS=${FEATHER_NATIVE_CMAKE_ARGS} -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
       - name: Install Windows Vulkan SDK components
         if: runner.os == 'Windows'
