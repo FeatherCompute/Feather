@@ -403,7 +403,11 @@ class Lowerer {
         const auto valid_output_kind = stage_output_ != nullptr &&
                                        (stage_output_->kind == kResourceBuffer ||
                                         (entry.kind == kFunctionFragment && stage_output_->kind == kResourceTexture2D));
-        if (!valid_output_kind || stage_output_->access != kAccessWrite ||
+        const auto valid_output_access = stage_output_ != nullptr &&
+                                         (stage_output_->access == kAccessWrite ||
+                                          (entry.kind == kFunctionFragment &&
+                                           stage_output_->access == kAccessReadWrite));
+        if (!valid_output_kind || !valid_output_access ||
             stage_output_->element_type != type(entry.return_type_id)) {
             return fail("graphics stage output buffer does not match the FEIR return type");
         }
@@ -705,6 +709,97 @@ class Lowerer {
         auto* element = builder_.static_cast_if_necessary(result_type->element(), value);
         std::vector<Value*> components(result_type->dimension(), element);
         return builder_.call(result_type, ArithmeticOp::AGGREGATE, components);
+    }
+
+    Value* graphics_blend_factor(uint32_t factor, Value* source, Value* destination,
+                                 uint32_t component) {
+        auto* float_type = Type::of<float>();
+        auto* zero = xir_module_.create_constant_zero(float_type);
+        auto* one = xir_module_.create_constant_one(float_type);
+        auto component_of = [&](Value* value, uint32_t index) {
+            return extract(value, float_type, {index_constant(index)});
+        };
+        Value* value = nullptr;
+        bool invert = false;
+        switch (factor) {
+        case 0u: return zero;
+        case 1u: return one;
+        case 2u: value = component_of(source, component); break;
+        case 3u: value = component_of(source, component); invert = true; break;
+        case 4u: value = component_of(destination, component); break;
+        case 5u: value = component_of(destination, component); invert = true; break;
+        case 6u: value = component_of(source, 3u); break;
+        case 7u: value = component_of(source, 3u); invert = true; break;
+        case 8u: value = component_of(destination, 3u); break;
+        case 9u: value = component_of(destination, 3u); invert = true; break;
+        default: return fail("compute raster received an invalid blend factor"), nullptr;
+        }
+        return invert ? builder_.call(float_type, ArithmeticOp::BINARY_SUB, {one, value}) : value;
+    }
+
+    Value* graphics_blend_component(Value* source, Value* destination, uint32_t component,
+                                    uint32_t source_factor, uint32_t destination_factor,
+                                    uint32_t operation) {
+        auto* float_type = Type::of<float>();
+        auto* source_value = extract(source, float_type, {index_constant(component)});
+        auto* destination_value = extract(destination, float_type, {index_constant(component)});
+        if (operation == 3u || operation == 4u) {
+            return builder_.call(float_type,
+                                 operation == 3u ? ArithmeticOp::MIN : ArithmeticOp::MAX,
+                                 {source_value, destination_value});
+        }
+        auto* source_scale = graphics_blend_factor(source_factor, source, destination, component);
+        auto* destination_scale = graphics_blend_factor(destination_factor, source, destination, component);
+        if (source_scale == nullptr || destination_scale == nullptr) return nullptr;
+        auto* source_term = builder_.call(float_type, ArithmeticOp::BINARY_MUL,
+                                          {source_value, source_scale});
+        auto* destination_term = builder_.call(float_type, ArithmeticOp::BINARY_MUL,
+                                               {destination_value, destination_scale});
+        switch (operation) {
+        case 0u:
+            return builder_.call(float_type, ArithmeticOp::BINARY_ADD,
+                                 {source_term, destination_term});
+        case 1u:
+            return builder_.call(float_type, ArithmeticOp::BINARY_SUB,
+                                 {source_term, destination_term});
+        case 2u:
+            return builder_.call(float_type, ArithmeticOp::BINARY_SUB,
+                                 {destination_term, source_term});
+        default:
+            return fail("compute raster received an invalid blend operation"), nullptr;
+        }
+    }
+
+    Value* apply_graphics_blend(Value* source, Value* destination) {
+        auto* float4_type = Type::vector(Type::of<float>(), 4u);
+        if (source == nullptr || destination == nullptr || source->type() != float4_type ||
+            destination->type() != float4_type) {
+            return fail("compute raster blending requires float4 colors"), nullptr;
+        }
+        std::vector<Value*> components;
+        components.reserve(4u);
+        for (uint32_t component = 0u; component < 4u; ++component) {
+            auto* destination_value = extract(destination, Type::of<float>(), {index_constant(component)});
+            Value* output = nullptr;
+            if (!inputs_.graphics_blend_enable) {
+                output = extract(source, Type::of<float>(), {index_constant(component)});
+            } else if (component < 3u) {
+                output = graphics_blend_component(source, destination, component,
+                                                  inputs_.graphics_blend_src_color,
+                                                  inputs_.graphics_blend_dst_color,
+                                                  inputs_.graphics_blend_color_op);
+            } else {
+                output = graphics_blend_component(source, destination, component,
+                                                  inputs_.graphics_blend_src_alpha,
+                                                  inputs_.graphics_blend_dst_alpha,
+                                                  inputs_.graphics_blend_alpha_op);
+            }
+            if (output == nullptr) return nullptr;
+            components.push_back((inputs_.graphics_blend_write_mask & (1u << component)) != 0u
+                                     ? output
+                                     : destination_value);
+        }
+        return builder_.call(float4_type, ArithmeticOp::AGGREGATE, components);
     }
 
     Value* convert(Value* value, const Type* result_type) {
@@ -1470,6 +1565,11 @@ class Lowerer {
                         auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
                         auto* coordinate = builder_.call(
                             Type::vector(Type::of<uint32_t>(), 2u), ArithmeticOp::AGGREGATE, {x, y});
+                        auto* destination = builder_.call(
+                            stage_output_->element_type, ResourceReadOp::TEXTURE2D_READ,
+                            {stage_output_->argument, coordinate});
+                        value = apply_graphics_blend(value, destination);
+                        if (value == nullptr) return false;
                         builder_.call(ResourceWriteOp::TEXTURE2D_WRITE,
                                       {stage_output_->argument, coordinate, value});
                     } else {

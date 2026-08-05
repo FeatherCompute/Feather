@@ -10616,6 +10616,15 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     lowering.group_x = 1;
     lowering.group_y = 1;
     lowering.group_z = 1;
+    const auto& blend = pipeline.color_blend_attachments[0];
+    lowering.graphics_blend_enable = blend.blend_enable != 0u;
+    lowering.graphics_blend_src_color = blend.src_color;
+    lowering.graphics_blend_dst_color = blend.dst_color;
+    lowering.graphics_blend_color_op = blend.color_op;
+    lowering.graphics_blend_src_alpha = blend.src_alpha;
+    lowering.graphics_blend_dst_alpha = blend.dst_alpha;
+    lowering.graphics_blend_alpha_op = blend.alpha_op;
+    lowering.graphics_blend_write_mask = blend.write_mask;
     lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
         input_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_input", varying_type});
     lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
@@ -10623,7 +10632,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     Feather::TypedIR::ResourceInfo output_resource;
     output_resource.binding = output_binding;
     output_resource.kind = kIrResourceKindTexture2D;
-    output_resource.access = 2u;
+    output_resource.access = 3u;
     output_resource.name = "__feather_fragment_output";
     output_resource.element_type = "float4";
     output_resource.width = target.width;
@@ -10659,7 +10668,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     }
     buffers.push_back({input_binding, 1u, varying_stride, varyings});
     buffers.push_back({coverage_binding, 1u, sizeof(float), coverage});
-    textures.push_back({output_binding, kIrResourceKindTexture2D, 2u,
+    textures.push_back({output_binding, kIrResourceKindTexture2D, 3u,
                         target.width, target.height, target.depth, target.mip_levels,
                         target.pixel_format, &target.bytes});
 
@@ -10682,9 +10691,9 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
 FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     if (pipeline.topology != 0u || draw.color_target_count != 1u ||
         pipeline.sample_count != 1u || pipeline.color_attachment_count != 1u || pipeline.polygon_mode != 0u ||
-        pipeline.stencil_test != 0u || pipeline.blend_enable != 0u) {
+        pipeline.stencil_test != 0u) {
         return fail(FE_ERROR_UNSUPPORTED,
-                    "compute raster vertical slice supports one non-indexed, single-sample, opaque triangle");
+                    "compute raster supports single-target, single-sample triangle lists without stencil");
     }
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");

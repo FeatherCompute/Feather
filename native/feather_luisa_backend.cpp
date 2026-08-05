@@ -816,7 +816,6 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         const auto q1 = w1 / b.w;
                         const auto q2 = w2 / c.w;
                         const auto varying = (a * q0 + b * q1 + c * q2) / (q0 + q1 + q2);
-                        output.write(pixel, varying);
                         const auto output_base = pixel_index * varying_stride;
                         for (uint32_t lane = 0u; lane < varying_stride / sizeof(float); ++lane) {
                             const auto offset = lane * static_cast<uint32_t>(sizeof(float));
