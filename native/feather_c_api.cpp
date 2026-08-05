@@ -10669,7 +10669,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
 }
 
 FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
-    if (pipeline.topology != 0u || draw.indexed != 0u || draw.color_target_count != 1u ||
+    if (pipeline.topology != 0u || draw.color_target_count != 1u ||
         pipeline.sample_count != 1u || pipeline.color_attachment_count != 1u || pipeline.polygon_mode != 0u ||
         pipeline.stencil_test != 0u || pipeline.blend_enable != 0u) {
         return fail(FE_ERROR_UNSUPPORTED,
@@ -10678,8 +10678,8 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
     }
-    if (draw.first_vertex != 0u || draw.first_instance != 0u || draw.instance_count > 1u) {
-        return fail(FE_ERROR_UNSUPPORTED, "Compute raster vertex FEIR slice does not yet support draw offsets or instancing.");
+    if (draw.first_instance != 0u || draw.instance_count > 1u) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster vertex FEIR does not yet support instancing.");
     }
     const auto vertex_handle = infer_graphics_vertex_buffer(pipeline);
     const auto vertex_it = g_buffers.find(vertex_handle);
@@ -10704,16 +10704,66 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     const auto stride = pipeline.vertex_stride != 0u
                             ? pipeline.vertex_stride
                             : (vertex_it->second.stride != 0u ? vertex_it->second.stride : sizeof(float) * 4u);
+    if (stride == 0u || vertex_it->second.bytes.size() % stride != 0u) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex buffer has an invalid stride.");
+    }
+    const auto vertex_capacity = vertex_it->second.bytes.size() / stride;
+    std::vector<uint32_t> raster_indices(draw.count);
+    uint32_t maximum_vertex = 0u;
+    if (draw.indexed != 0u) {
+        const auto index_it = g_buffers.find(draw.index_buffer);
+        if (draw.index_buffer == 0u || index_it == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Compute raster indexed draw requires a valid index buffer.");
+        }
+        const auto index_stride = index_it->second.stride != 0u
+                                      ? index_it->second.stride
+                                      : static_cast<uint32_t>(sizeof(uint32_t));
+        if (index_stride != sizeof(uint16_t) && index_stride != sizeof(uint32_t)) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute raster indices must be ushort or uint.");
+        }
+        const auto required_indices = static_cast<uint64_t>(draw.first_index) + draw.count;
+        if (required_indices > std::numeric_limits<size_t>::max() / index_stride ||
+            index_it->second.bytes.size() < static_cast<size_t>(required_indices) * index_stride) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster index buffer is too small.");
+        }
+        for (uint32_t i = 0u; i < draw.count; ++i) {
+            const auto offset = static_cast<size_t>(draw.first_index + i) * index_stride;
+            const auto index = index_stride == sizeof(uint16_t)
+                                   ? static_cast<uint32_t>(read_u16_unaligned(index_it->second.bytes.data() + offset))
+                                   : read_u32_unaligned(index_it->second.bytes.data() + offset);
+            const auto shifted = static_cast<int64_t>(index) + draw.vertex_offset;
+            if (shifted < 0 || static_cast<uint64_t>(shifted) >= vertex_capacity) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster index references a vertex out of range.");
+            }
+            raster_indices[i] = static_cast<uint32_t>(shifted);
+            maximum_vertex = std::max(maximum_vertex, raster_indices[i]);
+        }
+    } else {
+        const auto required_vertices = static_cast<uint64_t>(draw.first_vertex) + draw.count;
+        if (required_vertices > vertex_capacity) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex buffer is too small.");
+        }
+        for (uint32_t i = 0u; i < draw.count; ++i) {
+            raster_indices[i] = draw.first_vertex + i;
+        }
+        maximum_vertex = raster_indices.back();
+    }
     const auto backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, target_it->second.width, target_it->second.height, 1u, 0u,
         backend_value != nullptr && backend_value[0] != '\0' ? backend_value : "vk",
         Feather::Luisa::RuntimeDirectory()};
-    std::vector<unsigned char> transformed_vertices;
+    std::vector<unsigned char> all_transformed_vertices;
     uint32_t transformed_stride = 0u;
     const auto vertex_result = dispatch_graphics_vertex_stage(
-        pipeline, draw.count, &transformed_vertices, &transformed_stride);
+        pipeline, maximum_vertex + 1u, &all_transformed_vertices, &transformed_stride);
     if (vertex_result != FE_OK) return vertex_result;
+    std::vector<unsigned char> transformed_vertices(static_cast<size_t>(draw.count) * transformed_stride);
+    for (uint32_t i = 0u; i < draw.count; ++i) {
+        std::memcpy(transformed_vertices.data() + static_cast<size_t>(i) * transformed_stride,
+                    all_transformed_vertices.data() + static_cast<size_t>(raster_indices[i]) * transformed_stride,
+                    transformed_stride);
+    }
     Feather::Luisa::HostBufferBinding vertex_binding{
         0u, 1u, transformed_stride, &transformed_vertices};
     Feather::Luisa::HostTextureBinding target_binding{

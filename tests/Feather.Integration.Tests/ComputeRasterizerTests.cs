@@ -314,6 +314,38 @@ public class ComputeRasterizerTests
         Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
+    [Fact]
+    [Trait("Category", "Gpu")]
+    public void ComputeRasterizerDrawsIndexedTriangleList()
+    {
+        const int size = 8;
+        var expected = new float4(0.9f, 0.3f, 0.1f, 1.0f);
+        using var positions = GPU.CreateBuffer<float4>(
+        [
+            new float4(-0.75f, -0.75f, 0.5f, 1.0f),
+            new float4(0.75f, -0.75f, 0.5f, 1.0f),
+            new float4(-0.75f, 0.75f, 0.5f, 1.0f),
+            new float4(0.75f, 0.75f, 0.5f, 1.0f)
+        ]);
+        using var indices = GPU.CreateBuffer<ushort>([0, 1, 2, 1, 3, 2], BufferAccess.ReadOnly);
+        using var target = GPU.CreateRenderTexture2D<float4, float4>(size, size, PixelFormat.Rgba32Float);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedConstantColorFragmentShader, float4>();
+        target.Upload([.. Enumerable.Repeat(float4.Zero, size * size)]);
+
+        pipeline.DrawIndexed(
+            new GeneratedVertexShader(positions.AsReadOnly()),
+            new GeneratedConstantColorFragmentShader(sampler, new Uniform<float4>(expected)),
+            [target],
+            indices);
+
+        var pixels = new float4[size * size];
+        target.Read(pixels);
+        Assert.Equal(expected, pixels[4 * size + 4]);
+        Assert.Equal(float4.Zero, pixels[0]);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
+    }
+
     private static float4[] FullTargetTriangle(float depth)
         =>
         [
