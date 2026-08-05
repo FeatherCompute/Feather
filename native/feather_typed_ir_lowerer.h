@@ -39,6 +39,23 @@ struct PushConstantInfo {
     size_t alignment = 0;
 };
 
+struct GraphicsBlendInfo {
+    bool enable = false;
+    uint32_t src_color = 1;
+    uint32_t dst_color = 0;
+    uint32_t color_op = 0;
+    uint32_t src_alpha = 1;
+    uint32_t dst_alpha = 0;
+    uint32_t alpha_op = 0;
+    uint32_t write_mask = 15;
+};
+
+struct GraphicsColorTargetInfo {
+    uint32_t binding = NoIndex;
+    uint32_t return_field = NoIndex;
+    GraphicsBlendInfo blend;
+};
+
 struct LoweringInputs {
     uint8_t shader_kind = 0;
     int32_t group_x = 1;
@@ -57,14 +74,7 @@ struct LoweringInputs {
     uint32_t stage_coverage_binding = NoIndex;
     uint32_t graphics_vertex_count = 0;
     uint32_t graphics_first_instance = 0;
-    bool graphics_blend_enable = false;
-    uint32_t graphics_blend_src_color = 1;
-    uint32_t graphics_blend_dst_color = 0;
-    uint32_t graphics_blend_color_op = 0;
-    uint32_t graphics_blend_src_alpha = 1;
-    uint32_t graphics_blend_dst_alpha = 0;
-    uint32_t graphics_blend_alpha_op = 0;
-    uint32_t graphics_blend_write_mask = 15;
+    std::vector<GraphicsColorTargetInfo> graphics_color_targets;
     std::vector<ResourceInfo> resources;
     std::vector<PushConstantInfo> push_constants;
 };

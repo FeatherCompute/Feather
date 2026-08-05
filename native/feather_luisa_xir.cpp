@@ -195,6 +195,12 @@ class Lowerer {
         BasicBlock* continue_target = nullptr;
     };
 
+    struct StageColorOutput {
+        Resource* resource = nullptr;
+        uint32_t return_field = TypedIR::NoIndex;
+        TypedIR::GraphicsBlendInfo blend;
+    };
+
     struct AdResource {
         Resource* source = nullptr;
         ResourceArgument* gradient = nullptr;
@@ -400,18 +406,39 @@ class Lowerer {
 
     bool register_graphics_stage(const TypedIR::Function& entry) {
         stage_output_ = resource_by_binding(inputs_.stage_output_binding);
-        const auto valid_output_kind = stage_output_ != nullptr &&
-                                       (stage_output_->kind == kResourceBuffer ||
-                                        (entry.kind == kFunctionFragment && stage_output_->kind == kResourceTexture2D));
-        const auto valid_output_access = stage_output_ != nullptr &&
-                                         (stage_output_->access == kAccessWrite ||
-                                          (entry.kind == kFunctionFragment &&
-                                           stage_output_->access == kAccessReadWrite));
-        if (!valid_output_kind || !valid_output_access ||
-            stage_output_->element_type != type(entry.return_type_id)) {
-            return fail("graphics stage output buffer does not match the FEIR return type");
-        }
         if (entry.kind == kFunctionFragment) {
+            if (inputs_.graphics_color_targets.empty()) {
+                return fail("fragment stage requires at least one color target");
+            }
+            const auto& return_type = module_.types[entry.return_type_id];
+            for (const auto& target : inputs_.graphics_color_targets) {
+                auto* resource = resource_by_binding(target.binding);
+                if (resource == nullptr || resource->kind != kResourceTexture2D ||
+                    resource->access != kAccessReadWrite ||
+                    resource->element_type != Type::vector(Type::of<float>(), 4u)) {
+                    return fail("fragment color target does not match a read-write float4 texture");
+                }
+                if (target.return_field == TypedIR::NoIndex) {
+                    if (inputs_.graphics_color_targets.size() != 1u ||
+                        resource->element_type != type(entry.return_type_id)) {
+                        return fail("scalar fragment output requires exactly one matching color target");
+                    }
+                } else {
+                    if (return_type.kind != kTypeStruct || return_type.a >= module_.structs.size()) {
+                        return fail("MRT fragment output must be a struct");
+                    }
+                    const auto& structure = module_.structs[return_type.a];
+                    if (target.return_field >= structure.field_count ||
+                        structure.first_field == TypedIR::NoIndex ||
+                        structure.first_field + target.return_field >= module_.struct_fields.size() ||
+                        type(module_.struct_fields[structure.first_field + target.return_field].type_id) !=
+                            resource->element_type) {
+                        return fail("MRT fragment field does not match its color target");
+                    }
+                }
+                stage_color_outputs_.push_back(StageColorOutput{resource, target.return_field, target.blend});
+            }
+            stage_output_ = stage_color_outputs_.front().resource;
             stage_input_ = resource_by_binding(inputs_.stage_input_binding);
             stage_coverage_ = resource_by_binding(inputs_.stage_coverage_binding);
             if (entry.parameter_count != 1u || entry.first_parameter == TypedIR::NoIndex ||
@@ -422,8 +449,13 @@ class Lowerer {
                 stage_coverage_->element_type != Type::of<float>()) {
                 return fail("fragment stage requires one matching varying input buffer");
             }
-        } else if (entry.parameter_count != 0u) {
-            return fail("vertex stage entry parameters are unsupported");
+        } else {
+            if (stage_output_ == nullptr || stage_output_->kind != kResourceBuffer ||
+                stage_output_->access != kAccessWrite ||
+                stage_output_->element_type != type(entry.return_type_id)) {
+                return fail("vertex stage output buffer does not match the FEIR return type");
+            }
+            if (entry.parameter_count != 0u) return fail("vertex stage entry parameters are unsupported");
         }
         return true;
     }
@@ -770,7 +802,8 @@ class Lowerer {
         }
     }
 
-    Value* apply_graphics_blend(Value* source, Value* destination) {
+    Value* apply_graphics_blend(Value* source, Value* destination,
+                                const TypedIR::GraphicsBlendInfo& blend) {
         auto* float4_type = Type::vector(Type::of<float>(), 4u);
         if (source == nullptr || destination == nullptr || source->type() != float4_type ||
             destination->type() != float4_type) {
@@ -781,21 +814,17 @@ class Lowerer {
         for (uint32_t component = 0u; component < 4u; ++component) {
             auto* destination_value = extract(destination, Type::of<float>(), {index_constant(component)});
             Value* output = nullptr;
-            if (!inputs_.graphics_blend_enable) {
+            if (!blend.enable) {
                 output = extract(source, Type::of<float>(), {index_constant(component)});
             } else if (component < 3u) {
                 output = graphics_blend_component(source, destination, component,
-                                                  inputs_.graphics_blend_src_color,
-                                                  inputs_.graphics_blend_dst_color,
-                                                  inputs_.graphics_blend_color_op);
+                                                  blend.src_color, blend.dst_color, blend.color_op);
             } else {
                 output = graphics_blend_component(source, destination, component,
-                                                  inputs_.graphics_blend_src_alpha,
-                                                  inputs_.graphics_blend_dst_alpha,
-                                                  inputs_.graphics_blend_alpha_op);
+                                                  blend.src_alpha, blend.dst_alpha, blend.alpha_op);
             }
             if (output == nullptr) return nullptr;
-            components.push_back((inputs_.graphics_blend_write_mask & (1u << component)) != 0u
+            components.push_back((blend.write_mask & (1u << component)) != 0u
                                      ? output
                                      : destination_value);
         }
@@ -1560,18 +1589,24 @@ class Lowerer {
                 if (value == nullptr) return false;
                 if (stage_output_ != nullptr) {
                     auto* dispatch = xir_module_.create_dispatch_id();
-                    if (stage_output_->kind == kResourceTexture2D) {
+                    if (!stage_color_outputs_.empty()) {
                         auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
                         auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
                         auto* coordinate = builder_.call(
                             Type::vector(Type::of<uint32_t>(), 2u), ArithmeticOp::AGGREGATE, {x, y});
-                        auto* destination = builder_.call(
-                            stage_output_->element_type, ResourceReadOp::TEXTURE2D_READ,
-                            {stage_output_->argument, coordinate});
-                        value = apply_graphics_blend(value, destination);
-                        if (value == nullptr) return false;
-                        builder_.call(ResourceWriteOp::TEXTURE2D_WRITE,
-                                      {stage_output_->argument, coordinate, value});
+                        for (const auto& output : stage_color_outputs_) {
+                            auto* source = output.return_field == TypedIR::NoIndex
+                                               ? value
+                                               : extract(value, output.resource->element_type,
+                                                         {index_constant(output.return_field)});
+                            auto* destination = builder_.call(
+                                output.resource->element_type, ResourceReadOp::TEXTURE2D_READ,
+                                {output.resource->argument, coordinate});
+                            source = apply_graphics_blend(source, destination, output.blend);
+                            if (source == nullptr) return false;
+                            builder_.call(ResourceWriteOp::TEXTURE2D_WRITE,
+                                          {output.resource->argument, coordinate, source});
+                        }
                     } else {
                         auto* index = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
                         builder_.call(ResourceWriteOp::BUFFER_WRITE, {stage_output_->argument, index, value});
@@ -1671,6 +1706,7 @@ class Lowerer {
     bool uses_group_semantics_ = false;
     Resource* stage_input_ = nullptr;
     Resource* stage_output_ = nullptr;
+    std::vector<StageColorOutput> stage_color_outputs_;
     Resource* stage_coverage_ = nullptr;
     uint32_t logical_groups_per_block_ = 1u;
 };
