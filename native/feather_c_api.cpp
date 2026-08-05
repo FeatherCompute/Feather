@@ -10486,6 +10486,35 @@ bool luisa_graphics_fragment_output_fields(const Feather::TypedIR::Module& modul
                         [](uint32_t field) { return field == Feather::TypedIR::NoIndex; });
 }
 
+bool bind_luisa_graphics_push_constants(const ParsedIr& parsed, const GraphicsPipelineState& pipeline,
+                                        Feather::TypedIR::LoweringInputs* lowering) {
+    if (lowering == nullptr) return false;
+    lowering->push_constant_storage.clear();
+    lowering->push_constant_storage.reserve(lowering->push_constants.size());
+    for (auto& push : lowering->push_constants) {
+        const auto resource = std::find_if(parsed.resources.begin(), parsed.resources.end(), [&](const auto& candidate) {
+            return candidate.kind == kIrResourceKindPushConstant && candidate.binding == push.binding;
+        });
+        if (resource == parsed.resources.end()) return false;
+        const auto* name = get_string(parsed, resource->name_string_id);
+        if (name == nullptr) return false;
+        const auto layout = std::find_if(
+            pipeline.push_constant_layout.begin(), pipeline.push_constant_layout.end(), [&](const auto& candidate) {
+                return candidate.binding == push.binding && candidate.name == *name;
+            });
+        if (layout == pipeline.push_constant_layout.end() || layout->size != push.size ||
+            layout->offset > pipeline.push_constants.size() ||
+            push.size > pipeline.push_constants.size() - layout->offset) return false;
+        const auto alignment = std::max<size_t>(push.alignment, 1u);
+        const auto padded_size = align_offset(push.size, alignment);
+        auto& storage = lowering->push_constant_storage.emplace_back(padded_size, 0u);
+        std::memcpy(storage.data(), pipeline.push_constants.data() + layout->offset, push.size);
+        push.data = storage.data();
+        push.size = storage.size();
+    }
+    return true;
+}
+
 FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, uint32_t vertex_count,
                                         uint32_t instance_count, uint32_t first_instance,
                                         std::vector<unsigned char>* output, uint32_t* output_stride) {
@@ -10519,7 +10548,8 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     adapter.logical_y = 1;
     adapter.logical_z = 1;
     Feather::TypedIR::LoweringInputs lowering;
-    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering, true)) {
+    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering, true) ||
+        !bind_luisa_graphics_push_constants(parsed, pipeline, &lowering)) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster could not bind vertex-stage FEIR resources.");
     }
     uint32_t output_binding = 0u;
@@ -10626,7 +10656,8 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     adapter.logical_y = static_cast<int32_t>(first_target.height);
     adapter.logical_z = 1;
     Feather::TypedIR::LoweringInputs lowering;
-    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering)) {
+    if (!build_typed_ir_lowering_inputs(parsed, adapter, &lowering) ||
+        !bind_luisa_graphics_push_constants(parsed, pipeline, &lowering)) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster could not bind fragment-stage FEIR resources.");
     }
     uint32_t synthetic_binding = 0u;
@@ -10734,6 +10765,12 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     }
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
+    }
+    ParsedIr vertex_ir;
+    ParsedIr fragment_ir;
+    if (!parse_feather_ir(pipeline.vertex_ir, &vertex_ir) || !parse_feather_ir(pipeline.fragment_ir, &fragment_ir) ||
+        !build_graphics_push_constant_layout(vertex_ir, fragment_ir, &pipeline.push_constant_layout)) {
+        return fail(FE_ERROR_UNSUPPORTED, "Compute raster could not build the graphics push-constant layout.");
     }
     const auto instance_count = draw.instance_count == 0u ? 1u : draw.instance_count;
     const auto vertex_handle = infer_graphics_vertex_buffer(pipeline);

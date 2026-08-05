@@ -364,9 +364,8 @@ class Lowerer {
                     return fail("Luisa received an invalid Feather sampler descriptor");
                 if (source.sampler_min_filter != source.sampler_mag_filter)
                     return fail("Luisa XIR cannot represent different minification and magnification filters");
-                if (source.sampler_address_u != source.sampler_address_v ||
-                    source.sampler_address_u != source.sampler_address_w)
-                    return fail("Luisa XIR cannot represent different per-axis sampler address modes");
+                if (source.sampler_address_u != source.sampler_address_v)
+                    return fail("Luisa XIR cannot represent different U/V sampler address modes");
                 const auto filter = source.sampler_anisotropy ? 3u
                                     : source.sampler_min_filter == 0u ? 0u
                                     : source.sampler_mipmap_mode == 0u ? 1u : 2u;
@@ -478,6 +477,8 @@ class Lowerer {
         auto* local = builder_.alloca_local(parameter_type);
         builder_.store(local, value);
         locals_.emplace(name, local);
+        fragment_parameter_name_ = name;
+        fragment_parameter_type_ = parameter_type;
         auto* coverage = builder_.call(Type::of<float>(), ResourceReadOp::BUFFER_READ,
                                        {stage_coverage_->argument, index});
         auto* zero = xir_module_.create_constant_zero(Type::of<float>());
@@ -1272,6 +1273,49 @@ class Lowerer {
         return sampled->type() == result_type ? sampled : builder_.bit_cast_if_necessary(result_type, sampled);
     }
 
+    Value* lower_fragment_derivative(uint32_t expression_id, const Type* result_type, bool along_x) {
+        if (stage_input_ == nullptr || fragment_parameter_name_.empty() || fragment_parameter_type_ == nullptr) {
+            return fail("fragment derivatives require a varying input"), nullptr;
+        }
+        auto* dispatch = xir_module_.create_dispatch_id();
+        auto* dispatch_size = xir_module_.create_dispatch_size();
+        auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+        auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
+        auto* width = extract(dispatch_size, Type::of<uint32_t>(), {index_constant(0u)});
+        auto* height = extract(dispatch_size, Type::of<uint32_t>(), {index_constant(1u)});
+        auto* two = index_constant(2u);
+        auto* one = index_constant(1u);
+        auto* axis = along_x ? x : y;
+        auto* extent = along_x ? width : height;
+        auto* pair = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL,
+                                   {builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_DIV, {axis, two}), two});
+        auto* extent_last = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_SUB, {extent, one});
+        auto* pair_end = builder_.call(Type::of<uint32_t>(), ArithmeticOp::MIN,
+                                       {builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {pair, one}),
+                                        extent_last});
+        auto evaluate = [&](Value* sample_x, Value* sample_y) -> Value* {
+            auto* row = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {sample_y, width});
+            auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {row, sample_x});
+            auto* varying = builder_.call(fragment_parameter_type_, ResourceReadOp::BUFFER_READ,
+                                          {stage_input_->argument, index});
+            auto* temporary = builder_.alloca_local(fragment_parameter_type_);
+            builder_.store(temporary, varying);
+            auto found = locals_.find(fragment_parameter_name_);
+            if (found == locals_.end()) return nullptr;
+            auto* saved = found->second;
+            found->second = temporary;
+            auto* value = lower_expression(expression_id);
+            found->second = saved;
+            return value;
+        };
+        auto* first = evaluate(along_x ? pair : x, along_x ? y : pair);
+        auto* second = evaluate(along_x ? pair_end : x, along_x ? y : pair_end);
+        if (first == nullptr || second == nullptr || first->type() != result_type || second->type() != result_type) {
+            return fail("fragment derivative expression has an unsupported type"), nullptr;
+        }
+        return builder_.call(result_type, ArithmeticOp::BINARY_SUB, {second, first});
+    }
+
     Value* shared_index(Value* logical_index, uint32_t length) {
         if (logical_groups_per_block_ == 1u) return logical_index;
         auto* physical_x = extract(xir_module_.create_thread_id(), Type::of<uint32_t>(), {index_constant(0u)});
@@ -1305,7 +1349,15 @@ class Lowerer {
     }
 
     Value* lower_intrinsic(const TypedIR::Expression& expression, const Type* result_type) {
-        auto op = intrinsic_op(string(expression.name_id));
+        const auto name = string(expression.name_id);
+        auto op = intrinsic_op(name);
+        if (name.ends_with(".Ddx") || name.ends_with(".Ddy")) {
+            if (!argument_range(expression) || expression.argument_count != 1u) {
+                return fail("fragment derivative intrinsic requires one argument"), nullptr;
+            }
+            return lower_fragment_derivative(module_.arguments[expression.first_argument], result_type,
+                                             name.ends_with(".Ddx"));
+        }
         auto values = arguments(expression);
         if (!op || values.empty()) return fail("unsupported FEIR intrinsic '" + std::string{string(expression.name_id)} + "'"), nullptr;
         if ((*op == ArithmeticOp::MIN || *op == ArithmeticOp::MAX || *op == ArithmeticOp::CLAMP) && result_type->is_vector()) {
@@ -1708,6 +1760,8 @@ class Lowerer {
     Resource* stage_output_ = nullptr;
     std::vector<StageColorOutput> stage_color_outputs_;
     Resource* stage_coverage_ = nullptr;
+    std::string fragment_parameter_name_;
+    const Type* fragment_parameter_type_ = nullptr;
     uint32_t logical_groups_per_block_ = 1u;
 };
 

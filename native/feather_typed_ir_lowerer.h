@@ -77,6 +77,7 @@ struct LoweringInputs {
     std::vector<GraphicsColorTargetInfo> graphics_color_targets;
     std::vector<ResourceInfo> resources;
     std::vector<PushConstantInfo> push_constants;
+    std::vector<std::vector<unsigned char>> push_constant_storage;
 };
 
 std::unique_ptr<GPU::IR::Module> TryLowerToEasyGpuModule(
