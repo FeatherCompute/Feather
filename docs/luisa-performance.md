@@ -53,3 +53,19 @@ Luisa/EasyGPU delta, about 21.45 s remains attributable primarily to generated s
 and GPU execution. Later sections will replace this structural estimate with measurements
 after code-generation, runtime residency, and staging experiments.
 
+## Vulkan code-generation survey
+
+Pinned LuisaCompute 0.9.0 exposes mutually exclusive compute paths through
+`LUISA_COMPUTE_ENABLE_VK_XIR_SPIRV` and `LUISA_COMPUTE_ENABLE_VK_AST_LLVM_SPIRV`:
+
+| Feather option | LC route | Build/smoke result | Decision |
+| --- | --- | --- | --- |
+| `XirSpirv` | XIR → native SPIR-V (`XIR_TO_SPIRV`) | Release build succeeded; Cornell 64×36@4 spp passed in 2.915 s | Retain for M7 |
+| `HlslSpirv` | AST → HLSL → DXC → SPIR-V (both flags OFF) | Build succeeded after supplying Vulkan SDK `libdxcompiler.dylib`, but DXC rejected generated code: illegal 4-element `float3` initializer and repeated `--0x...` lvalues | Not stable; do not select |
+| `LlvmSpirv` | AST → LLVM → SPIR-V (`AST_LLVM_TO_SPIRV`) | Configuration stopped because no `LLVMConfig.cmake`/LLVM development package is installed on this host; no runtime result | Not selectable here |
+
+The LC source confirms that the official HLSL+Vulkan recommendation is the first row's
+alternative (`HlslSpirv`), not a separate FEIR route. Our FEIR→XIR→AST bridge can reach
+that entry point, but the pinned HLSL generator is not compatible with the generated AST
+for this kernel. The new `FEATHER_LUISA_VULKAN_CODEGEN` CMake cache option makes all three
+choices explicit without changing the default (`XirSpirv`).
