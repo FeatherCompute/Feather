@@ -2,7 +2,8 @@
 
 ## Status And Scope
 
-This is a design for M8 and M9. It changes no managed or native behavior.
+This is a design for M8 and M9. M8.1 device discovery is implemented; later
+milestones in this document remain design-only.
 LuisaCompute is the target runtime model. EasyGPU is scheduled for removal in
 M9, so new public API must describe Luisa concepts directly rather than add
 another backend-selection layer.
@@ -126,9 +127,7 @@ GpuRuntime
 Proposed shape, subject to managed API review:
 
 ```csharp
-using var runtime = GpuRuntime.Create(new GpuRuntimeOptions {
-    RuntimeDirectory = null, Validation = GpuValidationMode.Default
-});
+var runtime = GpuRuntime.Create();
 IReadOnlyList<GpuDeviceInfo> devices = runtime.EnumerateDevices();
 using var context = runtime.CreateContext(new GpuContextOptions {
     DeviceIndex = 0, Backend = GpuBackend.Auto
@@ -246,16 +245,34 @@ The managed surface is identical on Metal, Vulkan, and DX. Semantics are:
 | Unsupported capability | Creation/dispatch fails with a diagnostic; it never routes to CPU or another GPU backend |
 
 Backend-specific limitations belong in `GpuDeviceCapabilities` and test
-matrices, not in behavior hidden behind the same API. Required capability fields
-are stream classes, external memory and semaphore support, presentability,
-timestamp/profiling, raster, ray tracing, bindless, and texture formats. The
-exact set available from LC 35a06cb is **pending verification**.
+matrices, not in behavior hidden behind the same API. M8.1 exposes the one
+uniform numeric query LC 35a06cb provides after device creation, compute warp
+size. Bindless-capacity sufficiency, subgroup, and quad support remain
+`Unknown`. Stream classes, external memory and semaphore support,
+presentability, timestamp/profiling, raster, ray tracing, and texture-format
+queries remain **pending verification** for later milestones.
 
 ## Execution Plan And Acceptance Gates
 
+### M8.1 implementation status
+
+M8.1 is implemented by `GpuRuntime.EnumerateDevices`, `DefaultDevice`, and
+`CreateContext(GpuContextOptions)`. Discovery is backed by LC
+`Context::installed_backends` and `backend_device_names`; explicit selection is
+validated by constructing an LC `Device` with `DeviceConfig.device_index`.
+`compute_warp_size` becomes known after that construction. LC 35a06cb has no
+uniform device query for bindless capacity sufficiency, subgroup operations, or
+quad operations, so those three fields deliberately report `Unknown`; requiring
+one fails before device creation instead of guessing support.
+
+The existing `GPU.Context` remains the compatibility default and reports the
+same platform-default Luisa device. Per-context resource and stream ownership is
+still M8.2; M8.1 contexts represent a validated selection and non-default
+handles remain rejected by resource creation until that ownership migration.
+
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
-| M8.1 Runtime discovery | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Two contexts select distinct enumerated devices when hardware exposes them; invalid explicit index fails; static API remains source-compatible |
+| M8.1 Runtime discovery (implemented) | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Device list/default semantics and invalid selection are covered by managed tests; a GPU test creates the selected LC device; multi-device hardware coverage remains conditional |
 | M8.2 Context-native ownership | Native per-context LC state; resources, pipelines, and kernels carry owner context | Two contexts allocate and dispatch independently; cross-context binding is rejected; disposal order and leak tests pass |
 | M8.3 Streams and fences | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` no longer relies on transient memory; ordered and cross-stream dependency tests pass on Metal/Vulkan/DX runners where available |
 | M8.4 Resource interop and presentation | Capability-gated external resource contract; native presenter/swapchain route where supported | Host staging fallback remains correct; every enabled zero-copy path has ownership/state/fence tests and a non-black multi-frame presentation test |
@@ -270,8 +287,8 @@ compute and graphics migration.
 
 ## Open Questions Requiring Validation
 
-1. Which LC 35a06cb backends expose reliable device capability metadata beyond
-   names and device index, and what is the canonical LC extension query for it?
+1. Which backend-specific LC extensions can promote M8.1's `Unknown` capability
+   fields to reliable values without changing their cross-platform semantics?
 2. Can the pinned Metal, Vulkan, and DX backends all import/export the native
    images/buffers required for zero-copy presentation, with an explicit
    synchronization primitive usable by Feather?

@@ -70,6 +70,23 @@ typedef struct FeBackendCaps {
     uint32_t supports_non_fill_polygon_mode;
 } FeBackendCaps;
 
+typedef enum FeCapabilitySupport {
+    FE_CAPABILITY_UNKNOWN = 0,
+    FE_CAPABILITY_UNSUPPORTED = 1,
+    FE_CAPABILITY_SUPPORTED = 2
+} FeCapabilitySupport;
+
+typedef struct FeDeviceInfo {
+    char backend_name[16];
+    char device_name[256];
+    uint32_t device_index;
+    uint32_t is_default;
+    uint32_t compute_warp_size;
+    uint32_t bindless_capacity_sufficient;
+    uint32_t subgroup;
+    uint32_t quad;
+} FeDeviceInfo;
+
 typedef struct FeWindowDesc {
     uint32_t width;
     uint32_t height;
@@ -257,8 +274,12 @@ typedef struct FeADGradientInfo {
 } FeADGradientInfo;
 
 FE_API FeResult fe_context_get_default(FeContextHandle* out_context);
+FE_API FeResult fe_runtime_get_device_count(uint32_t* out_count);
+FE_API FeResult fe_runtime_get_device_info(uint32_t ordinal, FeDeviceInfo* out_info);
+FE_API FeResult fe_context_create(const char* backend_name, uint32_t device_index, FeContextHandle* out_context);
 FE_API FeResult fe_context_initialize(FeContextHandle context);
 FE_API FeResult fe_context_shutdown(FeContextHandle context);
+FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeDeviceInfo* out_info);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);

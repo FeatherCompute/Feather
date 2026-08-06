@@ -483,6 +483,9 @@ public:
     void ensure(std::string_view runtime_directory, std::string_view backend_name) {
         if (context_ != nullptr && runtime_directory_ == runtime_directory && backend_name_ == backend_name) return;
         reset();
+        // Vulkan device enumeration must happen before a Vulkan Device is live.
+        // Warm Feather's discovery cache so later managed discovery remains safe.
+        (void)EnumerateDevices(runtime_directory);
         runtime_directory_ = runtime_directory;
         backend_name_ = backend_name;
         context_ = std::make_unique<Context>(runtime_directory_);
@@ -492,6 +495,8 @@ public:
 
     Device &device() noexcept { return *device_; }
     Stream &stream() noexcept { return *stream_; }
+    [[nodiscard]] bool has_device() const noexcept { return device_ != nullptr; }
+    [[nodiscard]] std::string_view backend_name() const noexcept { return backend_name_; }
 
     CachedKernel *find(uint64_t key) noexcept {
         const auto it = kernels_.find(key);
@@ -1069,6 +1074,84 @@ std::string RuntimeDirectory() {
     }
     return resolve_runtime_directory(std::filesystem::path{info.dli_fname});
 #endif
+}
+
+std::vector<DeviceInfo> EnumerateDevices(std::string_view runtime_directory) {
+    static std::mutex mutex;
+    static std::string cached_runtime_directory;
+    static std::vector<DeviceInfo> cached_devices;
+    static bool initialized = false;
+    std::lock_guard lock{mutex};
+    if (initialized && cached_runtime_directory == runtime_directory) return cached_devices;
+
+    Context context{runtime_directory};
+    const auto installed = context.installed_backends();
+    constexpr std::array<std::string_view, 4u> supported_backends{"metal", "vk", "cuda", "hip"};
+    std::vector<DeviceInfo> devices;
+    for (const auto backend : supported_backends) {
+        const auto available = std::any_of(installed.begin(), installed.end(), [backend](const auto& name) {
+            return std::string_view{name.data(), name.size()} == backend;
+        });
+        if (!available) continue;
+        const auto names = context.backend_device_names(backend);
+        for (uint32_t index = 0u; index < names.size(); ++index) {
+            devices.emplace_back(DeviceInfo{
+                std::string{backend}, std::string{names[index]}, index, 0u});
+        }
+    }
+    cached_runtime_directory = runtime_directory;
+    cached_devices = std::move(devices);
+    initialized = true;
+    return cached_devices;
+}
+
+bool ValidateDevice(std::string_view runtime_directory, std::string_view backend_name,
+                    uint32_t device_index, DeviceInfo* info, std::string* error) {
+    if (error != nullptr) error->clear();
+    const auto devices = EnumerateDevices(runtime_directory);
+    const auto selected = std::find_if(devices.begin(), devices.end(), [&](const auto& candidate) {
+        return candidate.backend_name == backend_name && candidate.device_index == device_index;
+    });
+    if (selected == devices.end()) {
+        if (error != nullptr) {
+            *error = "Luisa device index " + std::to_string(device_index) +
+                     " is not available for backend '" + std::string{backend_name} + "'.";
+        }
+        return false;
+    }
+
+    auto& state = runtime_state();
+    if (state.has_device()) {
+        if (state.backend_name() != backend_name || device_index != 0u) {
+            if (error != nullptr) {
+                *error = "A Luisa device is already active; selecting a different device is unavailable "
+                         "until per-context device ownership is enabled.";
+            }
+            return false;
+        }
+        if (info != nullptr) {
+            *info = *selected;
+            info->compute_warp_size = state.device().compute_warp_size();
+        }
+        return true;
+    }
+
+    Context context{runtime_directory};
+    DeviceConfig config{};
+    config.device_index = device_index;
+    auto device = context.create_device(backend_name, &config);
+    if (!device) {
+        if (error != nullptr) {
+            *error = "Luisa failed to create device " + std::to_string(device_index) +
+                     " for backend '" + std::string{backend_name} + "'.";
+        }
+        return false;
+    }
+    if (info != nullptr) {
+        *info = *selected;
+        info->compute_warp_size = device.compute_warp_size();
+    }
+    return true;
 }
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,

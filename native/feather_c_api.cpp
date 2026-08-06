@@ -587,6 +587,10 @@ struct ProfilerStats {
     double total_time_ms = 0.0;
 };
 
+struct ContextDeviceState {
+    FeDeviceInfo device{};
+};
+
 std::mutex g_mutex;
 std::atomic<uint64_t> g_next_handle{100};
 std::atomic<bool> g_runtime_shutting_down{false};
@@ -596,6 +600,7 @@ std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
 std::unordered_map<FeKernelHandle, KernelState> g_kernels;
 std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
+std::unordered_map<FeContextHandle, ContextDeviceState> g_contexts;
 #if FEATHER_BUILD_WINDOW
 std::unordered_map<FeWindowHandle, WindowState> g_windows;
 std::unordered_map<FeTexturePresenterHandle, TexturePresenterState> g_texture_presenters;
@@ -2476,6 +2481,31 @@ void copy_fixed_c_string(char* destination, size_t destination_size, const std::
     std::memcpy(destination, value.data(), count);
     destination[count] = '\0';
 }
+
+#if FEATHER_HAS_LUISA
+std::string configured_luisa_runtime_directory() {
+    const auto* configured = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
+    return configured != nullptr && configured[0] != '\0'
+               ? std::string{configured}
+               : Feather::Luisa::RuntimeDirectory();
+}
+
+FeDeviceInfo make_device_info(const Feather::Luisa::DeviceInfo& source) {
+    FeDeviceInfo result{};
+    copy_fixed_c_string(result.backend_name, sizeof(result.backend_name), source.backend_name);
+    copy_fixed_c_string(result.device_name, sizeof(result.device_name), source.device_name);
+    result.device_index = source.device_index;
+    result.is_default = source.backend_name == Feather::Luisa::DefaultBackendName &&
+                                source.device_index == 0u
+                            ? 1u
+                            : 0u;
+    result.compute_warp_size = source.compute_warp_size;
+    result.bindless_capacity_sufficient = FE_CAPABILITY_UNKNOWN;
+    result.subgroup = FE_CAPABILITY_UNKNOWN;
+    result.quad = FE_CAPABILITY_UNKNOWN;
+    return result;
+}
+#endif
 
 std::string easygpu_push_constant_name(const IrResource& resource) {
     return "pc_" + std::to_string(resource.binding);
@@ -12153,20 +12183,97 @@ FE_API FeResult fe_context_get_default(FeContextHandle* out_context) {
     });
 }
 
+FE_API FeResult fe_runtime_get_device_count(uint32_t* out_count) {
+    return protect([&] {
+        if (out_count == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_count must not be null.");
+        }
+#if FEATHER_HAS_LUISA
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto devices = Feather::Luisa::EnumerateDevices(configured_luisa_runtime_directory());
+        if (devices.size() > std::numeric_limits<uint32_t>::max()) {
+            return fail(FE_ERROR_UNKNOWN, "Luisa reported too many devices.");
+        }
+        *out_count = static_cast<uint32_t>(devices.size());
+        return ok();
+#else
+        *out_count = 0u;
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_runtime_get_device_info(uint32_t ordinal, FeDeviceInfo* out_info) {
+    return protect([&] {
+        if (out_info == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_info must not be null.");
+        }
+#if FEATHER_HAS_LUISA
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto devices = Feather::Luisa::EnumerateDevices(configured_luisa_runtime_directory());
+        if (ordinal >= devices.size()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Device ordinal is out of range.");
+        }
+        *out_info = make_device_info(devices[ordinal]);
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_context_create(const char* backend_name, uint32_t device_index,
+                                  FeContextHandle* out_context) {
+    return protect([&] {
+        if (backend_name == nullptr || backend_name[0] == '\0' || out_context == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "backend_name and out_context must not be null.");
+        }
+#if FEATHER_HAS_LUISA
+        auto normalized_backend = std::string{backend_name};
+        if (normalized_backend == "vulkan") normalized_backend = "vk";
+        if (normalized_backend != "vk" && normalized_backend != "metal" &&
+            normalized_backend != "cuda" && normalized_backend != "hip") {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "backend_name must be one of: vk, metal, cuda, hip.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        Feather::Luisa::DeviceInfo selected{};
+        std::string error;
+        if (!Feather::Luisa::ValidateDevice(configured_luisa_runtime_directory(), normalized_backend,
+                                           device_index, &selected, &error)) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                        error.empty() ? "Luisa device creation failed." : error.c_str());
+        }
+        const auto handle = next_handle();
+        g_contexts.emplace(handle, ContextDeviceState{make_device_info(selected)});
+        *out_context = handle;
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
 FE_API FeResult fe_context_initialize(FeContextHandle context) {
     return protect([&] {
         if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_contexts.find(context) == g_contexts.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+            }
         }
-
-        (void)require_backend();
+        if (context == kDefaultContext) (void)require_backend();
         return ok();
     });
 }
 
 FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     if (context != kDefaultContext && context != 0) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_contexts.erase(context) == 0u) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        return ok();
     }
 #if FEATHER_HAS_LUISA
     try {
@@ -12176,6 +12283,36 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     }
 #endif
     return ok();
+}
+
+FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeDeviceInfo* out_info) {
+    return protect([&] {
+        if (out_info == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_info must not be null.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (context != kDefaultContext) {
+            const auto found = g_contexts.find(context);
+            if (found == g_contexts.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+            }
+            *out_info = found->second.device;
+            return ok();
+        }
+#if FEATHER_HAS_LUISA
+        const auto devices = Feather::Luisa::EnumerateDevices(configured_luisa_runtime_directory());
+        const auto found = std::find_if(devices.begin(), devices.end(), [](const auto& device) {
+            return device.backend_name == Feather::Luisa::DefaultBackendName && device.device_index == 0u;
+        });
+        if (found == devices.end()) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "The default Luisa device is unavailable.");
+        }
+        *out_info = make_device_info(*found);
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
 }
 
 FE_API FeResult fe_runtime_flush_caches(void) {

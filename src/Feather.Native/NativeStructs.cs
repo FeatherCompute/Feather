@@ -45,6 +45,26 @@ public struct FeBackendCaps
     public uint SupportsNonFillPolygonMode;
 }
 
+public enum FeCapabilitySupport : uint
+{
+    Unknown = 0,
+    Unsupported = 1,
+    Supported = 2
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+public unsafe struct FeDeviceInfo
+{
+    public fixed byte BackendName[16];
+    public fixed byte DeviceName[256];
+    public uint DeviceIndex;
+    public uint IsDefault;
+    public uint ComputeWarpSize;
+    public FeCapabilitySupport BindlessCapacitySufficient;
+    public FeCapabilitySupport Subgroup;
+    public FeCapabilitySupport Quad;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct FeWindowDesc
 {

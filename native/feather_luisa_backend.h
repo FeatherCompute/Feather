@@ -113,7 +113,17 @@ struct AdGradientBinding {
     std::vector<unsigned char>* bytes = nullptr;
 };
 
+struct DeviceInfo {
+    std::string backend_name;
+    std::string device_name;
+    uint32_t device_index = 0;
+    uint32_t compute_warp_size = 0;
+};
+
 std::string RuntimeDirectory();
+std::vector<DeviceInfo> EnumerateDevices(std::string_view runtime_directory);
+bool ValidateDevice(std::string_view runtime_directory, std::string_view backend_name,
+                    uint32_t device_index, DeviceInfo* info, std::string* error);
 
 // Owns the Luisa Context/Device/Stream lifetime for Feather's native context.
 // Shutdown is called from context/runtime teardown; Abandon is used on process

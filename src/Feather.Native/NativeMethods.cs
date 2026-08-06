@@ -208,6 +208,18 @@ public static class NativeMethods
     public static extern FeResult fe_context_get_default(out FeContextHandle out_context);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_runtime_get_device_count(out uint out_count);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_runtime_get_device_info(uint ordinal, out FeDeviceInfo out_info);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_create(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string backend_name,
+        uint device_index,
+        out FeContextHandle out_context);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_context_initialize(FeContextHandle context);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -215,6 +227,9 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_context_shutdown")]
     public static extern FeResult fe_context_shutdown_raw(IntPtr context);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_get_device_info(FeContextHandle context, out FeDeviceInfo out_info);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_context_get_backend_type(FeContextHandle context, out uint out_backend);
