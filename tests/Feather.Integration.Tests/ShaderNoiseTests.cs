@@ -17,20 +17,6 @@ namespace Feather.Integration.Tests;
 public class ShaderNoiseTests
 {
     [Fact]
-    public void HelpersLowerAsRealFunctions()
-    {
-        var glsl = ShaderInspection.GetGLSL<NoiseProbeKernel>();
-
-        Assert.Contains("Mod", glsl, StringComparison.Ordinal);
-        Assert.Contains("Step", glsl, StringComparison.Ordinal);
-        Assert.Contains("Sign", glsl, StringComparison.Ordinal);
-        Assert.Contains("Value", glsl, StringComparison.Ordinal);
-        // Value calls Hash, so the transitive import has to be pulled in as well.
-        Assert.Contains("Hash", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ModFollowsTheDivisorSign()
     {
         // GLSL's mod, not C#'s %. A truncated remainder would return -1 here and mirror a tiled

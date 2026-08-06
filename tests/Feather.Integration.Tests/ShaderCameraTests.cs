@@ -20,43 +20,6 @@ namespace Feather.Integration.Tests;
 public class ShaderCameraTests
 {
     [Fact]
-    public void CameraUniformsLowerToAPushConstantBlock()
-    {
-        var glsl = ShaderInspection.GetGLSL<CameraRayKernel>();
-
-        Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-        Assert.Contains("mat4", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void CameraStructIsRejectedAsAPushConstant()
-    {
-        // Documents why FromUniforms exists rather than a Uniform<GpuCamera> parameter. The
-        // generator accepts a user [GpuStruct] as a push constant, but EasyGPU cannot bind one, so
-        // the failure lands at shader build time. If this ever starts passing, the two camera
-        // uniforms can collapse back into a single struct parameter.
-        var failure = Assert.ThrowsAny<Exception>(
-            static () => ShaderInspection.GetGLSL<CameraStructUniformKernel>());
-
-        Assert.Contains("could not be matched to bound native resources", failure.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RayHelpersLowerAsRealFunctions()
-    {
-        var glsl = ShaderInspection.GetGLSL<CameraRayKernel>();
-
-        // Emitted as functions, not inlined away, which is what makes them shareable at all.
-        Assert.Contains("RayDirection", glsl, StringComparison.Ordinal);
-        Assert.Contains("RayOrigin", glsl, StringComparison.Ordinal);
-        // RayDirection calls UnprojectDepth, so the transitive import has to be pulled in too.
-        Assert.Contains("UnprojectDepth", glsl, StringComparison.Ordinal);
-        // The struct survives as a struct, which is what lets it pass between those functions.
-        Assert.Contains("FromUniforms", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void BlenderConversionMovesTheUpAxisOntoY()
     {
         // A camera 10 units up in Blender's world, where up is Z.

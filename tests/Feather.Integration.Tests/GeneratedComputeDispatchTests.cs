@@ -13,94 +13,28 @@ namespace Feather.Integration.Tests;
 public class GeneratedComputeDispatchTests
 {
     [Fact]
-    [Trait("Coverage", "NativeReferenceFallback")]
-    public void DispatchCopiesBufferThroughNativeFallback()
+    [Trait("Category", "Gpu")]
+    public void StaticGpuApiDefaultsToLuisa()
     {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripSection7ForNativeReferenceFallback;
-            using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
-            using var output = GPU.CreateBuffer<float>(4);
-            var kernel = new CopyKernel(input.AsReadOnly(), output.AsReadWrite());
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
 
-            GPU.Dispatch(kernel, 4);
+        var path = DispatchAndGetPath(new CopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal([1, 2, 3, 4], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
+        Assert.Equal(DispatchPath.Luisa, path);
+        Assert.Equal([1, 2, 3, 4], output.ToArray());
     }
 
     [Fact]
-    public void ShaderInspectionReturnsEasyGpuBuilderSourceForCopyKernel()
+    public void DispatchCopiesBufferThroughLuisa()
     {
-        var glsl = ShaderInspection.GetGLSL<CopyKernel>();
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
+        var kernel = new CopyKernel(input.AsReadOnly(), output.AsReadWrite());
 
-        Assert.Contains("#version", glsl, StringComparison.Ordinal);
-        Assert.Contains("layout(local_size_x = 1", glsl, StringComparison.Ordinal);
-        Assert.Contains("buffer fe_0_t", glsl, StringComparison.Ordinal);
-        Assert.Contains("buffer fe_1_t", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_1", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
+        GPU.Dispatch(kernel, 4);
 
-    [Fact]
-    public void ShaderInspectionSanitizesReservedGlslLocalIdentifiers()
-    {
-        var glsl = ShaderInspection.GetGLSL<ReservedLocalIdentifierKernel>();
-
-        Assert.Contains("float fe_output", glsl, StringComparison.Ordinal);
-        Assert.Contains("float fe_texture", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("float output", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("float texture", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ShaderInspectionOptimizedPathUsesEasyGpuBackend()
-    {
-        try
-        {
-            var glsl = ShaderInspection.GetOptimizedGLSL<CopyKernel>();
-
-            Assert.Contains("#version", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        catch (FeatherNativeException ex) when (
-            ex.Result is FeResult.ErrorBackendUnavailable or FeResult.ErrorUnsupported or FeResult.ErrorShaderCompileFailed)
-        {
-            Assert.Contains("EasyGPU", ex.Message, StringComparison.OrdinalIgnoreCase);
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionLowersUniformExpressionThroughEasyGpuPushConstants()
-    {
-        var glsl = ShaderInspection.GetGLSL<UniformExpressionKernel>();
-
-        Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-        Assert.Contains("float u0;", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-        Assert.Contains(")*(u0)", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ShaderInspectionLowersBoolUniformThroughEasyGpuPushConstants()
-    {
-        // A bool uniform is sized and aligned like a 32-bit value everywhere else in the pipeline,
-        // but the typed dispatch gate used to have no GPU type for it and refused the binding
-        // outright, so a switch could be declared and then never reach a shader.
-        var glsl = ShaderInspection.GetGLSL<BoolUniformKernel>();
-
-        Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-        Assert.Contains("bool u0;", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
+        Assert.Equal([1, 2, 3, 4], output.ToArray());
     }
 
     [Fact]
@@ -144,27 +78,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsCopyKernelFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<CopyKernel>();
-
-            Assert.Contains("#version", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_1", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesEntryAttributedComputeKernel()
     {
         using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
@@ -176,7 +89,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchExecutesRecommendedEntryKernelWithVarLocalsThroughTypedEasyGpu()
+    public void DispatchExecutesRecommendedEntryKernelWithVarLocalsThroughLuisa()
     {
         using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
         using var output = GPU.CreateBuffer<float>(4);
@@ -184,7 +97,7 @@ public class GeneratedComputeDispatchTests
         var path = DispatchAndGetPath(new EntryVarLocalsKernel(input.AsReadOnly(), output.AsReadWrite(), new Uniform<float>(1.5f)), 4);
 
         Assert.Equal([1.5f, 4.5f, 7.5f, 10.5f], output.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
     }
 
     [Fact]
@@ -207,7 +120,7 @@ public class GeneratedComputeDispatchTests
                 GpuKernel.Dispatch(GPU.Context, gpuKernel, kernel, new GpuDispatchSize(1, 1, 1), wait: true);
             }
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
+            Assert.Equal(DispatchPath.Luisa, gpuKernel.LastDispatchPath);
             Assert.Equal((dispatchCount - 1) * 2f, outputs[^1].ToArray()[0]);
         }
         finally
@@ -221,83 +134,6 @@ public class GeneratedComputeDispatchTests
             {
                 input?.Dispose();
             }
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsLiteralArithmeticFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<MultiplyFloatByLiteralKernel>();
-
-            Assert.Contains("#version", glsl, StringComparison.Ordinal);
-            Assert.Contains(")*(2", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionFusesFloatingPointMultiplyAddFromTypedIr()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var scalar = ShaderInspection.GetGLSL<NestedExpressionKernel>();
-            var vector = ShaderInspection.GetGLSL<VectorFusedMultiplyAddKernel>();
-
-            Assert.Contains("fma(", scalar, StringComparison.Ordinal);
-            Assert.Contains("fma(", vector, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionDoesNotFuseIntegerMultiplyAddFromTypedIr()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<IntegerMultiplyAddKernel>();
-
-            Assert.DoesNotContain("fma(", glsl, StringComparison.Ordinal);
-            Assert.Contains(")*(", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsUnsignedIntegerArithmeticFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<UnsignedIntegerKernel>();
-
-            Assert.Contains("uint", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_1", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
         }
     }
 
@@ -340,45 +176,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsLocalThreadAliasFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<CopyKernel>();
-
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("ASSIGN1", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsPushConstantExpressionFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<UniformExpressionKernel>();
-
-            Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-            Assert.Contains(")*(u0)", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchCopiesBufferFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -389,7 +186,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new CopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([1, 2, 3, 4], output.ToArray());
         }
         finally
@@ -399,35 +196,13 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionEmitsLogicalBoundsGuardForBoundsCheckedKernels()
-    {
-        var glsl = ShaderInspection.GetGLSL<BoundsCheckedWriteKernel>();
-
-        Assert.Contains("if ", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.Contains(">=", glsl, StringComparison.Ordinal);
-        Assert.Contains("return;", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ShaderInspectionDoesNotEmitLogicalBoundsGuardWhenDisabled()
-    {
-        var glsl = ShaderInspection.GetGLSL<UncheckedBoundsWriteKernel>();
-
-        Assert.DoesNotContain("return;", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain(">=", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void DispatchBoundsCheckProtectsNonDivisibleOneDimensionalDispatch()
     {
         using var output = GPU.CreateBuffer<int>(Enumerable.Repeat(-1, 16).ToArray());
 
         var path = DispatchAndGetPath(new BoundsCheckedWriteKernel(output.AsReadWrite()), 5);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         Assert.Equal([0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1], output.ToArray());
     }
 
@@ -438,7 +213,7 @@ public class GeneratedComputeDispatchTests
 
         var path = DispatchAndGetPath(new BoundsChecked2DWriteKernel(output.AsReadWrite()), new GpuDispatchSize(3, 2, 1));
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         Assert.Equal([0, 1, 2, -1, 10, 11, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1], output.ToArray());
     }
 
@@ -449,7 +224,7 @@ public class GeneratedComputeDispatchTests
 
         var path = DispatchAndGetPath(new BoundsChecked3DWriteKernel(output.AsReadWrite()), new GpuDispatchSize(3, 2, 2));
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         Assert.Equal([
             0, 1, 2, -1,
             10, 11, 12, -1,
@@ -473,30 +248,8 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new MultiplyFloatByLiteralKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([2, 4, 6, 8], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsIfElseFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<IfThresholdKernel>();
-
-            Assert.Contains("#version", glsl, StringComparison.Ordinal);
-            Assert.Contains("if ", glsl, StringComparison.Ordinal);
-            Assert.Contains("else", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("if (true)", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -524,32 +277,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsDynamicForLoopFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<DynamicForSumKernel>();
-
-            Assert.Contains("#version", glsl, StringComparison.Ordinal);
-            Assert.Contains("for ", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_1", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_2", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.Contains("[i]", glsl, StringComparison.Ordinal);
-            Assert.Contains("i)+(j", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("for (;", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesDynamicForLoopFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -561,7 +288,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new DynamicForSumKernel(counts.AsReadOnly(), input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([1, 5, 12, 22], output.ToArray());
         }
         finally
@@ -619,7 +346,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new BreakContinueLoopKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([101, 101, 101, 101], output.ToArray());
         }
         finally
@@ -849,26 +576,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsVectorSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<SwizzleReadKernel>();
-
-            Assert.Contains(".xy", glsl, StringComparison.Ordinal);
-            Assert.Contains(".z", glsl, StringComparison.Ordinal);
-            Assert.Contains(".w", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesVectorSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -913,27 +620,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsExpandedVectorSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<ExpandedSwizzleKernel>();
-
-            Assert.Contains(".yx", glsl, StringComparison.Ordinal);
-            Assert.Contains(".zxy", glsl, StringComparison.Ordinal);
-            Assert.Contains(".wzyx", glsl, StringComparison.Ordinal);
-            Assert.Contains(".zyxw", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesExpandedVectorSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -951,26 +637,6 @@ public class GeneratedComputeDispatchTests
                 new float4(5, 2, 7, 5),
                 new float4(13, 10, 15, 13)
             ], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsTextureCoordinateSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<TextureCoordinateSwizzleKernel>();
-
-            Assert.Contains(".yx", glsl, StringComparison.Ordinal);
-            Assert.Contains(".zxy", glsl, StringComparison.Ordinal);
-            Assert.Contains(".wzyx", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -1004,16 +670,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsSwizzleWriteLValueFromTypedIr()
-    {
-        var glsl = ShaderInspection.GetGLSL<RawSwizzleWriteKernel>();
-
-        Assert.Contains(".xy", glsl, StringComparison.Ordinal);
-        Assert.Contains("vec2", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void DispatchExecutesSwizzleWriteBackFromTypedIr()
     {
         using var output = GPU.CreateBuffer<float4>([
@@ -1022,18 +678,8 @@ public class GeneratedComputeDispatchTests
 
         var path = DispatchAndGetPath(new RawSwizzleWriteKernel(output.AsReadWrite()), 1);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         Assert.Equal([new float4(1, 1, 6, 8)], output.ToArray());
-    }
-
-    [Fact]
-    public void ShaderInspectionRejectsDuplicateComponentSwizzleWriteFromTypedIr()
-    {
-        var exception = Assert.Throws<FeatherNativeException>(() => ShaderInspection.GetGLSL<RawDuplicateSwizzleWriteKernel>());
-
-        Assert.Equal(FeResult.ErrorUnsupported, exception.Result);
-        Assert.Contains("swizzle l-value", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("same component more than once", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1060,28 +706,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsBoolVectorConstructorsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<BoolVectorConstructorKernel>();
-
-            Assert.Contains("bvec2", glsl, StringComparison.Ordinal);
-            Assert.Contains("bvec3", glsl, StringComparison.Ordinal);
-            Assert.Contains("bvec4", glsl, StringComparison.Ordinal);
-            Assert.Contains(".x", glsl, StringComparison.Ordinal);
-            Assert.Contains(".z", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesBoolVectorConstructorsFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -1092,29 +716,6 @@ public class GeneratedComputeDispatchTests
             GPU.Dispatch(new BoolVectorConstructorKernel(output.AsReadWrite()), 4);
 
             Assert.Equal([7, 12, 14, 10], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsNumericCastsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var scalar = ShaderInspection.GetGLSL<NumericCastKernel>();
-            var vector = ShaderInspection.GetGLSL<VectorCastKernel>();
-
-            Assert.Contains("float(", scalar, StringComparison.Ordinal);
-            Assert.Contains("int(", scalar, StringComparison.Ordinal);
-            Assert.Contains("vec3(", vector, StringComparison.Ordinal);
-            Assert.Contains("ivec3(", vector, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", scalar, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", vector, StringComparison.Ordinal);
         }
         finally
         {
@@ -1143,53 +744,6 @@ public class GeneratedComputeDispatchTests
                 new int3(3, 4, 5),
                 new int3(4, 5, 6)
             ], vectorOutput.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMatrixConstructorsAndOperatorsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var mat2 = ShaderInspection.GetGLSL<Matrix2VectorMultiplyKernel>();
-            var mat3 = ShaderInspection.GetGLSL<Matrix3MultiplyKernel>();
-            var mat4 = ShaderInspection.GetGLSL<Matrix4VectorMultiplyKernel>();
-
-            Assert.Contains("mat2", mat2, StringComparison.Ordinal);
-            Assert.Contains("vec2", mat2, StringComparison.Ordinal);
-            Assert.Contains("*", mat2, StringComparison.Ordinal);
-            Assert.Contains("mat3", mat3, StringComparison.Ordinal);
-            Assert.Contains("mat4", mat4, StringComparison.Ordinal);
-            Assert.Contains("vec4", mat4, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", mat2, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", mat3, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", mat4, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMatrixColumnAccessFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<MatrixColumnAccessKernel>();
-
-            Assert.Contains("mat4", glsl, StringComparison.Ordinal);
-            Assert.Contains("[2]", glsl, StringComparison.Ordinal);
-            Assert.Contains(".xyz", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -1256,50 +810,6 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsMatrixMathIntrinsicsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<MatrixMathIntrinsicKernel>();
-
-            Assert.Contains("transpose(", glsl, StringComparison.Ordinal);
-            Assert.Contains("determinant(", glsl, StringComparison.Ordinal);
-            Assert.Contains("inverse(", glsl, StringComparison.Ordinal);
-            Assert.Contains("matrixCompMult(", glsl, StringComparison.Ordinal);
-            Assert.Contains("*", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMatrixPushConstantsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<Matrix3UniformMultiplyKernel>();
-
-            Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat3 u0;", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat3 u1;", glsl, StringComparison.Ordinal);
-            Assert.Contains("float u2;", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat3", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
     public void DispatchExecutesMatrixPushConstantsFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -1323,35 +833,13 @@ public class GeneratedComputeDispatchTests
                     new Uniform<float>(2.0f)),
                 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([
                 new float3(12, 15, 18),
                 new float3(17, 22, 27),
                 new float3(22, 29, 36),
                 new float3(27, 36, 45)
             ], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsSquareMatrixPushConstantsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<SquareMatrixUniformKernel>();
-
-            Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat2 u0;", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat3 u1;", glsl, StringComparison.Ordinal);
-            Assert.Contains("mat4 u2;", glsl, StringComparison.Ordinal);
-            Assert.Contains("float u3;", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -1389,7 +877,7 @@ public class GeneratedComputeDispatchTests
                     new Uniform<float>(3.0f)),
                 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([
                 new float4(13, 18, 36, 3),
                 new float4(14, 22, 36, 3),
@@ -1432,12 +920,6 @@ public class GeneratedComputeDispatchTests
         {
             GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
 
-            var glsl = ShaderInspection.GetGLSL<ThreadIdsXyLinearIndexKernel>();
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.y", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("gl_GlobalInvocationID.z", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-
             using var output = GPU.CreateBuffer<int>(6);
 
             GPU.Dispatch(new ThreadIdsXyLinearIndexKernel(output.AsReadWrite()), new int2(3, 2));
@@ -1457,185 +939,11 @@ public class GeneratedComputeDispatchTests
         {
             GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
 
-            var glsl = ShaderInspection.GetGLSL<ThreadIdsXyzLinearIndexKernel>();
-            Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.y", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_GlobalInvocationID.z", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-
             using var output = GPU.CreateBuffer<int>(8);
 
             GPU.Dispatch(new ThreadIdsXyzLinearIndexKernel(output.AsReadWrite()), new int3(2, 2, 2));
 
             Assert.Equal([0, 1, 10, 11, 100, 101, 110, 111], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsLocalIdsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<LocalIdsKernel>();
-
-            Assert.Contains("gl_LocalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsTypedSharedFloatMemoryAndBarriersWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<SharedFloatCopyKernel>();
-            var writeIndex = glsl.IndexOf("shared_values", StringComparison.Ordinal);
-            var barrierIndex = glsl.IndexOf("barrier();", StringComparison.Ordinal);
-            var readIndex = glsl.LastIndexOf("shared_values", StringComparison.Ordinal);
-
-            Assert.Contains("shared float shared_values[4];", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_LocalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.True(writeIndex >= 0, glsl);
-            Assert.True(barrierIndex > writeIndex, glsl);
-            Assert.True(readIndex > barrierIndex, glsl);
-            Assert.DoesNotContain("shared_data", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsTypedSharedIntMemoryWithDynamicLocalIndexWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<SharedIntDynamicIndexKernel>();
-
-            Assert.Contains("shared int shared_ints[8];", glsl, StringComparison.Ordinal);
-            Assert.Contains("shared_ints", glsl, StringComparison.Ordinal);
-            Assert.Contains("slot", glsl, StringComparison.Ordinal);
-            Assert.Contains("gl_LocalInvocationID.x", glsl, StringComparison.Ordinal);
-            Assert.Contains("barrier();", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("shared_data", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMultipleTypedSharedMemoriesWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<MultipleSharedMemoryKernel>();
-
-            Assert.Contains("shared float shared_left[4];", glsl, StringComparison.Ordinal);
-            Assert.Contains("shared int shared_right[4];", glsl, StringComparison.Ordinal);
-            Assert.Contains("shared_left", glsl, StringComparison.Ordinal);
-            Assert.Contains("shared_right", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("shared_data", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsVectorSharedMemoryWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<SharedVectorMemoryKernel>();
-
-            Assert.Contains("shared vec2 shared_vectors[2];", glsl, StringComparison.Ordinal);
-            Assert.Contains("vec2", glsl, StringComparison.Ordinal);
-            Assert.Contains("shared_vectors", glsl, StringComparison.Ordinal);
-            Assert.Contains("barrier();", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("shared_data", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionPreservesTypedBarrierKindsWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<TypedBarrierKindsKernel>();
-            var firstWorkgroup = glsl.IndexOf("barrier();", StringComparison.Ordinal);
-            var memory = glsl.IndexOf("memoryBarrier();", StringComparison.Ordinal);
-            var secondMemory = glsl.IndexOf("memoryBarrier();", memory + 1, StringComparison.Ordinal);
-            var fullBarrier = glsl.IndexOf("barrier();", secondMemory + 1, StringComparison.Ordinal);
-
-            Assert.True(firstWorkgroup >= 0, glsl);
-            Assert.True(memory > firstWorkgroup, glsl);
-            Assert.True(secondMemory > memory, glsl);
-            Assert.True(fullBarrier > secondMemory, glsl);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsCallableFunctionFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<TypedCallableKernel>();
-            const string callableName = "global__Feather_Integration_Tests_TypedCallableKernel_Twice_";
-            const string callableDefinitionPrefix = "float global__Feather_Integration_Tests_TypedCallableKernel_Twice_";
-            var mainStart = glsl.IndexOf("void main()", StringComparison.Ordinal);
-            var callableCallStart = mainStart < 0
-                ? -1
-                : glsl.IndexOf(callableName, mainStart, StringComparison.Ordinal);
-            var callableBodyStart = mainStart < 0
-                ? -1
-                : glsl.IndexOf(callableDefinitionPrefix, mainStart, StringComparison.Ordinal);
-
-            Assert.Contains(callableDefinitionPrefix, glsl, StringComparison.Ordinal);
-            Assert.True(mainStart >= 0, "GLSL must contain an entry-point main function.");
-            Assert.True(callableBodyStart > mainStart, "Callable definition should be emitted after main with a forward declaration.");
-            Assert.True(callableCallStart > mainStart && callableCallStart < callableBodyStart, "Main should call the forwarded callable before its definition.");
-            Assert.Contains("fe_0", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_1", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -1654,7 +962,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new TypedCallableKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([2, 4, 6, 8], output.ToArray());
         }
         finally
@@ -1664,7 +972,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchExecutesShaderLibraryCallableWithReadOnlyBufferParameterThroughTypedEasyGpu()
+    public void DispatchExecutesShaderLibraryCallableWithReadOnlyBufferParameterThroughLuisa()
     {
         try
         {
@@ -1678,16 +986,11 @@ public class GeneratedComputeDispatchTests
             ]);
             using var output = GPU.CreateBuffer<float>(4);
 
-            var glsl = ShaderInspection.GetGLSL<ReadOnlyBufferCallableKernel>();
             var path = DispatchAndGetPath(
                 new ReadOnlyBufferCallableKernel(weights.AsReadOnly(), output.AsReadWrite()),
                 4);
 
-            Assert.Contains("GatherWeight", glsl, StringComparison.Ordinal);
-            Assert.Contains("int index)", glsl, StringComparison.Ordinal);
-            Assert.Contains("fe_0[", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("vec4 weights[]", glsl, StringComparison.Ordinal);
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([10, 26, -10, 100], output.ToArray());
         }
         finally
@@ -1705,14 +1008,11 @@ public class GeneratedComputeDispatchTests
             using var input = GPU.CreateBuffer<float>([2, 4, 6, 8]);
             using var output = GPU.CreateBuffer<float>(4);
 
-            var glsl = ShaderInspection.GetGLSL<ReadWriteBufferCallableKernel>();
             var path = DispatchAndGetPath(
                 new ReadWriteBufferCallableKernel(input.AsReadOnly(), output.AsReadWrite()),
                 4);
 
-            Assert.Contains("StoreScaled", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("destination[]", glsl, StringComparison.Ordinal);
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([7, 13, 19, 25], output.ToArray());
         }
         finally
@@ -1737,14 +1037,10 @@ public class GeneratedComputeDispatchTests
             using var input = GPU.CreateBuffer<float>([5, 5, 5, 8]);
             using var output = GPU.CreateBuffer<float>(4);
 
-            var glsl = ShaderInspection.GetGLSL<GenericBufferWriterKernel>();
             var path = DispatchAndGetPath(new GenericBufferWriterKernel(
                 writers.AsReadOnly(), input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Contains("MonoBufferWriterOps_Write_T_global__Feather_Integration_Tests_MonoBufferWriter", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoBufferWriter_Write", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("IMonoBufferWriter", glsl, StringComparison.Ordinal);
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([10, 15, -5, 4], output.ToArray());
         }
         finally
@@ -1764,16 +1060,11 @@ public class GeneratedComputeDispatchTests
             using var output = GPU.CreateBuffer<float>(1);
             texture.Upload([new Rgba32(128, 0, 0, 255)]);
 
-            var glsl = ShaderInspection.GetGLSL<TextureCallableKernel>();
             var path = DispatchAndGetPath(
                 new TextureCallableKernel(texture.AsSampled(), sampler, output.AsReadWrite()),
                 1);
 
-            Assert.Contains("SampleRed", glsl, StringComparison.Ordinal);
-            Assert.Contains("texture(", glsl, StringComparison.Ordinal);
-            Assert.Contains("vec2 uv)", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("sampler2D texture", glsl, StringComparison.Ordinal);
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear([128.0f / 255.0f], output.ToArray());
         }
         finally
@@ -1796,7 +1087,7 @@ public class GeneratedComputeDispatchTests
                 new ReadOnlyTextureCallableKernel(texture.AsReadOnly(), output.AsReadWrite()),
                 1);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear([64.0f / 255.0f], output.ToArray());
         }
         finally
@@ -1816,7 +1107,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new TypedCallableControlFlowKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([-2, 6, 18, 18], output.ToArray());
         }
         finally
@@ -1836,7 +1127,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new TypedCallableParameterReassignmentKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([3, 9, 1, 13], output.ToArray());
         }
         finally
@@ -1856,7 +1147,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new TypedCallableOverloadKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([2, 4, 6, 8], output.ToArray());
         }
         finally
@@ -1876,7 +1167,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new SharedFloatCopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([4, 3, 2, 1], output.ToArray());
         }
         finally
@@ -1895,26 +1186,8 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new SharedVectorMemoryKernel(output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([new float2(0, 1), new float2(1, 2)], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionRejectsTypedOnlyIrWhenSection7LoweringFails()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = CorruptTypedOnlyResourceName;
-
-            var exception = Assert.Throws<FeatherNativeException>(() => ShaderInspection.GetGLSL<CopyKernel>());
-
-            Assert.Equal(FeResult.ErrorUnsupported, exception.Result);
-            Assert.Contains("unknown resource 'ghost'", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -1941,7 +1214,7 @@ public class GeneratedComputeDispatchTests
                     wait: true));
 
             Assert.Equal(FeResult.ErrorUnsupported, exception.Result);
-            Assert.Contains("unknown resource 'ghost'", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("FEIR resource read is invalid", exception.Message, StringComparison.Ordinal);
             Assert.Equal(DispatchPath.Rejected, gpuKernel.LastDispatchPath);
         }
         finally
@@ -1972,45 +1245,27 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    [Trait("Coverage", "NativeReferenceFallback")]
-    public void Dispatch2DCopiesLinearBufferThroughNativeFallback()
+    public void Dispatch2DCopiesLinearBufferThroughLuisa()
     {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripSection7ForNativeReferenceFallback;
-            using var input = GPU.CreateBuffer<int>([1, 2, 3, 4, 5, 6]);
-            using var output = GPU.CreateBuffer<int>(6);
-            var kernel = new Copy2DKernel(input.AsReadOnly(), output.AsReadWrite());
+        using var input = GPU.CreateBuffer<int>([1, 2, 3, 4, 5, 6]);
+        using var output = GPU.CreateBuffer<int>(6);
+        var kernel = new Copy2DKernel(input.AsReadOnly(), output.AsReadWrite());
 
-            GPU.Dispatch(kernel, new int2(3, 2));
+        GPU.Dispatch(kernel, new int2(3, 2));
 
-            Assert.Equal([1, 2, 3, 4, 5, 6], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
+        Assert.Equal([1, 2, 3, 4, 5, 6], output.ToArray());
     }
 
     [Fact]
-    [Trait("Coverage", "NativeReferenceFallback")]
-    public void Dispatch3DCopiesLinearBufferThroughNativeFallback()
+    public void Dispatch3DCopiesLinearBufferThroughLuisa()
     {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripSection7ForNativeReferenceFallback;
-            using var input = GPU.CreateBuffer<int>([1, 2, 3, 4, 5, 6, 7, 8]);
-            using var output = GPU.CreateBuffer<int>(8);
-            var kernel = new Copy3DKernel(input.AsReadOnly(), output.AsReadWrite());
+        using var input = GPU.CreateBuffer<int>([1, 2, 3, 4, 5, 6, 7, 8]);
+        using var output = GPU.CreateBuffer<int>(8);
+        var kernel = new Copy3DKernel(input.AsReadOnly(), output.AsReadWrite());
 
-            GPU.Dispatch(kernel, new int3(2, 2, 2));
+        GPU.Dispatch(kernel, new int3(2, 2, 2));
 
-            Assert.Equal([1, 2, 3, 4, 5, 6, 7, 8], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
+        Assert.Equal([1, 2, 3, 4, 5, 6, 7, 8], output.ToArray());
     }
 
     [Fact]
@@ -2080,7 +1335,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void Float3BufferRoundTripUsesEasyGpuStd430Stride()
+    public void Float3BufferRoundTripUsesLuisaStd430Stride()
     {
         using var buffer = GPU.CreateBuffer<float3>([new float3(1, 2, 3), new float3(4, 5, 6)]);
 
@@ -2234,17 +1489,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsTexture2DCopyFromTypedIr()
-    {
-        var glsl = ShaderInspection.GetGLSL<TextureCopyKernel>();
-
-        Assert.Contains("image2D", glsl, StringComparison.Ordinal);
-        Assert.Contains("imageLoad", glsl, StringComparison.Ordinal);
-        Assert.Contains("imageStore", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DispatchCopiesTexture2DThroughTypedEasyGpuIr()
+    public void DispatchCopiesTexture2DThroughLuisaIr()
     {
         var pixels = new[]
         {
@@ -2260,14 +1505,14 @@ public class GeneratedComputeDispatchTests
 
         var path = DispatchAndGetPath(kernel, new GpuDispatchSize(2, 2, 1));
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         var readback = new Rgba32[4];
         output.Read(readback);
         Assert.Equal(pixels, readback);
     }
 
     [Fact]
-    public void DispatchCopiesR8TextureThroughTypedEasyGpuIr()
+    public void DispatchCopiesR8TextureThroughLuisaIr()
     {
         try
         {
@@ -2281,7 +1526,7 @@ public class GeneratedComputeDispatchTests
                 new TextureR8LoadKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 1));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear(pixels.Select(pixel => pixel / 255.0f).ToArray(), output.ToArray(), 1e-4f);
         }
         finally
@@ -2291,7 +1536,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchCopiesRg8TextureThroughTypedEasyGpuIr()
+    public void DispatchCopiesRg8TextureThroughLuisaIr()
     {
         try
         {
@@ -2311,7 +1556,7 @@ public class GeneratedComputeDispatchTests
                 new TextureRg8LoadKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 1));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertFloat2Near(
                 pixels.Select(pixel => new float2(pixel.R / 255.0f, pixel.G / 255.0f)).ToArray(),
                 output.ToArray());
@@ -2323,7 +1568,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchCopiesRgba8TextureThroughTypedEasyGpuIrWhenLegacySectionsAreRemoved()
+    public void DispatchCopiesRgba8TextureThroughLuisaIrWhenLegacySectionsAreRemoved()
     {
         try
         {
@@ -2343,7 +1588,7 @@ public class GeneratedComputeDispatchTests
                 new TextureCopyKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 1));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             var readback = new Rgba32[4];
             output.Read(readback);
             Assert.Equal(pixels, readback);
@@ -2355,7 +1600,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchCopiesR32FloatTextureThroughTypedEasyGpuIr()
+    public void DispatchCopiesR32FloatTextureThroughLuisaIr()
     {
         try
         {
@@ -2369,7 +1614,7 @@ public class GeneratedComputeDispatchTests
                 new TextureR32FloatLoadKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 1));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear(pixels, output.ToArray());
         }
         finally
@@ -2379,7 +1624,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchCopiesRgba32FloatTextureThroughTypedEasyGpuIr()
+    public void DispatchCopiesRgba32FloatTextureThroughLuisaIr()
     {
         try
         {
@@ -2399,7 +1644,7 @@ public class GeneratedComputeDispatchTests
                 new TextureFloat4CopyKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 1));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             var readback = new float4[4];
             output.Read(readback);
             AssertFloat4Near(pixels, readback);
@@ -2411,7 +1656,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchRejectsBgra8TextureWithActionableTypedEasyGpuError()
+    public void DispatchRejectsBgra8TextureWithActionableLuisaError()
     {
         try
         {
@@ -2425,8 +1670,7 @@ public class GeneratedComputeDispatchTests
                 DispatchAndGetPath(new TextureCopyKernel(input.AsReadOnly(), output.AsReadWrite()), new GpuDispatchSize(1, 1, 1)));
 
             Assert.Equal(FeResult.ErrorUnsupported, exception.Result);
-            Assert.Contains("Bgra8", exception.Message, StringComparison.Ordinal);
-            Assert.Contains("typed texture bridge", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("Luisa texture binding is missing or uses an unsupported pixel format", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -2435,28 +1679,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ShaderInspectionBuildsTexture3DLoadStoreFromTypedIr()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<Texture3DCopyKernel>();
-
-            Assert.Contains("image3D", glsl, StringComparison.Ordinal);
-            Assert.Contains("imageLoad", glsl, StringComparison.Ordinal);
-            Assert.Contains("imageStore", glsl, StringComparison.Ordinal);
-            Assert.Contains("ivec3", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void DispatchReadsTexture3DThroughTypedEasyGpuIr()
+    public void DispatchReadsTexture3DThroughLuisaIr()
     {
         try
         {
@@ -2480,7 +1703,7 @@ public class GeneratedComputeDispatchTests
                 new Texture3DReadKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 2));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertFloat4Near(voxels, output.ToArray());
         }
         finally
@@ -2490,7 +1713,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchWritesTexture3DThroughTypedEasyGpuIr()
+    public void DispatchWritesTexture3DThroughLuisaIr()
     {
         try
         {
@@ -2501,7 +1724,7 @@ public class GeneratedComputeDispatchTests
                 new Texture3DWriteKernel(output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 2));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             var readback = new float4[8];
             output.Read(readback);
             AssertFloat4Near(Texture3DExpectedWriteValues(), readback);
@@ -2513,7 +1736,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void DispatchCopiesTexture3DThroughTypedEasyGpuIrWithDynamicInt3Indexing()
+    public void DispatchCopiesTexture3DThroughLuisaIrWithDynamicInt3Indexing()
     {
         try
         {
@@ -2527,37 +1750,10 @@ public class GeneratedComputeDispatchTests
                 new Texture3DCopyKernel(input.AsReadOnly(), output.AsReadWrite()),
                 new GpuDispatchSize(2, 2, 2));
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             var readback = new float4[8];
             output.Read(readback);
             AssertFloat4Near(voxels, readback);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsIntegerAtomicsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<AtomicOpsKernel>();
-
-            Assert.Contains("atomicAdd", glsl, StringComparison.Ordinal);
-            Assert.Matches(@"atomicAdd\([^,]+,\s*-\s*\(?1\)?", glsl);
-            Assert.DoesNotContain("atomicSub", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicMin", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicMax", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicAnd", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicOr", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicXor", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicExchange", glsl, StringComparison.Ordinal);
-            Assert.Contains("atomicCompSwap", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2576,7 +1772,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new AtomicAddKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([10], output.ToArray());
         }
         finally
@@ -2596,30 +1792,8 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new SharedMemoryAtomicAddKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([3, 5, 7, 11], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsStructFieldReadsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<StructFieldReadKernel>();
-
-            Assert.Contains("struct TypedScene", glsl, StringComparison.Ordinal);
-            Assert.Contains("vec3 LightDir;", glsl, StringComparison.Ordinal);
-            Assert.Contains("float Intensity;", glsl, StringComparison.Ordinal);
-            Assert.Contains(".LightDir", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Intensity", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2642,7 +1816,7 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new StructFieldReadKernel(input.AsReadOnly(), output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([16, 35], output.ToArray());
         }
         finally
@@ -2662,39 +1836,12 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new StructFieldWriteKernel(intensity.AsReadOnly(), output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             var result = output.ToArray();
             Assert.Equal(new float3(1, 2, 3), result[0].LightDir);
             Assert.Equal(2, result[0].Intensity);
             Assert.Equal(new float3(2, 3, 4), result[1].LightDir);
             Assert.Equal(5, result[1].Intensity);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsNestedStructFieldAccessFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var readGlsl = ShaderInspection.GetGLSL<NestedStructFieldReadKernel>();
-            var writeGlsl = ShaderInspection.GetGLSL<NestedStructFieldWriteKernel>();
-
-            Assert.Contains("struct TypedScene", readGlsl, StringComparison.Ordinal);
-            Assert.Contains("struct NestedScene", readGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Scene", readGlsl, StringComparison.Ordinal);
-            Assert.Contains(".LightDir", readGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Intensity", readGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Scene", writeGlsl, StringComparison.Ordinal);
-            Assert.Contains(".LightDir", writeGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Intensity", writeGlsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", readGlsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", writeGlsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2727,8 +1874,8 @@ public class GeneratedComputeDispatchTests
             var readPath = DispatchAndGetPath(new NestedStructFieldReadKernel(input.AsReadOnly(), readOutput.AsReadWrite()), 2);
             var writePath = DispatchAndGetPath(new NestedStructFieldWriteKernel(readOutput.AsReadOnly(), written.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, readPath);
-            Assert.Equal(DispatchPath.TypedEasyGpu, writePath);
+            Assert.Equal(DispatchPath.Luisa, readPath);
+            Assert.Equal(DispatchPath.Luisa, writePath);
             Assert.Equal([20, 27], readOutput.ToArray());
             var result = written.ToArray();
             Assert.Equal(new float3(20, 21, 22), result[0].Scene.LightDir);
@@ -2737,28 +1884,6 @@ public class GeneratedComputeDispatchTests
             Assert.Equal(new float3(28, 29, 30), result[1].Scene.LightDir);
             Assert.Equal(33, result[1].Scene.Intensity);
             Assert.Equal(new float4(28, 14, 5.6f, 1), result[1].Weight);
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsCallableGpuStructReturnFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<CallableStructReturnKernel>();
-
-            Assert.Contains("struct CallableHitInfo", glsl, StringComparison.Ordinal);
-            Assert.Contains("CallableHitInfo(", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Closest", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Normal", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Color", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2777,29 +1902,8 @@ public class GeneratedComputeDispatchTests
 
             var path = DispatchAndGetPath(new CallableStructReturnKernel(input.AsReadOnly(), output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([19, 31], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsGpuStructInstanceCallableFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<GpuStructInstanceCallableKernel>();
-
-            Assert.Contains("struct ScaleBias", glsl, StringComparison.Ordinal);
-            Assert.Contains("ScaleBias fe_this", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Scale", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Bias", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2826,29 +1930,8 @@ public class GeneratedComputeDispatchTests
                 input.AsReadOnly(),
                 output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([11, 14], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMutatingGpuStructInstanceCallableWithInOutReceiverFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<GpuStructMutatingInstanceCallableKernel>();
-
-            Assert.Contains("inout MutableCounter fe_this", glsl, StringComparison.Ordinal);
-            Assert.Contains("inout MutableCounterNested fe_this", glsl, StringComparison.Ordinal);
-            Assert.Contains("MutableCounter_Advance", glsl, StringComparison.Ordinal);
-            Assert.Contains("MutableCounterNested_Accumulate", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2875,7 +1958,7 @@ public class GeneratedComputeDispatchTests
                 input.AsReadOnly(),
                 output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear([24.5f, 20.5f], output.ToArray());
 
             var updated = counters.ToArray();
@@ -2883,29 +1966,6 @@ public class GeneratedComputeDispatchTests
             Assert.Equal(5, updated[1].Hits);
             AssertNear([13.5f, 3.5f], updated.Select(counter => counter.Value).ToArray());
             AssertNear([9.0f, 12.0f], updated.Select(counter => counter.Nested.Inner).ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsGenericInterfaceCallableMonomorphizationsFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<GenericInterfaceShapeKernel>();
-
-            Assert.Contains("MonoShapeOps_Eval_T_global__Feather_Integration_Tests_MonoSphere", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoShapeOps_Eval_T_global__Feather_Integration_Tests_MonoPlane", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoSphere_Sdf", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoPlane_Sdf", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("IMonoShape", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("switch", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2942,31 +2002,8 @@ public class GeneratedComputeDispatchTests
                 points.AsReadOnly(),
                 output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear([8.0f, 2.5f], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsMutatingGenericInterfaceCallableMonomorphizationFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<GenericMutatingInterfaceShapeKernel>();
-
-            Assert.Contains("MonoMutableOps_EvalAfterOffset_T_global__Feather_Integration_Tests_MonoMutableOffset", glsl, StringComparison.Ordinal);
-            Assert.Contains("inout MonoMutableOffset fe_this", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoMutableOffset_Offset", glsl, StringComparison.Ordinal);
-            Assert.Contains("MonoMutableOffset_Measure", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("IMonoMutableShape", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("switch", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -2993,37 +2030,12 @@ public class GeneratedComputeDispatchTests
                 deltas.AsReadOnly(),
                 output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             AssertNear([16, -7], output.ToArray());
 
             var unchanged = shapes.ToArray();
             AssertNear([10, 5], unchanged.Select(shape => shape.Current).ToArray());
             AssertNear([2, 6], unchanged.Select(shape => shape.Scale).ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsNestedGpuStructInstanceCallableGraphFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var glsl = ShaderInspection.GetGLSL<ComplexGpuStructInstanceCallableKernel>();
-
-            Assert.Contains("struct ComplexScaleBias", glsl, StringComparison.Ordinal);
-            Assert.Contains("struct CallableGain", glsl, StringComparison.Ordinal);
-            Assert.Contains("ComplexScaleBias fe_this", glsl, StringComparison.Ordinal);
-            Assert.Contains("CallableGain gain", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Mode", glsl, StringComparison.Ordinal);
-            Assert.Contains(".Multiplier", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("ScaleOnly_int", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Unused", glsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -3056,32 +2068,8 @@ public class GeneratedComputeDispatchTests
                 input.AsReadOnly(),
                 output.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.Equal([70, 50], output.ToArray());
-        }
-        finally
-        {
-            GpuKernel.IrTransformForTesting = null;
-        }
-    }
-
-    [Fact]
-    public void ShaderInspectionBuildsGpuStructArrayAccessFromTypedIrWhenLegacySectionsAreRemoved()
-    {
-        try
-        {
-            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-
-            var readGlsl = ShaderInspection.GetGLSL<StructArrayReadKernel>();
-            var writeGlsl = ShaderInspection.GetGLSL<StructArrayWriteKernel>();
-
-            Assert.Contains("vec3 Directions[4];", readGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Directions", readGlsl, StringComparison.Ordinal);
-            Assert.Contains("[", readGlsl, StringComparison.Ordinal);
-            Assert.Contains("InnerArrayScene Items[3];", writeGlsl, StringComparison.Ordinal);
-            Assert.Contains(".Items", writeGlsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", readGlsl, StringComparison.Ordinal);
-            Assert.DoesNotContain("Feather native stub", writeGlsl, StringComparison.Ordinal);
         }
         finally
         {
@@ -3155,8 +2143,8 @@ public class GeneratedComputeDispatchTests
             var readPath = DispatchAndGetPath(new StructArrayReadKernel(input.AsReadOnly(), output.AsReadWrite()), 2);
             var writePath = DispatchAndGetPath(new StructArrayWriteKernel(output.AsReadOnly(), written.AsReadWrite()), 2);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, readPath);
-            Assert.Equal(DispatchPath.TypedEasyGpu, writePath);
+            Assert.Equal(DispatchPath.Luisa, readPath);
+            Assert.Equal(DispatchPath.Luisa, writePath);
             Assert.Equal([20, 68], output.ToArray());
             var result = written.ToArray();
             Assert.Equal(20, result[0].Items[0].Value);
@@ -3249,7 +2237,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void NestedGpuStructLayoutUsesEasyGpuStd430Offsets()
+    public void NestedGpuStructLayoutUsesLuisaStd430Offsets()
     {
         var layout = GpuStructLayout<NestedScene>();
         var inner = GpuStructLayout<TypedScene>();
@@ -3263,7 +2251,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void MatrixGpuStructLayoutUsesEasyGpuStd430OffsetsAndPadding()
+    public void MatrixGpuStructLayoutUsesLuisaStd430OffsetsAndPadding()
     {
         var value = new MatrixScene
         {
@@ -3390,7 +2378,7 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
-    public void ManagedValueLayoutsMatchEasyGpuStd430Contracts()
+    public void ManagedValueLayoutsMatchLuisaStd430Contracts()
     {
         Assert.Equal(12, GpuValueLayout<float3>.CpuSizeInBytes);
         Assert.Equal(16, GpuValueLayout<float3>.BufferElementStride);
@@ -3841,12 +2829,12 @@ public class GeneratedComputeDispatchTests
         writer.Write((uint)0);
         writer.Write((uint)0);
         writer.Write((byte)2);
-        writer.Write((uint)2);
+        writer.Write((uint)1);
         writer.Write((uint)2);
         writer.Write((uint)0);
         writer.Write((uint)0);
         writer.Write((byte)2);
-        writer.Write((uint)2);
+        writer.Write((uint)1);
         writer.Write((uint)4);
         writer.Write((uint)0);
         writer.Write((uint)0);
@@ -3895,7 +2883,7 @@ public class GeneratedComputeDispatchTests
         writer.Write((uint)0);
 
         writer.Write((byte)1);
-        writer.Write((uint)2);
+        writer.Write((uint)1);
         writer.Write(uint.MaxValue);
         writer.Write(uint.MaxValue);
         writer.Write(uint.MaxValue);
@@ -4037,7 +3025,7 @@ public readonly partial struct Copy2DKernel(ReadOnlyBuffer<int> input, ReadWrite
 {
     public void Execute()
     {
-        int i = ThreadIds.X;
+        int i = ThreadIds.X + ThreadIds.Y * 3;
         output[i] = input[i];
     }
 }
@@ -4048,7 +3036,7 @@ public readonly partial struct Copy3DKernel(ReadOnlyBuffer<int> input, ReadWrite
 {
     public void Execute()
     {
-        int i = ThreadIds.X;
+        int i = ThreadIds.X + ThreadIds.Y * 2 + ThreadIds.Z * 4;
         output[i] = input[i];
     }
 }
@@ -5014,42 +4002,7 @@ public readonly partial struct StructArrayWriteKernel(
 public class ControlFlowDispatchTests
 {
     [Fact]
-    public void ShaderInspectionLowersIfConditionThroughEasyGpuBuilder()
-    {
-        var glsl = ShaderInspection.GetGLSL<IfThresholdKernel>();
-
-        Assert.Contains("#version", glsl, StringComparison.Ordinal);
-        Assert.Contains("if ", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("_i < 256", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ShaderInspectionLowersForLoopThroughEasyGpuBuilder()
-    {
-        var glsl = ShaderInspection.GetGLSL<ForLoopSumKernel>();
-
-        Assert.Contains("#version", glsl, StringComparison.Ordinal);
-        Assert.Contains("for ", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("_i < 256", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ShaderInspectionLowersWhileLoopThroughEasyGpuBuilder()
-    {
-        var glsl = ShaderInspection.GetGLSL<WhileAccumulateKernel>();
-
-        Assert.Contains("#version", glsl, StringComparison.Ordinal);
-        Assert.Contains("while ", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DispatchExecutesIfThresholdThroughEasyGpu()
+    public void DispatchExecutesIfThresholdThroughLuisa()
     {
         using var input = GPU.CreateBuffer<float>([-2, -1, 0, 1, 2, 3]);
         using var output = GPU.CreateBuffer<float>(6);
@@ -5064,15 +4017,6 @@ public class ControlFlowDispatchTests
 
 public class NeuralNetworkDispatchTests
 {
-    [Fact]
-    public void ShaderInspectionLowersDotProductThroughEasyGpuWithUniform()
-    {
-        var glsl = ShaderInspection.GetGLSL<DotProductKernel>();
-
-        Assert.Contains("#version", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
 }
 
 [Kernel]

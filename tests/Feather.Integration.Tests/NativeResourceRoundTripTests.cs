@@ -7,30 +7,6 @@ namespace Feather.Integration.Tests;
 public class NativeResourceRoundTripTests
 {
     [Fact]
-    public void ContextReportsRealBackendCapsWhenNativeBackendIsAvailable()
-    {
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
-        try
-        {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
-        }
-        catch (FeatherNativeException ex) when (ex.Result == FeResult.ErrorBackendUnavailable)
-        {
-            Assert.Contains("EasyGPU", ex.Message, StringComparison.OrdinalIgnoreCase);
-            return;
-        }
-
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_backend_type(context, out var backend));
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_caps(context, out var caps));
-
-        Assert.True(backend is 1u or 2u);
-        Assert.Equal(backend, caps.BackendType);
-        Assert.True(caps.MaxWorkGroupSizeX > 0);
-        Assert.True(caps.MaxWorkGroupSizeY > 0);
-        Assert.True(caps.MaxWorkGroupSizeZ > 0);
-    }
-
-    [Fact]
     public void BufferUploadAndDownloadRoundTripThroughNativeAbi()
     {
         using var buffer = GPU.CreateBuffer<int>([1, 2, 3, 4]);

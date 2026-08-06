@@ -65,7 +65,7 @@ public class NNSurfaceTests
         parameter.ZeroGrad();
 
         Assert.Equal([0f, 0f], parameter.Gradient.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -105,7 +105,7 @@ public class NNSurfaceTests
         Assert.Equal(1, output.Shape.Rank);
         Assert.Equal([2], output.Shape.Dimensions);
         Assert.Equal([8, 19], output.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -126,7 +126,7 @@ public class NNSurfaceTests
 
         Assert.Equal([2, 4], output.Shape.Dimensions);
         AssertClose([11, 22, 33, -0.5f, 9, 20, 34, -2], output.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public class NNSurfaceTests
         AssertClose([1f / (1f + MathF.Exp(1)), 0.5f, 1f / (1f + MathF.Exp(-2))], sigmoidOutput.Buffer.ToArray());
         AssertClose([MathF.Tanh(-1), 0, MathF.Tanh(2)], tanhOutput.Buffer.ToArray());
         AssertClose([-1f / (1f + MathF.Exp(1)), 0, 2f / (1f + MathF.Exp(-2))], siluOutput.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -185,7 +185,7 @@ public class NNSurfaceTests
         Assert.Equal([-1, -1, -1, -1, -1, -1], destination.Buffer.ToArray());
         AssertRowsSumToOne(softmax.Buffer.ToArray(), rows: 2, columns: 3);
         AssertClose(ReferenceLogSoftmax([1, 2, 3, 3, 1, -1], rows: 2, columns: 3), logSoftmax.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Theory]
@@ -213,7 +213,7 @@ public class NNSurfaceTests
         AssertClose(leftValues.Zip(rightValues, static (l, r) => l + r).ToArray(), add.Buffer.ToArray());
         AssertClose(leftValues.Select(static value => value * 2f).ToArray(), scaled.Buffer.ToArray());
         AssertClose(Enumerable.Range(0, length).Select(i => i % 2 == 0 ? 0f : (float)i).ToArray(), activated.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -232,7 +232,7 @@ public class NNSurfaceTests
 
         var expected = AdamWReference(values, gradients, learningRate: 0.05f, beta1: 0.8f, beta2: 0.9f, epsilon: 1e-6f, weightDecay: 0.1f, step: 1, firstMoment: new float[length], secondMoment: new float[length]);
         AssertClose(expected.Value, parameter.Value.Buffer.ToArray(), tolerance: 1e-4f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -244,7 +244,7 @@ public class NNSurfaceTests
         using var output = sequential.Forward(input);
 
         AssertRowsSumToOne(output.Buffer.ToArray(), rows: 2, columns: 2);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -319,7 +319,7 @@ public class NNSurfaceTests
         Assert.Equal([20, 21, 22, 0, 1, 2, 30, 31, 32], spanOutput.Buffer.ToArray());
         Assert.Equal([2, 2, 3], tensorOutput.Shape.Dimensions);
         Assert.Equal([10, 11, 12, 30, 31, 32, 0, 1, 2, 20, 21, 22], tensorOutput.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -335,7 +335,7 @@ public class NNSurfaceTests
         AssertClose(
             [-0.7745967f, 0, 0.7745967f, -1.0444659f, 0, 1.0444659f],
             output.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -352,7 +352,7 @@ public class NNSurfaceTests
             output.Buffer.ToArray());
         Assert.Equal([1, 2, 3], batchNorm.RunningMean.Buffer.ToArray());
         Assert.Equal([1, 2.5f, 5], batchNorm.RunningVariance.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -434,7 +434,7 @@ public class NNSurfaceTests
     }
 
     [Fact]
-    public void GptLanguageModelUsesEasyGpuReferenceInitialization()
+    public void GptLanguageModelUsesLuisaReferenceInitialization()
     {
         using var model = new GptLanguageModel(vocabularySize: 36, blockSize: 32, embeddingSize: 16, headCount: 4, seed: 42);
 
@@ -497,7 +497,7 @@ public class NNSurfaceTests
             0,
             1e-5f);
         Assert.InRange(MathF.Abs(crossEntropyLoss.FromLogits(logits, [1, 2]) - Losses.CrossEntropyFromLogits(logits, [1, 2])), 0, 1e-5f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -512,7 +512,7 @@ public class NNSurfaceTests
 
         Assert.True(float.IsNaN(probabilityLoss.Buffer.ToArray()[0]));
         Assert.True(float.IsNaN(logitsLoss.Buffer.ToArray()[0]));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -524,7 +524,7 @@ public class NNSurfaceTests
         var loss = Losses.MeanSquaredError(prediction, target);
 
         Assert.Equal((1f + 4f + 9f + 16f) / 4f, loss);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Theory]
@@ -546,14 +546,14 @@ public class NNSurfaceTests
         var expectedMse = predictionValues.Zip(targetValues, static (p, t) => (p - t) * (p - t)).Sum() / length;
         AssertClose([expectedMse], mse.Buffer.ToArray(), tolerance: 1e-4f);
         Assert.Contains("Reduce.PartialSum", NnDispatchTrace.Operations);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
 
         NnDispatchTrace.Reset();
         using var mae = Losses.MeanAbsoluteErrorTensor(prediction, target);
         var expectedMae = predictionValues.Zip(targetValues, static (p, t) => MathF.Abs(p - t)).Sum() / length;
         AssertClose([expectedMae], mae.Buffer.ToArray(), tolerance: 1e-4f);
         Assert.Contains("Reduce.PartialSum", NnDispatchTrace.Operations);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Theory]
@@ -596,13 +596,13 @@ public class NNSurfaceTests
         var expectedCrossEntropy = labels.Select((label, row) => -MathF.Log(probabilities[(row * classes) + label])).Sum() / batch;
         AssertClose([expectedCrossEntropy], probabilityLoss.Buffer.ToArray(), tolerance: 1e-4f);
         Assert.Contains("Reduce.PartialSum", NnDispatchTrace.Operations);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
 
         NnDispatchTrace.Reset();
         using var logitsLoss = Losses.CrossEntropyFromLogitsTensor(logitsTensor, labelTensor);
         AssertClose([ReferenceCrossEntropyFromLogits(logits, labels, batch, classes)], logitsLoss.Buffer.ToArray(), tolerance: 1e-4f);
         Assert.Contains("Reduce.PartialSum", NnDispatchTrace.Operations);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -739,7 +739,7 @@ public class NNSurfaceTests
         Assert.InRange(rmsParameter.Value.Buffer.ToArray()[0], 0.68f, 0.69f);
         Assert.InRange(momentumParameter.Value.Buffer.ToArray()[0], 0.85f, 0.86f);
         Assert.InRange(adamWParameter.Value.Buffer.ToArray()[0], 0.88f, 0.90f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -775,7 +775,7 @@ public class NNSurfaceTests
         AssertClose(expectedSecondStep1.Value, secondAfterStep1);
         AssertClose(expectedFirstStep2.Value, first.Value.Buffer.ToArray());
         AssertClose(expectedSecondStep2.Value, second.Value.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -807,7 +807,7 @@ public class NNSurfaceTests
 
             AssertClose(expectedScalar, scalar.Value.Buffer.ToArray(), tolerance: 1e-5f);
             AssertClose(expectedVector, vector.Value.Buffer.ToArray(), tolerance: 1e-4f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+            Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
         }
 
         optimizer.ZeroGrad();
@@ -815,7 +815,7 @@ public class NNSurfaceTests
 
         Assert.Equal([0f], scalar.Gradient.Buffer.ToArray());
         Assert.All(vector.Gradient.Buffer.ToArray(), value => Assert.Equal(0f, value));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -849,7 +849,7 @@ public class NNSurfaceTests
 
             AssertClose(expectedScalar, scalar.Value.Buffer.ToArray(), tolerance: 1e-5f);
             AssertClose(expectedVector, vector.Value.Buffer.ToArray(), tolerance: 1e-4f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+            Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
         }
 
         optimizer.ZeroGrad();
@@ -857,7 +857,7 @@ public class NNSurfaceTests
 
         Assert.Equal([0f], scalar.Gradient.Buffer.ToArray());
         Assert.All(vector.Gradient.Buffer.ToArray(), value => Assert.Equal(0f, value));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -891,7 +891,7 @@ public class NNSurfaceTests
 
             AssertClose(expectedScalar, scalar.Value.Buffer.ToArray(), tolerance: 1e-4f);
             AssertClose(expectedVector, vector.Value.Buffer.ToArray(), tolerance: 1e-4f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+            Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
         }
 
         optimizer.ZeroGrad();
@@ -899,7 +899,7 @@ public class NNSurfaceTests
 
         Assert.Equal([0f], scalar.Gradient.Buffer.ToArray());
         Assert.All(vector.Gradient.Buffer.ToArray(), value => Assert.Equal(0f, value));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -935,7 +935,7 @@ public class NNSurfaceTests
 
             AssertClose(expectedScalar, scalar.Value.Buffer.ToArray(), tolerance: 1e-4f);
             AssertClose(expectedVector, vector.Value.Buffer.ToArray(), tolerance: 1e-4f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+            Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
         }
 
         optimizer.ZeroGrad();
@@ -943,7 +943,7 @@ public class NNSurfaceTests
 
         Assert.Equal([0f], scalar.Gradient.Buffer.ToArray());
         Assert.All(vector.Gradient.Buffer.ToArray(), value => Assert.Equal(0f, value));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -965,7 +965,7 @@ public class NNSurfaceTests
         var actual = parameter.Value.Buffer.ToArray();
         AssertClose(expected, actual, tolerance: 1e-5f);
         Assert.Contains(Enumerable.Range(0, actual.Length), i => MathF.Abs(actual[i] - doubledDecay[i]) > 1e-4f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -988,7 +988,7 @@ public class NNSurfaceTests
         Assert.Equal(1, optimizer.StepCount);
         Assert.InRange(fast.Value.Buffer.ToArray()[0], 0.89f, 0.91f);
         Assert.InRange(slow.Value.Buffer.ToArray()[0], 0.989f, 0.991f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -1005,7 +1005,7 @@ public class NNSurfaceTests
 
         AssertClose(expected, parameter.Value.Buffer.ToArray(), tolerance: 1e-5f);
         Assert.Equal(0.25f, optimizer.GradientClip);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -1041,7 +1041,7 @@ public class NNSurfaceTests
 
             AssertClose(expectedScalar, scalar.Value.Buffer.ToArray(), tolerance: 1e-4f);
             AssertClose(expectedVector, vector.Value.Buffer.ToArray(), tolerance: 1e-4f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+            Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
         }
 
         optimizer.ZeroGrad();
@@ -1049,7 +1049,7 @@ public class NNSurfaceTests
 
         Assert.Equal([0f], scalar.Gradient.Buffer.ToArray());
         Assert.All(vector.Gradient.Buffer.ToArray(), value => Assert.Equal(0f, value));
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]
@@ -1071,7 +1071,7 @@ public class NNSurfaceTests
         var actual = parameter.Value.Buffer.ToArray();
         AssertClose(expected, actual, tolerance: 1e-5f);
         Assert.Contains(Enumerable.Range(0, actual.Length), i => MathF.Abs(actual[i] - coupledDecay[i]) > 1e-4f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, NnDispatchTrace.LastPath);
+        Assert.Equal(DispatchPath.Luisa, NnDispatchTrace.LastPath);
     }
 
     [Fact]

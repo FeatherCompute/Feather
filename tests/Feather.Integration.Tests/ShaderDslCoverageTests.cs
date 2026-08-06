@@ -18,10 +18,6 @@ public class ShaderDslCoverageTests
     [Fact]
     public void BufferCopy_GeneratesValidGlslAndDispatches()
     {
-        var glsl = ShaderInspection.GetGLSL<DslCopyKernel>();
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-
         using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
         using var output = GPU.CreateBuffer<float>(4);
         GPU.Dispatch(new DslCopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
@@ -29,21 +25,6 @@ public class ShaderDslCoverageTests
     }
 
     // ── Local variables ────────────────────────────────────────────────
-
-    [Fact]
-    public void LocalVariable_DeclaresThreadIdAsInt_GeneratesValidGlsl()
-    {
-        var glsl = ShaderInspection.GetGLSL<DslLocalVarKernel>();
-
-        // The GLSL must declare a local int variable initialized from thread ID
-        // and use it as buffer index. The thread ID reference comes through the
-        // local variable declaration: int i = int(gl_GlobalInvocationID.x);
-        bool hasThreadId = glsl.Contains("gl_GlobalInvocationID.x", StringComparison.Ordinal);
-        bool hasLocalVar = glsl.Contains("int i", StringComparison.Ordinal);
-        Assert.True(hasThreadId || hasLocalVar,
-            "GLSL must reference the thread ID either directly or via local variable declaration");
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void LocalVariable_CopyThroughLocal_Dispatches()
@@ -58,26 +39,8 @@ public class ShaderDslCoverageTests
     // ── If/else control flow ───────────────────────────────────────────
 
     [Fact]
-    public void IfElse_GeneratesStructuredIfNotRawSourceInjection()
-    {
-        var glsl = ShaderInspection.GetGLSL<DslIfElseKernel>();
-
-        Assert.Contains("if ", glsl, StringComparison.Ordinal);
-        Assert.Contains("else", glsl, StringComparison.Ordinal);
-        // Must NOT contain the hardcoded C# source text (e.g. "i < 256" as raw string)
-        Assert.DoesNotContain("_i < 256", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void IfElse_ConditionWiredFromExpressionTree_CorrectThresholdDispatch()
     {
-        var glsl = ShaderInspection.GetGLSL<DslIfElseKernel>();
-        Assert.Contains("if (", glsl, StringComparison.Ordinal);
-        Assert.Contains("else", glsl, StringComparison.Ordinal);
-        // Condition must NOT be hardcoded "true"
-        Assert.DoesNotContain("if (true)", glsl, StringComparison.Ordinal);
-
         using var input = GPU.CreateBuffer<float>([-2, -1, 0, 1, 2, 3]);
         using var output = GPU.CreateBuffer<float>(6);
         GPU.Dispatch(new DslIfElseKernel(input.AsReadOnly(), output.AsReadWrite()), 6);
@@ -99,17 +62,6 @@ public class ShaderDslCoverageTests
     // ── Intrinsic calls ────────────────────────────────────────────────
 
     [Fact]
-    public void ShaderMath_GeneratesIntrinsicCalls()
-    {
-        var glsl = ShaderInspection.GetGLSL<DslIntrinsicKernel>();
-
-        Assert.Contains("sin", glsl, StringComparison.Ordinal);
-        Assert.Contains("sqrt", glsl, StringComparison.Ordinal);
-        Assert.Contains("gl_GlobalInvocationID.x", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ShaderMath_Dispatch()
     {
         using var input = GPU.CreateBuffer<float>([0, 1, 4, 9]);
@@ -120,14 +72,6 @@ public class ShaderDslCoverageTests
     }
 
     // ── For loop ───────────────────────────────────────────────────────
-
-    [Fact]
-    public void ForLoop_WithInit_GeneratesValidGlsl()
-    {
-        var glsl = ShaderInspection.GetGLSL<DslForLoopKernel>();
-        Assert.Contains("for ", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("_i < 256", glsl, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void ForLoop_WithInit_Dispatches()
@@ -166,12 +110,12 @@ public class ShaderDslCoverageTests
 
 /// <summary>
 /// End-to-end coverage for the basic shader DSL features that must cooperate in
-/// one real typed EasyGPU dispatch, not just as isolated syntax checks.
+/// one real typed Luisa dispatch, not just as isolated syntax checks.
 /// </summary>
 public class BasicDslStressCoverageTests
 {
     [Fact]
-    public void BasicDslStressKernel_DispatchesThroughTypedEasyGpuAndMatchesCpuReference()
+    public void BasicDslStressKernel_DispatchesThroughLuisaAndMatchesCpuReference()
     {
         var records = new[]
         {
@@ -203,17 +147,6 @@ public class BasicDslStressCoverageTests
 
         AssertStressStructLayouts(records[0]);
 
-        var glsl = ShaderInspection.GetGLSL<BasicDslStressKernel>();
-        Assert.Contains("for ", glsl, StringComparison.Ordinal);
-        Assert.Contains("while ", glsl, StringComparison.Ordinal);
-        Assert.Contains("do", glsl, StringComparison.Ordinal);
-        Assert.Contains("if ", glsl, StringComparison.Ordinal);
-        Assert.Contains("continue", glsl, StringComparison.Ordinal);
-        Assert.Contains("break", glsl, StringComparison.Ordinal);
-        Assert.Contains("BasicDslStressKernel_Shape", glsl, StringComparison.Ordinal);
-        Assert.Contains("BasicDslStressKernel_InnerCurve", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-
         using var input = GPU.CreateBuffer<DslStressRecord>(records, BufferAccess.ReadOnly);
         using var output = GPU.CreateBuffer<DslStressResult>(records.Length, BufferAccess.ReadWrite);
         using var scalarOutput = GPU.CreateBuffer<float>(records.Length);
@@ -231,7 +164,7 @@ public class BasicDslStressCoverageTests
                 new Uniform<float>(globalBias)),
             records.Length);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
 
         var actualResults = output.ToArray();
         var actualScores = scalarOutput.ToArray();
@@ -407,7 +340,7 @@ public class BasicDslStressCoverageTests
 public class PathologicalDslLoweringCoverageTests
 {
     [Fact]
-    public void PathologicalDslTortureKernel_DispatchesThroughTypedEasyGpuAndMatchesCpuReference()
+    public void PathologicalDslTortureKernel_DispatchesThroughLuisaAndMatchesCpuReference()
     {
         const int count = 8;
         const int dynamicStride = 3;
@@ -418,19 +351,6 @@ public class PathologicalDslLoweringCoverageTests
         var scalarSentinel = Enumerable.Repeat(-999.0f, count * PathologicalDslConstants.OutputStride).ToArray();
 
         var expected = EvaluatePathologicalReference(source, count, dynamicStride, uniformBias, scalarSentinel);
-
-        var glsl = ShaderInspection.GetGLSL<PathologicalDslTortureKernel>();
-        Assert.Contains("fe_in", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_output", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_texture", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_sampler", glsl, StringComparison.Ordinal);
-        Assert.Contains("fe_shared", glsl, StringComparison.Ordinal);
-        Assert.Contains("for ", glsl, StringComparison.Ordinal);
-        Assert.Contains("while ", glsl, StringComparison.Ordinal);
-        Assert.Contains("do", glsl, StringComparison.Ordinal);
-        Assert.Contains("continue", glsl, StringComparison.Ordinal);
-        Assert.Contains("break", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
 
         using var input = GPU.CreateBuffer<float>(source, BufferAccess.ReadOnly);
         using var vectorOutput = GPU.CreateBuffer<float4>(count, BufferAccess.ReadWrite);
@@ -445,7 +365,7 @@ public class PathologicalDslLoweringCoverageTests
                 new Uniform<float>(uniformBias)),
             count);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
 
         var actualVectors = vectorOutput.ToArray();
         var actualScalars = scalarOutput.ToArray();
@@ -674,7 +594,7 @@ public partial struct DslStressResult
 }
 
 /// <summary>
-/// Exercises the basic DSL surface through the typed EasyGPU lowering path.
+/// Exercises the basic DSL surface through the typed Luisa lowering path.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(1, 1, 1)]
@@ -1027,18 +947,10 @@ public class JuliaSetBasicTests
     }
 
     [Fact]
-    public void JuliaSetKernel_WritesMeaningfulImageThroughTypedEasyGpu()
+    public void JuliaSetKernel_WritesMeaningfulImageThroughLuisa()
     {
         const int width = 16;
         const int height = 16;
-        var glsl = ShaderInspection.GetGLSL<JuliaSetKernel>();
-        Assert.Contains("gl_GlobalInvocationID", glsl, StringComparison.Ordinal);
-        Assert.Contains("while", glsl, StringComparison.Ordinal);
-        Assert.Contains("layout(push_constant) uniform EasyGPUUniformBlock", glsl, StringComparison.Ordinal);
-        Assert.Contains("int u0;", glsl, StringComparison.Ordinal);
-        Assert.Contains("int u1;", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-
         using var output = GPU.CreateBuffer<int>(width * height, BufferAccess.ReadWrite);
         var path = GPU.DispatchAndGetPath(
             new JuliaSetKernel(output.AsReadWrite(), new Uniform<int>(width), new Uniform<int>(height)),
@@ -1050,7 +962,7 @@ public class JuliaSetBasicTests
         {
             WriteArgbTga(imagePath, pixels, width, height);
 
-            Assert.Equal(DispatchPath.TypedEasyGpu, path);
+            Assert.Equal(DispatchPath.Luisa, path);
             Assert.True(new FileInfo(imagePath).Length > 18);
             Assert.True(pixels.Count(pixel => (pixel & unchecked((int)0x00FFFFFF)) != 0) > pixels.Length / 8);
             Assert.True(pixels.Select(pixel => pixel & unchecked((int)0x00FFFFFF)).Distinct().Count() > 8);
@@ -1150,30 +1062,6 @@ public class CallableCoverageTests
         GPU.Dispatch(new CallableScalarKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
         // callable returns input * 2 + 1
         Assert.Equal([3, 5, 7, 9], output.ToArray());
-    }
-
-    [Fact]
-    public void Callable_GeneratesValidGlsl()
-    {
-        var glsl = ShaderInspection.GetGLSL<NestedCallableKernel>();
-        const string innerName = "global__Feather_Integration_Tests_NestedCallableKernel_Inner_";
-        const string outerName = "global__Feather_Integration_Tests_NestedCallableKernel_Outer_";
-        const string innerDefinitionPrefix = "float global__Feather_Integration_Tests_NestedCallableKernel_Inner_";
-        const string outerDefinitionPrefix = "float global__Feather_Integration_Tests_NestedCallableKernel_Outer_";
-        var mainStart = glsl.IndexOf("void main()", StringComparison.Ordinal);
-        var innerBodyStart = mainStart < 0 ? -1 : glsl.IndexOf(innerDefinitionPrefix, mainStart, StringComparison.Ordinal);
-        var outerBodyStart = mainStart < 0 ? -1 : glsl.IndexOf(outerDefinitionPrefix, mainStart, StringComparison.Ordinal);
-        var outerCallStart = mainStart < 0 ? -1 : glsl.IndexOf(outerName, mainStart, StringComparison.Ordinal);
-        var innerCallStart = outerCallStart < 0 ? -1 : glsl.IndexOf(innerName, outerCallStart, StringComparison.Ordinal);
-
-        Assert.True(mainStart >= 0, "GLSL must contain an entry-point main function.");
-        Assert.True(innerBodyStart > mainStart, "Callable definitions should be emitted after main with forward declarations.");
-        Assert.True(outerBodyStart > mainStart, "All callable definitions should be emitted after main with forward declarations.");
-        Assert.True(outerCallStart > mainStart && outerCallStart < innerBodyStart, "Main should call the forwarded outer callable before callable definitions.");
-        Assert.True(innerCallStart > outerCallStart && innerCallStart < innerBodyStart, "Main should pass the forwarded inner callable result into the outer call.");
-        Assert.Contains(innerDefinitionPrefix, glsl, StringComparison.Ordinal);
-        Assert.Contains(outerDefinitionPrefix, glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1299,24 +1187,6 @@ public readonly partial struct ExpressionCallableKernel(
 public class TextureSampleCoverageTests
 {
     [Fact]
-    public void TextureSample_GeneratesTypedEasyGpuGlsl()
-    {
-        var glsl = ShaderInspection.GetGLSL<TextureSampleKernel>();
-
-        Assert.Contains("sampler2D", glsl, StringComparison.Ordinal);
-        Assert.Contains("texture(", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TextureSampleLevel_GeneratesTypedEasyGpuGlsl()
-    {
-        var glsl = ShaderInspection.GetGLSL<TextureSampleLevelKernel>();
-
-        Assert.Contains("sampler2D", glsl, StringComparison.Ordinal);
-        Assert.Contains("textureLod(", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TextureSample_IrContainsNodeKind()
     {
         var ir = ShaderInspection.GetIR<TextureSampleKernel>();
@@ -1324,7 +1194,7 @@ public class TextureSampleCoverageTests
     }
 
     [Fact]
-    public void TextureSample_DispatchesThroughTypedEasyGpuAndReadsBack()
+    public void TextureSample_DispatchesThroughLuisaAndReadsBack()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
@@ -1335,7 +1205,7 @@ public class TextureSampleCoverageTests
             new TextureSampleKernel(texture.AsSampled(), sampler, output.AsReadWrite()),
             1);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         AssertNear(64.0f / 255.0f, output.ToArray()[0]);
     }
 
@@ -1347,7 +1217,7 @@ public class TextureSampleCoverageTests
     }
 
     [Fact]
-    public void TextureSampleLevel_DispatchesThroughTypedEasyGpuAndReadsBack()
+    public void TextureSampleLevel_DispatchesThroughLuisaAndReadsBack()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
@@ -1358,12 +1228,12 @@ public class TextureSampleCoverageTests
             new TextureSampleLevelKernel(texture.AsSampled(), sampler, output.AsReadWrite()),
             1);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         AssertNear(128.0f / 255.0f, output.ToArray()[0]);
     }
 
     [Fact]
-    public void TextureSample_DispatchesSupportedFormatMatrixThroughTypedEasyGpu()
+    public void TextureSample_DispatchesSupportedFormatMatrixThroughLuisa()
     {
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
         using var r8 = GPU.CreateTexture2D<byte, float4>(1, 1, PixelFormat.R8, TextureAccess.Sampled);
@@ -1387,7 +1257,7 @@ public class TextureSampleCoverageTests
                 output.AsReadWrite()),
             1);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         var values = output.ToArray();
         AssertNear(64.0f / 255.0f, values[0]);
         AssertNear((96.0f + 128.0f) / 255.0f, values[1]);
@@ -1396,7 +1266,7 @@ public class TextureSampleCoverageTests
     }
 
     [Fact]
-    public void TextureSampleLevel_DispatchesRgba32FloatThroughTypedEasyGpu()
+    public void TextureSampleLevel_DispatchesRgba32FloatThroughLuisa()
     {
         using var texture = GPU.CreateTexture2D<float4, float4>(1, 1, PixelFormat.Rgba32Float, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
@@ -1407,7 +1277,7 @@ public class TextureSampleCoverageTests
             new TextureSampleLevelFloat4Kernel(texture.AsSampled(), sampler, output.AsReadWrite()),
             1);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         AssertNear(2.5f, output.ToArray()[0]);
     }
 

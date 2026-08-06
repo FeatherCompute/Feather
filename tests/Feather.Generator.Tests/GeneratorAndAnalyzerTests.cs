@@ -5264,7 +5264,7 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
-    public void TypedIrWriterEncodesFloat2x2GpuStructFieldWithEasyGpuStd430Layout()
+    public void TypedIrWriterEncodesFloat2x2GpuStructFieldWithLuisaStd430Layout()
     {
         var module = LowerTypedModule("""
             using Feather;
@@ -5320,7 +5320,7 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
-    public void TypedIrWriterEncodesBoolVectorGpuStructFieldWithEasyGpuStd430Layout()
+    public void TypedIrWriterEncodesBoolVectorGpuStructFieldWithLuisaStd430Layout()
     {
         var module = LowerTypedModule("""
             using Feather;

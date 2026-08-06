@@ -39,7 +39,7 @@ public class NNTrainingIntegrationTests
         Assert.True(lastLoss < initialLoss * 0.05f, $"Expected loss to decrease substantially, initial={initialLoss}, final={lastLoss}.");
         Assert.InRange(weight, 1.85f, 2.15f);
         Assert.InRange(bias, 0.85f, 1.15f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
         Assert.False(ad.Gradients.HasMaterializedValues);
     }
 
@@ -75,7 +75,7 @@ public class NNTrainingIntegrationTests
         }
 
         Assert.True(lastLoss < initialLoss * 0.05f, $"Expected TrainingStep loss to decrease, initial={initialLoss}, final={lastLoss}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, step.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, step.LastDispatchPath);
         Assert.False(step.GradientsMaterialized);
         Assert.Equal(lastLoss, step.LastLoss);
     }
@@ -111,7 +111,7 @@ public class NNTrainingIntegrationTests
         }
 
         Assert.True(lastLoss < initialLoss * 0.2f, $"Expected nonlinear loss to decrease, initial={initialLoss}, final={lastLoss}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
         Assert.False(ad.Gradients.HasMaterializedValues);
     }
 
@@ -155,7 +155,7 @@ public class NNTrainingIntegrationTests
         Assert.True(lastLoss < initialLoss * 0.2f, $"Expected Sequential MLP loss to decrease, initial={initialLoss}, final={lastLoss}.");
         Assert.Contains(model.Parameters, parameter => parameter.FullName == "linear0.weight");
         Assert.Contains(model.Parameters, parameter => parameter.FullName == "linear2.weight");
-        Assert.Equal(DispatchPath.TypedEasyGpu, step.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, step.LastDispatchPath);
         Assert.False(step.GradientsMaterialized);
         Assert.Equal(lastLoss, step.LastLoss);
     }
@@ -206,7 +206,7 @@ public class NNTrainingIntegrationTests
         ad.CopyGradientToBuffer("embedding", embedding.Weight.Gradient.Buffer);
 
         Assert.Equal([2f, 2f, 0f, 0f, 1f, 1f], embedding.Weight.Gradient.Buffer.ToArray());
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
         Assert.False(ad.Gradients.HasMaterializedValues);
     }
 
@@ -239,7 +239,7 @@ public class NNTrainingIntegrationTests
         var learnedWeight = weight.Value.Buffer.ToArray()[0];
         Assert.True(lastLoss < initialLoss * 0.35f, $"Expected cross entropy to decrease, initial={initialLoss}, final={lastLoss}.");
         Assert.True(learnedWeight > 0f, $"Expected positive class logit weight to be positive, weight={learnedWeight}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
         Assert.False(ad.Gradients.HasMaterializedValues);
     }
 
@@ -277,7 +277,7 @@ public class NNTrainingIntegrationTests
         var learnedWeight = model.Weight.Value.Buffer.ToArray()[0];
         Assert.True(lastLoss < initialLoss * 0.35f, $"Expected module classifier loss to decrease, initial={initialLoss}, final={lastLoss}.");
         Assert.True(learnedWeight > 0f, $"Expected positive class logit weight to be positive, weight={learnedWeight}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, step.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, step.LastDispatchPath);
         Assert.False(step.GradientsMaterialized);
         Assert.Equal(lastLoss, step.LastLoss);
     }
@@ -298,7 +298,7 @@ public class NNTrainingIntegrationTests
         }
 
         Assert.True(lastLoss < initialLoss, $"Expected attention classifier loss to decrease, initial={initialLoss}, final={lastLoss}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, trainer.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, trainer.LastDispatchPath);
         Assert.False(trainer.GradientsMaterialized);
         Assert.Equal(lastLoss, trainer.LastLoss);
     }
@@ -327,7 +327,7 @@ public class NNTrainingIntegrationTests
         lastLoss = trainer.EvaluateBatch(batch);
 
         Assert.True(lastLoss < initialLoss, $"Expected GPT trainer loss to decrease, initial={initialLoss}, final={lastLoss}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, trainer.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, trainer.LastDispatchPath);
         Assert.False(trainer.GradientsMaterialized);
         Assert.Equal(lastLoss, trainer.LastLoss);
     }
@@ -346,7 +346,7 @@ public class NNTrainingIntegrationTests
         using var trainerWithEval = modelWithEval.CreateTrainer(batchSize: 2, optimizerWithEval);
         var evalLoss = trainerWithEval.EvaluateBatch(batch);
         Assert.False(trainerWithEval.GradientsMaterialized);
-        Assert.Equal(DispatchPath.TypedEasyGpu, trainerWithEval.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, trainerWithEval.LastDispatchPath);
 
         var beforeTrain = SnapshotFloatParameters(modelWithEval);
         var trainAfterEval = trainerWithEval.TrainBatch(batch);
@@ -402,7 +402,7 @@ public class NNTrainingIntegrationTests
         AssertNonZeroGradient(ad, "fc2", model.Block.Fc2.ElementCount);
         AssertNonZeroGradient(ad, "lmHead", model.LmHead.ElementCount);
         Assert.False(ad.Gradients.HasMaterializedValues);
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
     }
 
     [Fact]
@@ -541,7 +541,7 @@ public class NNTrainingIntegrationTests
             probe.FiniteDifference(model.LmHead, index: (5 * model.EmbeddingSize) + 2, epsilon),
             lmHead[(5 * model.EmbeddingSize) + 2]);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, probe.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, probe.LastDispatchPath);
     }
 
     [Fact]
@@ -574,7 +574,7 @@ public class NNTrainingIntegrationTests
         var expectedLoss = GptAllPositionHostLoss(model, tokenWindow);
         var kernelLoss = loss.ToArray()[0];
         Assert.InRange(MathF.Abs(kernelLoss - expectedLoss), 0f, 1e-4f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
     }
 
     [Fact]
@@ -617,7 +617,7 @@ public class NNTrainingIntegrationTests
             Assert.InRange(MathF.Abs(actualLoss[row] - expectedLoss), 0f, 1e-4f);
         }
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, ad.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, ad.LastDispatchPath);
     }
 
     [Fact]
@@ -727,7 +727,7 @@ public class NNTrainingIntegrationTests
             Assert.True(checkpointLoss < initialLoss, $"Expected checkpoint source training to reduce loss, initial={initialLoss}, checkpoint={checkpointLoss}.");
             Assert.InRange(MathF.Abs(resumeStartLoss - checkpointLoss), 0, 0.1f);
             Assert.True(resumedLoss < resumeStartLoss, $"Expected resumed training to reduce loss, start={resumeStartLoss}, final={resumedLoss}.");
-            Assert.Equal(DispatchPath.TypedEasyGpu, resumedAd.LastDispatchPath);
+            Assert.Equal(DispatchPath.Luisa, resumedAd.LastDispatchPath);
             Assert.False(resumedAd.Gradients.HasMaterializedValues);
         }
         finally

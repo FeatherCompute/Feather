@@ -8,20 +8,20 @@ public class LuisaBackendResourceDispatchTests
 {
     [Fact]
     [Trait("Category", "Gpu")]
-    public void FullIntegerAtomicMatrixMatchesEasyGpu()
+    public void FullIntegerAtomicMatrixMatchesDefaultLuisa()
     {
         using var input = GPU.CreateBuffer<int>([7]);
         int[] initial = [10, 10, 10, 1, 0xFFFF, 0x10, 0xF0, -1, 0];
-        using var easy = GPU.CreateBuffer<int>(initial);
+        using var staticOutput = GPU.CreateBuffer<int>(initial);
         using var luisa = GPU.CreateBuffer<int>(initial);
-        GPU.Dispatch(new AtomicOpsKernel(input.AsReadOnly(), easy.AsReadWrite()), 1);
+        GPU.Dispatch(new AtomicOpsKernel(input.AsReadOnly(), staticOutput.AsReadWrite()), 1);
         DispatchLuisa(new AtomicOpsKernel(input.AsReadOnly(), luisa.AsReadWrite()), new(1, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void TwoAndThreeDimensionalDispatchIdsMatchEasyGpu()
+    public void TwoAndThreeDimensionalDispatchIdsStaticAndExplicitLuisaAgree()
     {
         using var easy2D = GPU.CreateBuffer<int>(6);
         using var luisa2D = GPU.CreateBuffer<int>(6);
@@ -38,7 +38,7 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void Texture2DAndTexture3DLoadStoreMatchEasyGpu()
+    public void Texture2DAndTexture3DLoadStoreStaticAndExplicitLuisaAgree()
     {
         float4[] pixels =
         [
@@ -77,20 +77,20 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void TextureSamplingAndMixedResourceOrderMatchEasyGpu()
+    public void TextureSamplingAndMixedResourceOrderStaticAndExplicitLuisaAgree()
     {
         using var texture = GPU.CreateTexture2D<float4, float4>(2, 2, PixelFormat.Rgba32Float, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
-        using var easy = GPU.CreateBuffer<float4>(2);
+        using var staticOutput = GPU.CreateBuffer<float4>(2);
         using var luisa = GPU.CreateBuffer<float4>(2);
         texture.Upload([
             new(1, 2, 3, 4), new(5, 6, 7, 8),
             new(9, 10, 11, 12), new(13, 14, 15, 16)
         ]);
 
-        GPU.Dispatch(new LuisaTextureSamplingKernel(texture.AsSampled(), sampler, easy.AsReadWrite()), 1);
+        GPU.Dispatch(new LuisaTextureSamplingKernel(texture.AsSampled(), sampler, staticOutput.AsReadWrite()), 1);
         DispatchLuisa(new LuisaTextureSamplingKernel(texture.AsSampled(), sampler, luisa.AsReadWrite()), new(1, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
@@ -111,31 +111,31 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void NestedScalarCallablesMatchEasyGpu()
+    public void NestedScalarCallablesStaticAndExplicitLuisaAgree()
     {
         using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
-        using var easy = GPU.CreateBuffer<float>(4);
+        using var staticOutput = GPU.CreateBuffer<float>(4);
         using var luisa = GPU.CreateBuffer<float>(4);
-        GPU.Dispatch(new NestedCallableKernel(input.AsReadOnly(), easy.AsReadWrite()), 4);
+        GPU.Dispatch(new NestedCallableKernel(input.AsReadOnly(), staticOutput.AsReadWrite()), 4);
         DispatchLuisa(new NestedCallableKernel(input.AsReadOnly(), luisa.AsReadWrite()), new(4, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void ShaderLibraryBufferCallablesMatchEasyGpu()
+    public void ShaderLibraryBufferCallablesStaticAndExplicitLuisaAgree()
     {
         using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
-        using var easy = GPU.CreateBuffer<float>(4);
+        using var staticOutput = GPU.CreateBuffer<float>(4);
         using var luisa = GPU.CreateBuffer<float>(4);
-        GPU.Dispatch(new ReadWriteBufferCallableKernel(input.AsReadOnly(), easy.AsReadWrite()), 4);
+        GPU.Dispatch(new ReadWriteBufferCallableKernel(input.AsReadOnly(), staticOutput.AsReadWrite()), 4);
         DispatchLuisa(new ReadWriteBufferCallableKernel(input.AsReadOnly(), luisa.AsReadWrite()), new(4, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void ShaderLibraryTextureAndSamplerCallablesMatchEasyGpu()
+    public void ShaderLibraryTextureAndSamplerCallablesStaticAndExplicitLuisaAgree()
     {
         using var sampled = GPU.CreateTexture2D<Rgba32, Rgba32>(1, 1, PixelFormat.Rgba8, TextureAccess.Sampled);
         using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
@@ -157,7 +157,7 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void MutableGpuStructCallablesAndWritebackMatchEasyGpu()
+    public void MutableGpuStructCallablesAndWritebackStaticAndExplicitLuisaAgree()
     {
         MutableCounter[] counters =
         [
@@ -167,13 +167,13 @@ public class LuisaBackendResourceDispatchTests
         using var easyCounters = GPU.CreateBuffer<MutableCounter>(counters);
         using var luisaCounters = GPU.CreateBuffer<MutableCounter>(counters);
         using var input = GPU.CreateBuffer<float>([2, 5]);
-        using var easy = GPU.CreateBuffer<float>(2);
+        using var staticOutput = GPU.CreateBuffer<float>(2);
         using var luisa = GPU.CreateBuffer<float>(2);
         GPU.Dispatch(new GpuStructMutatingInstanceCallableKernel(
-            easyCounters.AsReadWrite(), input.AsReadOnly(), easy.AsReadWrite()), 2);
+            easyCounters.AsReadWrite(), input.AsReadOnly(), staticOutput.AsReadWrite()), 2);
         DispatchLuisa(new GpuStructMutatingInstanceCallableKernel(
             luisaCounters.AsReadWrite(), input.AsReadOnly(), luisa.AsReadWrite()), new(2, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
         var expected = easyCounters.ToArray();
         var actual = luisaCounters.ToArray();
         for (var i = 0; i < expected.Length; i++)
@@ -186,7 +186,7 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void StructArraysAndNestedWritebackMatchEasyGpu()
+    public void StructArraysAndNestedWritebackStaticAndExplicitLuisaAgree()
     {
         var first = new ArrayScene { Weight = 5 };
         first.Directions[0] = new(1, 2, 3);
@@ -201,14 +201,14 @@ public class LuisaBackendResourceDispatchTests
         using var input = GPU.CreateBuffer<ArrayScene>([first, second]);
         using var easyValues = GPU.CreateBuffer<float>(2);
         using var luisaValues = GPU.CreateBuffer<float>(2);
-        using var easy = GPU.CreateBuffer<NestedArrayScene>(2);
+        using var staticOutput = GPU.CreateBuffer<NestedArrayScene>(2);
         using var luisa = GPU.CreateBuffer<NestedArrayScene>(2);
         GPU.Dispatch(new StructArrayReadKernel(input.AsReadOnly(), easyValues.AsReadWrite()), 2);
         DispatchLuisa(new StructArrayReadKernel(input.AsReadOnly(), luisaValues.AsReadWrite()), new(2, 1, 1));
-        GPU.Dispatch(new StructArrayWriteKernel(easyValues.AsReadOnly(), easy.AsReadWrite()), 2);
+        GPU.Dispatch(new StructArrayWriteKernel(easyValues.AsReadOnly(), staticOutput.AsReadWrite()), 2);
         DispatchLuisa(new StructArrayWriteKernel(luisaValues.AsReadOnly(), luisa.AsReadWrite()), new(2, 1, 1));
         Assert.Equal(easyValues.ToArray(), luisaValues.ToArray());
-        var expected = easy.ToArray();
+        var expected = staticOutput.ToArray();
         var actual = luisa.ToArray();
         for (var i = 0; i < expected.Length; i++)
         {
@@ -222,13 +222,13 @@ public class LuisaBackendResourceDispatchTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void NonDivisibleLogicalBoundsMatchEasyGpu()
+    public void NonDivisibleLogicalBoundsStaticAndExplicitLuisaAgree()
     {
-        using var easy = GPU.CreateBuffer<int>(5);
+        using var staticOutput = GPU.CreateBuffer<int>(5);
         using var luisa = GPU.CreateBuffer<int>(5);
-        GPU.Dispatch(new BoundsCheckedWriteKernel(easy.AsReadWrite()), 5);
+        GPU.Dispatch(new BoundsCheckedWriteKernel(staticOutput.AsReadWrite()), 5);
         DispatchLuisa(new BoundsCheckedWriteKernel(luisa.AsReadWrite()), new(5, 1, 1));
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     private static void DispatchLuisa<TKernel>(TKernel kernel, GpuDispatchSize size)

@@ -28,7 +28,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(1, 2, 3, 4));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(1, 2, 3, 4));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -75,7 +75,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(5, 6, 7, 8));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(9, 10, 11, 12));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(13, 14, 15, 16));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -178,7 +178,7 @@ public class GraphicsRasterizationTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(21, 22, 23, 24));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     private readonly record struct Rgba32(byte R, byte G, byte B, byte A);

@@ -10,7 +10,7 @@ namespace Feather.Integration.Tests;
 /// </summary>
 /// <remarks>
 /// Every host, checkpoint, and inference API in this workstream assumes
-/// <see cref="MlpRegression3To1LossKernel" /> produces a correct adjoint. EasyGPU lists variable
+/// <see cref="MlpRegression3To1LossKernel" /> produces a correct adjoint. The former backend listed variable
 /// buffer indexing of a parameter as non-differentiable, and the boundary between "index built from
 /// loop counters and uniforms" (which the GPT kernel proves works) and "index loaded from data" is
 /// not documented precisely. This test is what pins which side of that boundary the packed layout
@@ -31,10 +31,8 @@ public class MlpTrainingGradientTests(Xunit.Abstractions.ITestOutputHelper outpu
         probe.Backward();
         var gradients = probe.ReadGradient("weights", weights.Length);
 
-        // The kernel must lower through the typed EasyGPU AD route; a fallback would silently change
-        // what this test is measuring.
-        Assert.Equal(DispatchPath.TypedEasyGpu, probe.LastDispatchPath);
-        Assert.NotEmpty(probe.BackwardGlsl);
+        // The kernel must execute through the sole Luisa AD route.
+        Assert.Equal(DispatchPath.Luisa, probe.LastDispatchPath);
         Assert.Equal(weights.Length, gradients.Length);
 
         const float epsilon = 1e-2f;
@@ -201,8 +199,6 @@ public class MlpTrainingGradientTests(Xunit.Abstractions.ITestOutputHelper outpu
         }
 
         public DispatchPath LastDispatchPath => ad.LastDispatchPath;
-
-        public string BackwardGlsl => ad.GetBackwardGLSL();
 
         public void Backward() => ad.Backward(sampleCount);
 

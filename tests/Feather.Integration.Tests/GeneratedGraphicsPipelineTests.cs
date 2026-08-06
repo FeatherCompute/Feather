@@ -9,18 +9,6 @@ namespace Feather.Integration.Tests;
 public class GeneratedGraphicsPipelineTests
 {
     [Fact]
-    public void GeneratedGraphicsInspectionReportsSeparateStageIr()
-    {
-        var source = ShaderInspection.GetGraphicsSource<GeneratedVertexShader, GeneratedTextureFragmentShader, float4>();
-
-        Assert.NotEmpty(source.IR);
-        Assert.NotEmpty(source.VertexIR);
-        Assert.NotEmpty(source.FragmentIR);
-        Assert.Equal(source.IR, source.VertexIR);
-        Assert.NotEqual(source.VertexIR, source.FragmentIR);
-    }
-
-    [Fact]
     public void GeneratedGraphicsPipelineDrawRasterizesTarget()
     {
         using var vertices = GPU.CreateBuffer<float4>([new float4(0, 0, 0, 1), new float4(1, 0, 0, 1), new float4(0, 1, 0, 1)]);
@@ -39,7 +27,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(10, 20, 30, 40));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -67,7 +55,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X < 0.2f && pixel.Y > 0.8f && pixel.W > 0.9f);
         Assert.Contains(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -89,7 +77,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new Rgba32[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel != new Rgba32(1, 2, 3, 4));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -141,7 +129,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         var expected = new float4(0.15f, 0.21f, 0.34f, 1.0f);
         Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -191,7 +179,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         var expected = new float4(0.21f, 0.14f, 0.36f, 1.0f);
         Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -241,7 +229,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         var expected = new float4(0.7747f, 1.0864f, 0.2981f, 1.0f);
         Assert.All(readback, pixel => AssertColorNear(pixel, expected, 0.02f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -269,11 +257,11 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X > 0.8f && pixel.Y is > 0.2f and < 0.4f && pixel.Z is > 0.4f and < 0.6f && pixel.W > 0.9f);
         Assert.DoesNotContain(readback, pixel => pixel.X < 0.1f && pixel.Y > 0.8f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedFragmentShaderUniformExpressionAffectsEasyGpuOutput()
+    public void GeneratedFragmentShaderUniformExpressionAffectsLuisaOutput()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -297,7 +285,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.R > 190 && pixel.G < 40 && pixel.B is > 60 and < 100 && pixel.A == 255);
         Assert.DoesNotContain(readback, pixel => pixel.R is > 20 and < 40 && pixel.G > 190 && pixel.B is > 60 and < 100 && pixel.A == 255);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -332,7 +320,7 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineDrawsToRgba32FloatTargetThroughEasyGpu()
+    public void GeneratedGraphicsPipelineDrawsToRgba32FloatTargetThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -355,7 +343,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.W > 0.5f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -382,7 +370,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new Rgba32[256];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.R > 0 || pixel.G > 0 || pixel.B > 0);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -416,7 +404,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new Rgba32[256];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.R > 0 || pixel.G > 0 || pixel.B > 0);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -485,7 +473,7 @@ public class GeneratedGraphicsPipelineTests
         Assert.True(
             pixel.X > 0.8f && pixel.Y < 0.2f,
             $"Expected the earlier near red draw to occlude the later far green draw, got {pixel}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -533,7 +521,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         AssertColorNear(readback[0], new float4(0.25f, 0.5f, 0.75f, 1.0f));
         AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -586,7 +574,7 @@ public class GeneratedGraphicsPipelineTests
         AssertColorNear(readback[0], new float4(0.0f, 0.0f, 1.0f, 1.0f));
         AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
         Assert.DoesNotContain(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.Z < 0.2f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -620,7 +608,7 @@ public class GeneratedGraphicsPipelineTests
         Assert.Contains(readback, pixel => IsColorNear(pixel, new float4(0.0f, 1.0f, 0.0f, 1.0f)));
         Assert.Contains(readback, pixel => IsColorNear(pixel, new float4(0.0f, 0.0f, 1.0f, 1.0f)));
         Assert.DoesNotContain(readback, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.Z < 0.2f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -647,7 +635,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[16];
         target.Read(readback);
         Assert.All(readback, pixel => AssertColorNear(pixel, new float4(0.2f, 0.4f, 0.8f, 1.0f)));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -694,7 +682,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         AssertColorNear(readback[0], new float4(0.1f, 0.7f, 0.2f, 1.0f));
         AssertColorNear(readback[(4 * 8) + 4], new float4(1.0f, 1.0f, 1.0f, 1.0f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -747,7 +735,7 @@ public class GeneratedGraphicsPipelineTests
             vertexCount: 3,
             drawDesc: new GraphicsDrawDesc { ColorLoadOp = (GraphicsColorLoadOp)99u }));
 
-        Assert.Contains("color load op contains an unsupported value", ex.Message);
+        Assert.Contains("attachment load op is invalid", ex.Message);
         Assert.Equal(DispatchPath.Rejected, pipeline.LastDispatchPath);
     }
 
@@ -798,8 +786,8 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         AssertColorNear(readback[0], new float4(0.15f, 0.45f, 0.75f, 1.0f));
         AssertColorNear(readback[(8 * 16) + 8], new float4(1.0f, 1.0f, 1.0f, 1.0f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, floorPipeline.LastDispatchPath);
-        Assert.Equal(DispatchPath.TypedEasyGpu, lightPipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, floorPipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, lightPipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -863,11 +851,11 @@ public class GeneratedGraphicsPipelineTests
         AssertColorNear(readbackA[(8 * 16) + 8], new float4(1.0f, 1.0f, 1.0f, 1.0f));
         AssertColorNear(readbackB[0], new float4(0.8f, 0.0f, 0.1f, 1.0f));
         Assert.DoesNotContain(readbackA, pixel => pixel.X > 0.7f && pixel.Y < 0.1f && pixel.Z < 0.2f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineSamplesTextureThroughEasyGpu()
+    public void GeneratedGraphicsPipelineSamplesTextureThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -892,11 +880,11 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X > 0.6f && pixel.Y is > 0.15f and < 0.25f && pixel.Z is > 0.35f and < 0.45f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineSamplesTextureWithTextureCoordinateSwizzleThroughEasyGpu()
+    public void GeneratedGraphicsPipelineSamplesTextureWithTextureCoordinateSwizzleThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -921,11 +909,11 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X is > 0.2f and < 0.3f && pixel.Y is > 0.45f and < 0.55f && pixel.Z is > 0.7f and < 0.8f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineSamplesGeneratedMipLevelThroughEasyGpu()
+    public void GeneratedGraphicsPipelineSamplesGeneratedMipLevelThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -957,7 +945,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X is > 0.45f and < 0.55f && pixel.Y is > 0.45f and < 0.55f && pixel.Z is > 0.45f and < 0.55f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1001,7 +989,7 @@ public class GeneratedGraphicsPipelineTests
 
         Assert.True(unmippedGrayPixels < 32, $"Unmipped sample unexpectedly produced {unmippedGrayPixels} gray pixels.");
         Assert.True(mippedGrayPixels > 128, $"Mipmapped sample produced only {mippedGrayPixels} gray pixels.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1050,7 +1038,7 @@ public class GeneratedGraphicsPipelineTests
         Assert.True(System.Math.Abs(linearPixel.Y - 0.5f) < 0.2f, $"Expected linear sample near 0.5 green, got {linearPixel.Y}.");
         Assert.True(System.Math.Abs(nearestPixel.X - linearPixel.X) > 0.2f || System.Math.Abs(nearestPixel.Y - linearPixel.Y) > 0.2f,
             $"Nearest and linear samples were too similar: nearest={nearestPixel}, linear={linearPixel}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1095,11 +1083,11 @@ public class GeneratedGraphicsPipelineTests
 
         Assert.True(System.Math.Abs(clampPixel.X - repeatPixel.X) > 0.2f || System.Math.Abs(clampPixel.Y - repeatPixel.Y) > 0.2f,
             $"Clamp and repeat samples were too similar: clamp={clampPixel}, repeat={repeatPixel}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineDrawsMultipleRenderTargetsThroughEasyGpu()
+    public void GeneratedGraphicsPipelineDrawsMultipleRenderTargetsThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1128,7 +1116,7 @@ public class GeneratedGraphicsPipelineTests
         target1.Read(readback1);
         Assert.Contains(readback0, pixel => pixel.X > 0.8f && pixel.Y < 0.2f && pixel.Z < 0.2f && pixel.W > 0.9f);
         Assert.Contains(readback1, pixel => pixel.X < 0.2f && pixel.Y > 0.8f && pixel.Z < 0.2f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1148,7 +1136,7 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineAppliesPerAttachmentColorWriteMasksThroughEasyGpu()
+    public void GeneratedGraphicsPipelineAppliesPerAttachmentColorWriteMasksThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1188,11 +1176,11 @@ public class GeneratedGraphicsPipelineTests
         var pixel1 = readback1[5];
         Assert.True(pixel0.X > 0.8f && pixel0.Y is > 0.2f and < 0.3f && pixel0.Z is > 0.2f and < 0.3f, $"Expected only target0 red channel to change, got {pixel0}.");
         Assert.True(pixel1.X is > 0.2f and < 0.3f && pixel1.Y > 0.8f && pixel1.Z is > 0.2f and < 0.3f, $"Expected only target1 green channel to change, got {pixel1}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineAppliesAlphaBlendThroughEasyGpu()
+    public void GeneratedGraphicsPipelineAppliesAlphaBlendThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1217,11 +1205,11 @@ public class GeneratedGraphicsPipelineTests
         var pixel = readback[5];
         Assert.True(pixel.X is > 0.10f and < 0.15f, $"Expected blended red near 0.125, got {pixel}.");
         Assert.True(pixel.Z is > 0.45f and < 0.55f, $"Expected blended blue near 0.5, got {pixel}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineAppliesDepthCompareGreaterThroughEasyGpu()
+    public void GeneratedGraphicsPipelineAppliesDepthCompareGreaterThroughLuisa()
     {
         using var nearVertices = GPU.CreateBuffer<float4>(
         [
@@ -1271,7 +1259,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         var pixel = readback[5];
         Assert.True(pixel.Y > 0.8f && pixel.X < 0.2f, $"Expected later greater-depth draw to win, got {pixel}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1322,11 +1310,11 @@ public class GeneratedGraphicsPipelineTests
         Assert.True(pixel.X > 0.8f && pixel.Y < 0.2f, $"Expected legacy depth fields to preserve the near draw, got {pixel}.");
         Assert.True(pipeline.Desc.DepthStencil.DepthTest);
         Assert.True(pipeline.Desc.DepthStencil.DepthWrite);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineAppliesStencilReplaceAndEqualThroughEasyGpu()
+    public void GeneratedGraphicsPipelineAppliesStencilReplaceAndEqualThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1381,11 +1369,11 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[16];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.Y > 0.8f && pixel.Z > 0.8f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, testStencil.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, testStencil.LastDispatchPath);
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineAppliesCullModeAndFrontFaceThroughEasyGpu()
+    public void GeneratedGraphicsPipelineAppliesCullModeAndFrontFaceThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1416,7 +1404,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[16];
         target.Read(readback);
         Assert.DoesNotContain(readback, pixel => pixel.X > 0.5f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1450,7 +1438,7 @@ public class GeneratedGraphicsPipelineTests
             target.Read(readback);
             var litPixels = readback.Count(pixel => pixel.X > 0.5f && pixel.Y > 0.5f);
             Assert.True(litPixels is > 0 and < 96, $"Expected line rasterization to draw edges without filling the triangle, got {litPixels} lit pixels.");
-            Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+            Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
         }
         catch (FeatherNativeException ex) when (ex.Message.Contains("fillModeNonSolid", StringComparison.Ordinal))
         {
@@ -1497,7 +1485,7 @@ public class GeneratedGraphicsPipelineTests
             var readback = new float4[16];
             target.Read(readback);
             Assert.Contains(readback, pixel => pixel.Z > 0.8f && pixel.W > 0.9f);
-            Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+            Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
         }
         catch (FeatherNativeException ex) when (ex.Message.Contains("depthClamp", StringComparison.Ordinal))
         {
@@ -1506,7 +1494,7 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
-    public void GeneratedGraphicsPipelineDrawsGpuStructMeshWithSampledRgba8TextureAndDepthThroughEasyGpu()
+    public void GeneratedGraphicsPipelineDrawsGpuStructMeshWithSampledRgba8TextureAndDepthThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<GeneratedMeshVertex>(
         [
@@ -1557,7 +1545,7 @@ public class GeneratedGraphicsPipelineTests
         var readback = new float4[64];
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X > pixel.Y && pixel.X > pixel.Z && pixel.W > 0.5f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1593,7 +1581,7 @@ public class GeneratedGraphicsPipelineTests
         // Kind 1 contributes Tint * Weight, kind 2 contributes Tint doubled:
         // red 0.5, green 0.5, blue 0.25.
         AssertColorNear(FirstDrawn(readback), new float4(0.5f, 0.5f, 0.25f, 1.0f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1623,7 +1611,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         // The fragment stage reads vertex 1, whose X is 3 and Y is -1, and halves the pair.
         AssertColorNear(FirstDrawn(readback), new float4(1.5f, -0.5f, 0.0f, 1.0f));
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     [Fact]
@@ -1675,7 +1663,7 @@ public class GeneratedGraphicsPipelineTests
         target.Read(readback);
         Assert.Contains(readback, pixel => pixel.X > 0.5f && pixel.Y > 0.2f && pixel.Z < 0.5f && pixel.W > 0.9f);
         Assert.Contains(readback, pixel => pixel.X < 0.05f && pixel.Y < 0.05f && pixel.Z < 0.05f && pixel.W > 0.9f);
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 
     private static Rgba32[] CreateCheckerboard(int size)
@@ -1734,7 +1722,7 @@ public class GeneratedGraphicsPipelineTests
 public sealed class GeneratedGraphicsMultiSamplerTests
 {
     [Fact]
-    public void GeneratedGraphicsPipelineSamplesTwoTexturesThroughTheirOwnSamplersThroughEasyGpu()
+    public void GeneratedGraphicsPipelineSamplesTwoTexturesThroughTheirOwnSamplersThroughLuisa()
     {
         using var vertices = GPU.CreateBuffer<float4>(
         [
@@ -1775,7 +1763,7 @@ public sealed class GeneratedGraphicsMultiSamplerTests
         // through the linear sampler, and on green alone if both were read through the nearest one.
         Assert.InRange(pixel.X, 0.3f, 0.7f);
         Assert.True(pixel.Y < 0.05f || pixel.Y > 0.95f, $"expected an unfiltered green, got {pixel.Y}.");
-        Assert.Equal(DispatchPath.TypedEasyGpu, pipeline.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, pipeline.LastDispatchPath);
     }
 }
 

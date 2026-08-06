@@ -7,7 +7,7 @@ public class LuisaBackendTypeFeatureTests
 {
     [Fact]
     [Trait("Category", "Gpu")]
-    public void ScalarsComparisonsLogicAndBitOperationsMatchEasyGpu()
+    public void ScalarsComparisonsLogicAndBitOperationsStaticAndExplicitLuisaAgree()
     {
         float[] floatValues = [-3.5f, -1.0f, 0.0f, 1.25f, 8.0f];
         using var floats = GPU.CreateBuffer<float>(floatValues);
@@ -29,7 +29,7 @@ public class LuisaBackendTypeFeatureTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void UnsignedConstantsBitOperationsComparisonsAndConversionsMatchEasyGpu()
+    public void UnsignedConstantsBitOperationsComparisonsAndConversionsStaticAndExplicitLuisaAgree()
     {
         int[] signedValues = [-8, -1, 0, 3, 17];
         uint[] unsignedValues = [0u, 1u, 7u, 31u, 0x80000000u];
@@ -37,19 +37,19 @@ public class LuisaBackendTypeFeatureTests
         using var signed = GPU.CreateBuffer<int>(signedValues);
         using var unsigned = GPU.CreateBuffer<uint>(unsignedValues);
         using var floats = GPU.CreateBuffer<float>(floatValues);
-        using var easy = GPU.CreateBuffer<int>(signedValues.Length);
+        using var staticOutput = GPU.CreateBuffer<int>(signedValues.Length);
         using var luisa = GPU.CreateBuffer<int>(signedValues.Length);
 
         GPU.Dispatch(new LuisaScalarMatrixKernel(
-            signed.AsReadOnly(), unsigned.AsReadOnly(), floats.AsReadOnly(), easy.AsReadWrite()), signedValues.Length);
+            signed.AsReadOnly(), unsigned.AsReadOnly(), floats.AsReadOnly(), staticOutput.AsReadWrite()), signedValues.Length);
         DispatchLuisa(new LuisaScalarMatrixKernel(
             signed.AsReadOnly(), unsigned.AsReadOnly(), floats.AsReadOnly(), luisa.AsReadWrite()), signedValues.Length);
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void VectorConstructionAndSwizzlesMatchEasyGpu()
+    public void VectorConstructionAndSwizzlesStaticAndExplicitLuisaAgree()
     {
         float4[] values =
         [
@@ -58,28 +58,28 @@ public class LuisaBackendTypeFeatureTests
             new(10, 20, 30, 40)
         ];
         using var input = GPU.CreateBuffer<float4>(values);
-        using var easy = GPU.CreateBuffer<float4>(values.Length);
+        using var staticOutput = GPU.CreateBuffer<float4>(values.Length);
         using var luisa = GPU.CreateBuffer<float4>(values.Length);
-        GPU.Dispatch(new ExpandedSwizzleKernel(input.AsReadOnly(), easy.AsReadWrite()), values.Length);
+        GPU.Dispatch(new ExpandedSwizzleKernel(input.AsReadOnly(), staticOutput.AsReadWrite()), values.Length);
         DispatchLuisa(new ExpandedSwizzleKernel(input.AsReadOnly(), luisa.AsReadWrite()), values.Length);
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void MatrixConstructionAndLinearAlgebraMatchEasyGpu()
+    public void MatrixConstructionAndLinearAlgebraStaticAndExplicitLuisaAgree()
     {
         const int count = 5;
-        using var easy = GPU.CreateBuffer<float2>(count);
+        using var staticOutput = GPU.CreateBuffer<float2>(count);
         using var luisa = GPU.CreateBuffer<float2>(count);
-        GPU.Dispatch(new Matrix2VectorMultiplyKernel(easy.AsReadWrite()), count);
+        GPU.Dispatch(new Matrix2VectorMultiplyKernel(staticOutput.AsReadWrite()), count);
         DispatchLuisa(new Matrix2VectorMultiplyKernel(luisa.AsReadWrite()), count);
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void StructAggregateLoadsAndNestedFieldExtractionMatchEasyGpu()
+    public void StructAggregateLoadsAndNestedFieldExtractionStaticAndExplicitLuisaAgree()
     {
         NestedScene[] values =
         [
@@ -87,11 +87,11 @@ public class LuisaBackendTypeFeatureTests
             new() { Scene = new TypedScene { LightDir = new float3(5, 6, 7), Intensity = 8 }, Weight = new float4(1, 0, 0, 0) }
         ];
         using var input = GPU.CreateBuffer<NestedScene>(values);
-        using var easy = GPU.CreateBuffer<float>(values.Length);
+        using var staticOutput = GPU.CreateBuffer<float>(values.Length);
         using var luisa = GPU.CreateBuffer<float>(values.Length);
-        GPU.Dispatch(new NestedStructFieldReadKernel(input.AsReadOnly(), easy.AsReadWrite()), values.Length);
+        GPU.Dispatch(new NestedStructFieldReadKernel(input.AsReadOnly(), staticOutput.AsReadWrite()), values.Length);
         DispatchLuisa(new NestedStructFieldReadKernel(input.AsReadOnly(), luisa.AsReadWrite()), values.Length);
-        Assert.Equal(easy.ToArray(), luisa.ToArray());
+        Assert.Equal(staticOutput.ToArray(), luisa.ToArray());
     }
 
     private static void DispatchLuisa<TKernel>(TKernel kernel, int count)

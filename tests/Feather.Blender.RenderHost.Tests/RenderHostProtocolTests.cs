@@ -624,7 +624,7 @@ public sealed class RenderHostProtocolTests
         FrameFileWriter.WriteAtomic(
             fixture.OutputPath,
             99,
-            new RenderedFrame(2, 1, pixels, DispatchPath.TypedEasyGpu));
+            new RenderedFrame(2, 1, pixels, DispatchPath.Luisa));
 
         var bytes = File.ReadAllBytes(fixture.OutputPath);
         Assert.Equal("FTHRFRM1"u8.ToArray(), bytes[..8]);

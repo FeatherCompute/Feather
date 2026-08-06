@@ -125,12 +125,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedLoss, loss.ToArray()[0], 1e-5f);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
 
-        string backward = ad.GetBackwardGLSL();
-        string backwardSection = BackwardSection(backward);
-        Assert.Contains("denominator", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("brdfValue", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("ltcMagnitude", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -162,10 +156,6 @@ public class ADCallableRegressionTests
         Assert.False(ad.Gradients.Contains("targets"));
         Assert.False(ad.Gradients.Contains("pdfs"));
 
-        string backward = ad.GetBackwardGLSL();
-        Assert.DoesNotContain("grad_targets", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_pdfs", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_fe_1", backward, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -190,12 +180,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
         Assert.False(ad.Gradients.Contains("samples"));
 
-        string backward = ad.GetBackwardGLSL();
-        Assert.DoesNotContain("grad_samples", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_fe_0", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_fe_0[i]", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("vec2(1.0, 0.0)", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("vec2(0.0, 1.0)", backward, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -221,14 +205,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
         Assert.False(ad.Gradients.Contains("samples"));
 
-        string backward = ad.GetBackwardGLSL();
-        Assert.DoesNotContain("grad_samples", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_fe_0", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_fe_0[i]", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("vec2(1.0, 0.0)", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("vec2(0.0, 1.0)", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("+()", backward, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_(", backward, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -249,9 +225,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
 
-        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
-        Assert.Contains("length(", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -272,11 +245,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
 
-        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
-        Assert.DoesNotContain("+()", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("abs(()", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("()-", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -308,14 +276,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
 
-        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
-        Assert.Contains("length(", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("+()", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("abs(()", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("()-", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_targets", backwardSection, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -352,11 +312,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-4f);
         Assert.NotEqual(0f, ad.Gradients.Get<float>("parameters")[0]);
 
-        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
-        Assert.Contains("_ad_expr", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_global__", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_targets", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("grad_pdfs", backwardSection, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -378,13 +333,6 @@ public class ADCallableRegressionTests
         AssertNear(expectedLoss, loss.ToArray()[0], 1e-4f);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 3e-3f);
 
-        string backwardSection = BackwardSection(ad.GetBackwardGLSL());
-        int original = backwardSection.IndexOf("_original = normalize", StringComparison.Ordinal);
-        int transformed = backwardSection.IndexOf("_transformed = ", StringComparison.Ordinal);
-        Assert.True(original >= 0, backwardSection);
-        Assert.True(transformed > original, backwardSection);
-        Assert.DoesNotContain("_length(", backwardSection, StringComparison.Ordinal);
-        Assert.DoesNotContain("d_(", backwardSection, StringComparison.Ordinal);
     }
 
     private static void AssertNear(float expected, float actual, float tolerance = 1e-3f)
@@ -416,41 +364,6 @@ public class ADCallableRegressionTests
     private static float LengthCpu(float3 value)
         => MathF.Sqrt((value.X * value.X) + (value.Y * value.Y) + (value.Z * value.Z));
 
-    private static string BackwardSection(string glsl)
-    {
-        const string marker = "// === Backward pass";
-        int markerIndex = glsl.IndexOf(marker, StringComparison.Ordinal);
-        if (markerIndex < 0)
-        {
-            return glsl;
-        }
-
-        int mainIndex = glsl.IndexOf("void main()", StringComparison.Ordinal);
-        int openBrace = mainIndex < 0 ? -1 : glsl.IndexOf('{', mainIndex);
-        if (openBrace < 0 || markerIndex < openBrace)
-        {
-            return glsl[markerIndex..];
-        }
-
-        int depth = 0;
-        for (int i = openBrace; i < glsl.Length; i++)
-        {
-            if (glsl[i] == '{')
-            {
-                depth++;
-            }
-            else if (glsl[i] == '}')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return glsl[markerIndex..(i + 1)];
-                }
-            }
-        }
-
-        return glsl[markerIndex..];
-    }
 }
 
 [Kernel]

@@ -628,7 +628,6 @@ public class ADNumericalCorrectnessTests
         var expectedGradient = EvaluateNormalizedZSquaredDerivative(p);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
         AssertNear(EvaluateNormalizedZSquared(p), loss.ToArray()[0], 1e-3f);
-        Assert.DoesNotContain("d_(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -646,7 +645,6 @@ public class ADNumericalCorrectnessTests
         var expectedGradient = EvaluateNormalizedZSquaredDerivative(p);
         AssertNear(expectedGradient, ad.Gradients.Get<float>("parameters")[0], 1e-3f);
         AssertNear(EvaluateNormalizedZSquared(p), loss.ToArray()[0], 1e-3f);
-        Assert.DoesNotContain("d_(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
     }
 
     [Fact]

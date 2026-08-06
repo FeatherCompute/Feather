@@ -34,7 +34,7 @@ public sealed class RenderGraphBufferGpuTests
 
         context.SetBufferOutput(outputHandle, outputBuffer, path);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, path);
+        Assert.Equal(DispatchPath.Luisa, path);
         Assert.Equal(outputHandle.Value, backend.OutputHandle);
         Assert.Equal(path, backend.DispatchPath);
         Assert.Equal(new float[] { 6, 30, 15 }, Assert.IsType<float[]>(backend.Values));

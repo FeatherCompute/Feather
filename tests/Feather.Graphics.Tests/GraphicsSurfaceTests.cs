@@ -16,27 +16,10 @@ public class GraphicsSurfaceTests
     }
 
     [Fact]
-    public void GraphicsEnumsExposeEasyGpuTopologyAndSampleCoverage()
+    public void GraphicsEnumsExposeTopologyAndSampleCoverage()
     {
         Assert.Equal(5u, (uint)PrimitiveTopology.TriangleFan);
         Assert.Equal(16u, (uint)SampleCount.X16);
     }
 
-    [Fact]
-    public void BackendCapsExposeAdvancedRasterFeatureFlags()
-    {
-        var caps = new BackendCaps(
-            BackendType.Vulkan,
-            1,
-            1,
-            1,
-            SupportsGraphics: true,
-            SupportsAD: false,
-            SupportsNN: false,
-            SupportsDepthClamp: true,
-            SupportsNonFillPolygonMode: true);
-
-        Assert.True(caps.SupportsDepthClamp);
-        Assert.True(caps.SupportsNonFillPolygonMode);
-    }
 }

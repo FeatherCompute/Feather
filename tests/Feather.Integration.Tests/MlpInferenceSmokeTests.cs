@@ -125,35 +125,6 @@ public class MlpInferenceSmokeTests(Xunit.Abstractions.ITestOutputHelper output)
     }
 
     [Fact]
-    public void InferenceKernelLowersToRealShaderCode()
-    {
-        var glsl = ShaderInspection.GetGLSL<MlpInference3To1Kernel>();
-
-        // A kernel that type-checks can still fail to become a shader, so assert on the lowered GLSL.
-        Assert.NotEmpty(glsl);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(2)]
-    [InlineData(8)]
-    [InlineData(31)]
-    public void ShaderOffsetHelpersAgreeWithTheHostLayout(int hiddenSize)
-    {
-        // A pass evaluating inline uses MlpShader's offsets rather than the inference kernel, so those
-        // offsets have to name the same slots the trainer wrote.
-        Assert.Equal(MlpLayout.PackedElementCount3To1(hiddenSize), MlpShader.PackedElementCount3To1(hiddenSize));
-        Assert.Equal(MlpLayout.ScratchElementsPerLane3To1(hiddenSize), MlpShader.ScratchElementsPerLane3To1(hiddenSize));
-        Assert.Equal(MlpLayout.Layer1WeightOffset(hiddenSize), MlpShader.Layer1WeightOffset3To1(hiddenSize));
-        Assert.Equal(MlpLayout.Layer1BiasOffset(hiddenSize), MlpShader.Layer1BiasOffset3To1(hiddenSize));
-        Assert.Equal(MlpLayout.Layer2WeightOffset(hiddenSize), MlpShader.Layer2WeightOffset3To1(hiddenSize));
-        Assert.Equal(MlpLayout.Layer2BiasOffset(hiddenSize), MlpShader.Layer2BiasOffset3To1(hiddenSize));
-        Assert.Equal(MlpLayout.OutputWeightOffset(hiddenSize), MlpShader.OutputWeightOffset3To1(hiddenSize));
-        Assert.Equal(MlpLayout.OutputBiasOffset(hiddenSize), MlpShader.OutputBiasOffset3To1(hiddenSize));
-        Assert.Equal(5, MlpShader.WeightIndex(1, 2, 3));
-    }
-
-    [Fact]
     public void WeightsCacheLoadsOncePerCheckpointChange()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"feather-mlp-cache-{Guid.NewGuid():N}");

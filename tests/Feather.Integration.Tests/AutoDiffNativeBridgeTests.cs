@@ -10,25 +10,6 @@ namespace Feather.Integration.Tests;
 public class AutoDiffNativeBridgeTests
 {
     [Fact]
-    public unsafe void ADBackwardGeneratesMergedGlsl()
-    {
-        using var parameters = GPU.CreateBuffer<float>([3f]);
-        using var loss = GPU.CreateBuffer<float>(1);
-        using var gpuKernel = GpuKernel.Create<ScalarQuadraticAdKernel>(GPU.Context);
-        var kernel = new ScalarQuadraticAdKernel(parameters.AsReadWrite(), loss.AsReadWrite());
-
-        DispatchRetained(gpuKernel, kernel, 1);
-
-        var glsl = NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
-            NativeMethods.fe_kernel_get_ad_backward_glsl(gpuKernel.Handle, buffer, length, out required));
-
-        Assert.Contains("Backward pass", glsl, StringComparison.Ordinal);
-        Assert.Contains("_ad_grad_fe_0_data", glsl, StringComparison.Ordinal);
-        Assert.Contains("layout(std430", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("Feather native stub", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ADKernelSupportsOneShotGeneratedDispatch()
     {
         using var parameters = GPU.CreateBuffer<float>([3f]);
@@ -55,27 +36,9 @@ public class AutoDiffNativeBridgeTests
 
         ad.Backward(1);
 
-        Assert.DoesNotContain("fma(", ad.GetBackwardGLSL(), StringComparison.Ordinal);
         Assert.InRange(ad.Gradients.Get<float>("scale")[0], 41.999f, 42.001f);
         Assert.InRange(ad.Gradients.Get<float>("bias")[0], 13.999f, 14.001f);
         Assert.Equal([49f], loss.ToArray());
-    }
-
-    [Fact]
-    public void ADBackwardMergedGlslGuardsPaddedWorkgroupLanes()
-    {
-        using var parameters = GPU.CreateBuffer<float>([3f]);
-        using var loss = GPU.CreateBuffer<float>(64);
-        using var gpuKernel = GpuKernel.Create<SharedScalarPaddedLaneAdKernel>(GPU.Context);
-        var kernel = new SharedScalarPaddedLaneAdKernel(parameters.AsReadWrite(), loss.AsReadWrite());
-
-        DispatchRetained(gpuKernel, kernel, 64);
-
-        var glsl = NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
-            NativeMethods.fe_kernel_get_ad_backward_glsl(gpuKernel.Handle, buffer, length, out required));
-
-        Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
-        Assert.Contains("if (gl_GlobalInvocationID.x >= 64u) return;", glsl, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,7 +54,7 @@ public class AutoDiffNativeBridgeTests
         adKernel.Backward(64);
         adKernel.CopyGradientToBuffer("parameters", reducedGradient);
 
-        Assert.Equal(DispatchPath.TypedEasyGpu, adKernel.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, adKernel.LastDispatchPath);
         Assert.InRange(reducedGradient.ToArray()[0], 383.99f, 384.01f);
     }
 
@@ -112,7 +75,7 @@ public class AutoDiffNativeBridgeTests
         Assert.Equal("parameters", FixedString(info.Name, 128));
         Assert.Equal("parameters", FixedString(info.ResourceName, 128));
         Assert.Equal("float", FixedString(info.ElementType, 64));
-        Assert.Equal("fe_0", FixedString(info.EasyGpuName, 64));
+        Assert.Equal("fe_0", FixedString(info.NativeName, 64));
         Assert.Equal(0u, info.SourceBinding);
         Assert.Equal(1u, info.ElementCount);
         Assert.Equal(4u, info.ElementStride);
@@ -132,63 +95,6 @@ public class AutoDiffNativeBridgeTests
 
         Assert.InRange(gradients[0], 5.99f, 6.01f);
         Assert.Equal([3f], parameters.ToArray());
-    }
-
-    [Fact]
-    public void ADBackwardMergedGlslIncludesIfControlFlow()
-    {
-        using var parameters = GPU.CreateBuffer<float>([2f]);
-        using var loss = GPU.CreateBuffer<float>(1);
-        using var gpuKernel = GpuKernel.Create<IfElseAdInspectionKernel>(GPU.Context);
-        var kernel = new IfElseAdInspectionKernel(parameters.AsReadWrite(), loss.AsReadWrite());
-
-        DispatchRetained(gpuKernel, kernel, 1);
-
-        var glsl = NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
-            NativeMethods.fe_kernel_get_ad_backward_glsl(gpuKernel.Handle, buffer, length, out required));
-
-        Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
-        Assert.Contains("Backward pass", glsl, StringComparison.Ordinal);
-        Assert.Contains("if (", glsl, StringComparison.Ordinal);
-        Assert.Contains("_ad_grad_fe_0_data", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ADBackwardMergedGlslIncludesReverseForControlFlow()
-    {
-        using var parameters = GPU.CreateBuffer<float>([2f]);
-        using var loss = GPU.CreateBuffer<float>(1);
-        using var gpuKernel = GpuKernel.Create<ForLoopAdInspectionKernel>(GPU.Context);
-        var kernel = new ForLoopAdInspectionKernel(parameters.AsReadWrite(), loss.AsReadWrite());
-
-        DispatchRetained(gpuKernel, kernel, 1);
-
-        var glsl = NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
-            NativeMethods.fe_kernel_get_ad_backward_glsl(gpuKernel.Handle, buffer, length, out required));
-
-        Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
-        Assert.Contains("Backward pass", glsl, StringComparison.Ordinal);
-        Assert.Contains("for (", glsl, StringComparison.Ordinal);
-        Assert.Contains("_ad_grad_fe_0_data", glsl, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ADBackwardMergesRepeatedLoopNamesAndCompoundMaxOperands()
-    {
-        using var parameters = GPU.CreateBuffer<float>([2f]);
-        using var loss = GPU.CreateBuffer<float>(1);
-        using var gpuKernel = GpuKernel.Create<RepeatedLoopNameAndMaxAdKernel>(GPU.Context);
-        var kernel = new RepeatedLoopNameAndMaxAdKernel(parameters.AsReadWrite(), loss.AsReadWrite());
-
-        DispatchRetained(gpuKernel, kernel, 1);
-
-        var glsl = NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
-            NativeMethods.fe_kernel_get_ad_backward_glsl(gpuKernel.Handle, buffer, length, out required));
-
-        Assert.Equal(DispatchPath.TypedEasyGpu, gpuKernel.LastDispatchPath);
-        Assert.Contains("Backward pass", glsl, StringComparison.Ordinal);
-        Assert.Contains("step(", glsl, StringComparison.Ordinal);
-        Assert.DoesNotContain("= ;", glsl, StringComparison.Ordinal);
     }
 
     [Fact]

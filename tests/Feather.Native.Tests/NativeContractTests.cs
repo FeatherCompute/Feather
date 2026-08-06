@@ -250,19 +250,4 @@ public class NativeContractTests
         Assert.Equal(52, Marshal.OffsetOf<FeWindowEvent>(nameof(FeWindowEvent.Codepoint)).ToInt32());
     }
 
-    [Fact]
-    public void BackendCapsHasStableSequentialLayout()
-    {
-        Assert.Equal(40, Marshal.SizeOf<FeBackendCaps>());
-        Assert.Equal(0, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.BackendType)).ToInt32());
-        Assert.Equal(4, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.MaxWorkGroupSizeX)).ToInt32());
-        Assert.Equal(8, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.MaxWorkGroupSizeY)).ToInt32());
-        Assert.Equal(12, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.MaxWorkGroupSizeZ)).ToInt32());
-        Assert.Equal(16, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsGraphics)).ToInt32());
-        Assert.Equal(20, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsAD)).ToInt32());
-        Assert.Equal(24, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsNN)).ToInt32());
-        Assert.Equal(28, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsWindow)).ToInt32());
-        Assert.Equal(32, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsDepthClamp)).ToInt32());
-        Assert.Equal(36, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsNonFillPolygonMode)).ToInt32());
-    }
 }

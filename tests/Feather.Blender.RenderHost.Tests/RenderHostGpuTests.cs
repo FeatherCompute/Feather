@@ -51,7 +51,7 @@ public sealed class RenderHostGpuTests
 
         var result = host.RenderOnce(fixture.RequestPath);
 
-        Assert.Equal("TypedEasyGpu", result.DispatchPath);
+        Assert.Equal("Luisa", result.DispatchPath);
         Assert.Equal(1, result.TriangleCount);
         Assert.Equal(3, result.VertexCount);
         var frame = File.ReadAllBytes(fixture.OutputPath);
@@ -93,7 +93,7 @@ public sealed class RenderHostGpuTests
 
         Assert.True(first.PassReloaded);
         Assert.Equal(HotReloadPassType, first.PassType);
-        Assert.Equal("TypedEasyGpu", first.DispatchPath);
+        Assert.Equal("Luisa", first.DispatchPath);
         Assert.True(first.GpuReadbackMilliseconds > 0.0);
         Assert.True(first.PassExecutionMilliseconds >= first.GpuReadbackMilliseconds);
         Assert.True(first.SceneLoadMilliseconds >= 0.0);

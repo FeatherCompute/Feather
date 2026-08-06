@@ -10,7 +10,7 @@ public class LuisaBackendAdTests
 {
     [Fact]
     [Trait("Category", "Gpu")]
-    public void ReverseModeGradientsMatchEasyGpu()
+    public void ReverseModeGradientsStaticAndExplicitLuisaAgree()
     {
         float[] parameters = [2f, -3f, 0.5f, 4f];
         var expectedLoss = parameters.Select(static value => (value * value) + (3f * value)).ToArray();
@@ -42,7 +42,7 @@ public class LuisaBackendAdTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void VectorParameterGradientsMatchEasyGpu()
+    public void VectorParameterGradientsStaticAndExplicitLuisaAgree()
     {
         float2[] parameters = [new(2f, -3f), new(0.5f, 4f)];
         float2[] expectedGradient = [new(4f, -6f), new(1f, 8f)];
@@ -90,7 +90,7 @@ public class LuisaBackendAdTests
 
     [Fact]
     [Trait("Category", "Gpu")]
-    public void ConditionalIntrinsicGradientsMatchEasyGpu()
+    public void ConditionalIntrinsicGradientsStaticAndExplicitLuisaAgree()
     {
         float[] parameters = [0.5f, -0.5f];
         float[] expectedGradient = [MathF.Cos(0.5f), -MathF.Sin(-0.5f)];

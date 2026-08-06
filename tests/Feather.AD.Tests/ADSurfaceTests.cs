@@ -57,8 +57,7 @@ public class ADSurfaceTests
 
         Assert.True(adKernel.HasBackwardRun);
         Assert.Equal(4, adKernel.LastBackwardCount);
-        Assert.Equal(DispatchPath.TypedEasyGpu, adKernel.LastDispatchPath);
-        Assert.Contains("Backward pass", adKernel.GetBackwardGLSL(), StringComparison.Ordinal);
+        Assert.Equal(DispatchPath.Luisa, adKernel.LastDispatchPath);
         Assert.False(adKernel.Gradients.HasMaterializedValues);
 
         Assert.Same(adKernel.Gradients, adKernel.ReadBackGradients());
@@ -107,7 +106,7 @@ public class ADSurfaceTests
         Assert.Equal(0, adKernel.LastBackwardCount);
         Assert.False(adKernel.Gradients.HasMaterializedValues);
         Assert.Empty(adKernel.Gradients.Names);
-        Assert.Equal(DispatchPath.TypedEasyGpu, adKernel.LastDispatchPath);
+        Assert.Equal(DispatchPath.Luisa, adKernel.LastDispatchPath);
         Assert.Throws<InvalidOperationException>(() => adKernel.ReadBackGradients());
         Assert.Throws<InvalidOperationException>(() => adKernel.CopyGradientToBuffer("parameters", destination));
 
@@ -199,7 +198,6 @@ public class ADSurfaceTests
         Assert.Throws<ObjectDisposedException>(() => adKernel.Backward(1));
         Assert.Throws<ObjectDisposedException>(() => adKernel.ReadBackGradients());
         Assert.Throws<ObjectDisposedException>(() => adKernel.CopyGradientToBuffer("parameters", destination));
-        Assert.Throws<ObjectDisposedException>(() => adKernel.GetBackwardGLSL());
         adKernel.Dispose();
     }
 
