@@ -3,8 +3,9 @@
 ## Status And Scope
 
 This is a design for M8 and M9. M8.1 device discovery, M8.2 multi-context
-ownership, M8.3 explicit streams/fences, and M8.4 native presentation are
-implemented; later milestones in this document remain design-only.
+ownership, M8.3 explicit streams/fences, M8.4 native presentation, and M8.5
+API migration closure are implemented; later milestones in this document remain
+design-only.
 LuisaCompute is the target runtime model. EasyGPU is scheduled for removal in
 M9, so new public API must describe Luisa concepts directly rather than add
 another backend-selection layer.
@@ -376,13 +377,57 @@ host access synchronizes affected work before native storage is released, so an
 in-flight dispatch cannot retain dangling host pointers. Autodiff remains
 host-synchronous because gradient retrieval has no asynchronous managed contract.
 
+### M8.5 migration closure
+
+`samples/WindowCompute` now exercises the old static `GPU.Dispatch` facade and
+then creates an explicit `GpuRuntime`/`GpuContext`/`GpuStream`. Its visual
+frames use a Luisa kernel on the explicit context and are presented through the
+M8.4 native route when `FEATHER_GRAPHICS_COMPUTE=1`. The optional bounded run
+is suitable for a local smoke test:
+
+```sh
+FEATHER_GRAPHICS_COMPUTE=1 dotnet run --project samples/WindowCompute/WindowCompute.csproj -- --frames 240
+```
+
+The sample waits for its small, independent `GpuStream` validation fence before
+reading its buffer. The visual kernel deliberately uses the explicit context's
+default stream: `GpuTexturePresenter` does not yet accept a `GpuStream` or
+`GpuFence`, so an explicit-stream texture producer must currently synchronize
+before presentation. That limitation is recorded as pending rather than
+claiming cross-stream native presentation.
+
+#### M8 capability matrix
+
+| Area | State | Delivered surface | Boundary / next validation |
+| --- | --- | --- | --- |
+| M8.1 device discovery | Implemented | `GpuRuntime` enumerates LC backend/device/name/default and creates an explicitly selected `GpuContext`. | Bindless, subgroup, and quad fields remain `Unknown` until LC exposes portable queries. Multi-device hardware remains conditional. |
+| M8.2 context ownership | Implemented | Explicit contexts own resources and streams; `GPU.WithContext` prevents cross-context use. | Multiple Vulkan contexts are serialized by the pinned LC runtime. |
+| M8.3 streams and fences | Implemented | `GpuStream` returns `GpuFence`; polling, waits, disposal ordering, and non-retained internal completion cleanup are live. | `GpuStream.Wait` is host-blocking because host-visible completion includes repacking. |
+| M8.4 Metal presentation | Implemented | Same-device resident images are event-ordered into an LC Metal swapchain without host readback. | Verified on Apple Metal; explicit stream texture producers need a host synchronization before `GpuTexturePresenter.Present`. |
+| M8.4 Vulkan presentation | Pending validation | The shared GLFW-native-handle and LC swapchain abstraction has a Vulkan route. | Requires Linux/Windows window smoke coverage on supported display servers. |
+| DX swapchain | Pending validation | LC supplies a DX swapchain API. | Feather currently builds LC with DX disabled, so no public DX device/presenter route is enabled. |
+| CUDA/HIP presentation | Unsupported | None. | No Feather LC swapchain route; the EasyGPU window/ring fallback remains until a supported native route is qualified. |
+| External texture import | Unsupported | Native-handle diagnostics only. | Pinned LC imports `VkImage` only; Metal/DX external texture import is rejected, and Feather exposes no raw import API. |
+| RT-ready API | Unsupported | None. | Acceleration structures, trace dispatch, and an FEIR/XIR capability contract require a separate design and backend qualification. |
+
+#### M9 removal prerequisites
+
+| Remaining dependency | Current evidence | Required disposition before removing EasyGPU |
+| --- | --- | --- |
+| Native build and default dispatch | `native/CMakeLists.txt` adds/links `EasyGPU`; `native/feather_c_api.cpp` owns the EasyGPU kernel and resource bridge. | Move the static `GPU` default to Luisa, remove the `EasyGpu` execution enum branch, and delete the typed IR-to-EasyGPU bridge after compatibility versioning is approved. |
+| Raster fallback | `draw_graphics_pipeline_easygpu` remains selected when compute raster is not explicitly enabled. | Make compute raster the qualified default across supported platforms, then remove EasyGPU pipeline/GLSL generation and resource caches. |
+| Window fallback | `WindowHost` retains `AppWindow`; native presenter retains the readback ring and EasyGPU texture uploader. | Qualify Vulkan/DX native presentation and provide a non-EasyGPU fallback for unsupported LC backends before deleting the window target. |
+| Shader inspection and layouts | `ShaderInspection.GetGLSL`, `GpuKernel.GetGLSL`, and `GpuValueLayout` encode EasyGPU/GLSL and std430 contracts. | Replace with XIR/SPIR-V inspection and Luisa-compatible layout reporting, or remove those compatibility APIs in the M9 breaking change. |
+| AD and NN defaults | `GpuADKernel` defaults to `EasyGpu`; `NnDeviceOps` uses static dispatch and training still assumes the legacy execution contract. | Qualify all AD/NN paths on explicit Luisa contexts and migrate their resource ownership and diagnostics before removing the enum/backend. |
+| Packaging and CI | Native staging, smoke jobs, and tests currently build/link EasyGPU. | Remove EasyGPU assets, update package validation and platform smoke tests, then prove a clean LC-only build and full regression suite. |
+
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
 | M8.1 Runtime discovery (implemented) | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Device list/default semantics and invalid selection are covered by managed tests; a GPU test creates the selected LC device; multi-device hardware coverage remains conditional |
 | M8.2 Context-native ownership (implemented) | `GPU.WithContext`; native per-context LC state; resources, pipelines, and kernels carry owner context | Two same-device Metal contexts dispatch independently; cross-context binding and post-disposal use are rejected; pinned Vulkan contexts are serialized because LC permits one live device |
 | M8.3 Streams and fences (implemented) | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` retains staging safely; GPU tests cover completion polling/wait, two streams, cross-stream ordering, cross-context rejection, teardown, and Vulkan context activation switches |
 | M8.4 Resource interop and presentation (implemented) | Capability-gated native handle classification; same-device LC swapchain route on Metal/Vulkan; host staging fallback | Metal completed 600 direct-present frames and non-black WindowCompute/Sponza runs; forced host fallback completed 240 frames; arbitrary external import remains backend-gated |
-| M8.5 API migration | Static `GPU` facade delegates to default context/stream; samples migrate to explicit contexts where appropriate | Existing public examples compile unchanged; new multi-context/stream samples pass; no public API selects EasyGPU |
+| M8.5 API migration (implemented) | Static facade compatibility is exercised beside explicit runtime/context/stream sample usage; M9 dependency inventory is recorded | Existing public examples compile unchanged; `WindowCompute` verifies static and explicit dispatch in one process, and full GPU regression remains green |
 | M8.6 RT readiness | Capability schema and inert RT type/descriptor design review, then a separate implementation proposal | No fake RT success path; construction is capability-gated; FEIR/XIR/backend coverage proposal approved before implementation |
 | M9 EasyGPU removal | Remove EasyGPU ABI, source, assets, enum branch, GLSL inspection APIs, and CI setup after M8 gates | Repository has no EasyGPU runtime dependency; supported compute/graphics/window paths use LC; package and three-platform build gates pass |
 

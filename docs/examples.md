@@ -7,6 +7,8 @@ Feather ships samples that are meant to be read as a learning path. Each sample 
 Compute and AD samples that are supported by the LuisaCompute XIR/Vulkan path
 select `GpuExecutionBackend.Luisa` explicitly and print `DispatchPath.Luisa`.
 EasyGPU remains the library default and is still used by raster presentation.
+`WindowCompute` also demonstrates the explicit M8 runtime API and can use the
+native Luisa presentation route when `FEATHER_GRAPHICS_COMPUTE=1`.
 
 | Sample | Classification | Backend decision / reason |
 | --- | --- | --- |
@@ -26,7 +28,7 @@ EasyGPU remains the library default and is still used by raster presentation.
 | `SpirvOptInspection` | ✅ Luisa | Dispatch uses Luisa; GLSL inspection intentionally remains an EasyGPU inspection tool. |
 | `TextureCopy` | ✅ Luisa | 2D texture load/store compute. |
 | `VolumetricFog` | ✅ Luisa | 2D math/callable compute. |
-| `WindowCompute` | ✅ partial | Pixel compute dispatch uses Luisa; window and texture presentation remain EasyGPU. |
+| `WindowCompute` | ✅ Luisa | Demonstrates `GpuRuntime`, explicit `GpuContext`/`GpuStream`, and Luisa texture dispatch. With `FEATHER_GRAPHICS_COMPUTE=1`, Metal/Vulkan presentation consumes the resident Luisa texture directly; otherwise the documented fallback remains active. |
 | `AdGptDemo` | ❌待支持 | NN trainer API does not expose a Luisa backend selector; NN source is out of scope. |
 | `AdGptPoetDemo` | ❌待支持 | Same NN trainer backend-selection gap. |
 | `AdMlpRegression` | ❌待支持 | `MlpRegressionJob` owns a `TrainingStep` without backend selection. |
@@ -51,7 +53,7 @@ invoked with reduced dimensions/samples for a bounded GPU smoke run.
 | 3 | `Mandelbrot` | `dotnet run --project samples/Mandelbrot/Mandelbrot.csproj -- 1024 1024 256` | 2D dispatch, `Uniform<T>`, callables, math, image output. |
 | 4 | `JuliaSet` | `dotnet run --project samples/JuliaSet/JuliaSet.csproj` | Another 2D compute renderer with parameterized fractal math. |
 | 5 | `TextureCopy` | `dotnet run --project samples/TextureCopy/TextureCopy.csproj` | 2D texture load/store instead of buffer-backed pixels. |
-| 6 | `WindowCompute` | `dotnet run --project samples/WindowCompute/WindowCompute.csproj` | Native window loop and GPU texture presentation. |
+| 6 | `WindowCompute` | `FEATHER_GRAPHICS_COMPUTE=1 dotnet run --project samples/WindowCompute/WindowCompute.csproj` | Runtime discovery, explicit context/stream, and native Luisa texture presentation. Add `-- --frames 240` for a bounded smoke run. |
 | 7 | `WindowGraphicsTriangle` | `dotnet run --project samples/WindowGraphicsTriangle/WindowGraphicsTriangle.csproj` | C# vertex/fragment shaders and offscreen render target presentation. |
 | 8 | `AdLinearRegression` | `dotnet run --project samples/AdLinearRegression/AdLinearRegression.csproj` | `[AutoDiff]`, `AD.Parameter`, `AD.Loss`, `TrainingStep`, optimizer handoff. |
 | 9 | `ProfilerSuite` | `dotnet run --project samples/ProfilerSuite/ProfilerSuite.csproj` | Profiling, dispatch path assertions, AD/NN/graphics timing. |
