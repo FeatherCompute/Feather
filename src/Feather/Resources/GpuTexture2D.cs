@@ -100,6 +100,7 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     public static GpuTexture2D<TPixel, TValue> Create(GpuContext context, int width, int height, int mipLevels, PixelFormat format, TextureAccess access)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(mipLevels);
@@ -117,27 +118,47 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     /// <summary>
     /// Creates a shader-facing read-only texture view over this texture.
     /// </summary>
-    public ReadOnlyTexture2D<TValue> AsReadOnly() => new(Handle, Size);
+    public ReadOnlyTexture2D<TValue> AsReadOnly()
+    {
+        ThrowIfDisposed();
+        return new ReadOnlyTexture2D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing write-only texture view over this texture.
     /// </summary>
-    public WriteOnlyTexture2D<TValue> AsWriteOnly() => new(Handle, Size);
+    public WriteOnlyTexture2D<TValue> AsWriteOnly()
+    {
+        ThrowIfDisposed();
+        return new WriteOnlyTexture2D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing read-write texture view over this texture.
     /// </summary>
-    public ReadWriteTexture2D<TValue> AsReadWrite() => new(Handle, Size);
+    public ReadWriteTexture2D<TValue> AsReadWrite()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteTexture2D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing normalized read-write texture view over this texture.
     /// </summary>
-    public ReadWriteNormalizedTexture2D<TValue> AsReadWriteNormalized() => new(Handle, Size);
+    public ReadWriteNormalizedTexture2D<TValue> AsReadWriteNormalized()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteNormalizedTexture2D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing sampled texture view over this texture.
     /// </summary>
-    public SampledTexture2D<TValue> AsSampled() => new(Handle, Size);
+    public SampledTexture2D<TValue> AsSampled()
+    {
+        ThrowIfDisposed();
+        return new SampledTexture2D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Uploads pixels into the base texture level.
@@ -213,6 +234,7 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        Context.ThrowIfDisposed();
     }
 
     private static int CalculateFullMipLevelCount(int width, int height)

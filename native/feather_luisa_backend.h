@@ -61,6 +61,8 @@ struct DispatchInputs {
     bool reuse_if_inputs_clean = false;
     bool* execution_skipped = nullptr;
     uint64_t execution_cache_key = 0;
+    uint64_t context_key = 1;
+    uint32_t device_index = UINT32_MAX;
 };
 
 struct RasterDispatchInputs {
@@ -129,6 +131,7 @@ bool ValidateDevice(std::string_view runtime_directory, std::string_view backend
 // Shutdown is called from context/runtime teardown; Abandon is used on process
 // exit when C++ destructors may run after the dynamic backend has unloaded.
 void Shutdown();
+void Shutdown(uint64_t context_key);
 void Abandon() noexcept;
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
@@ -157,18 +160,18 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                             std::vector<unsigned char>* fragment_coverage,
                             std::string* error = nullptr);
 
-bool DownloadResidentTexture(uint64_t resident_key, void* destination, size_t size,
+bool DownloadResidentTexture(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                              std::string* error = nullptr);
 
-bool DownloadResidentTextureAsync(uint64_t resident_key, void* destination, size_t size,
+bool DownloadResidentTextureAsync(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                                   std::function<void()> completion,
                                   std::string* error = nullptr);
 
-bool ResolveMultisampleTexture(std::span<const uint64_t> sample_keys,
+bool ResolveMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                                const HostTextureBinding& target,
                                bool synchronize, std::string* error = nullptr);
 
-bool ClearMultisampleTexture(std::span<const uint64_t> sample_keys,
+bool ClearMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                              const HostTextureBinding& target,
                              const std::array<float, 4u>& color,
                              std::string* error = nullptr);

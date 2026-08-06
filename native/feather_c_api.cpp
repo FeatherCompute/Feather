@@ -181,6 +181,7 @@ constexpr uint32_t kWindowEventMouseScroll = 7;
 constexpr uint32_t kWindowEventFocus = 8;
 
 struct BufferState {
+    FeContextHandle context = kDefaultContext;
     std::vector<unsigned char> bytes;
     uint32_t mode = 0;
     uint32_t stride = 0;
@@ -196,6 +197,7 @@ template <size_t N> struct FloatVectorValue {
 };
 
 struct TextureState {
+    FeContextHandle context = kDefaultContext;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t depth = 1;
@@ -214,6 +216,7 @@ struct TextureState {
 };
 
 struct SamplerState {
+    FeContextHandle context = kDefaultContext;
     FeSamplerDesc desc{};
 };
 
@@ -264,6 +267,7 @@ struct ADGradientState {
 };
 
 struct KernelState {
+    FeContextHandle context = kDefaultContext;
     std::vector<unsigned char> ir;
     std::vector<unsigned char> push_constants;
     std::unordered_map<uint32_t, FeBufferHandle> buffers;
@@ -490,6 +494,7 @@ struct FallbackAssignment {
 };
 
 struct GraphicsPipelineState {
+    FeContextHandle context = kDefaultContext;
     std::vector<unsigned char> ir;
     std::vector<unsigned char> vertex_ir;
     std::vector<unsigned char> fragment_ir;
@@ -610,6 +615,10 @@ std::vector<ProfilerRecord> g_profiler_records;
 std::unordered_map<std::string, ProfilerStats> g_profiler_stats;
 thread_local std::string g_last_error;
 thread_local FeResult g_last_result = FE_OK;
+
+bool context_exists_locked(FeContextHandle context) {
+    return context == kDefaultContext || g_contexts.find(context) != g_contexts.end();
+}
 
 class EasyGpuShaderGuard {
   public:
@@ -818,6 +827,7 @@ void destroy_backend_resources_for_shutdown() {
     g_textures.clear();
     g_buffers.clear();
     g_samplers.clear();
+    g_contexts.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
 
@@ -2505,6 +2515,31 @@ FeDeviceInfo make_device_info(const Feather::Luisa::DeviceInfo& source) {
     result.quad = FE_CAPABILITY_UNKNOWN;
     return result;
 }
+
+bool configure_luisa_dispatch_locked(FeContextHandle context,
+                                     Feather::Luisa::DispatchInputs* dispatch,
+                                     std::string* error) {
+    if (dispatch == nullptr) return false;
+    dispatch->context_key = context;
+    dispatch->runtime_directory = configured_luisa_runtime_directory();
+    if (context == kDefaultContext) {
+        const auto* configured_backend = std::getenv("FEATHER_LUISA_BACKEND");
+        dispatch->backend_name = configured_backend != nullptr && configured_backend[0] != '\0'
+                                     ? configured_backend
+                                     : std::string{Feather::Luisa::DefaultBackendName};
+        if (dispatch->backend_name == "vulkan") dispatch->backend_name = "vk";
+        dispatch->device_index = UINT32_MAX;
+        return true;
+    }
+    const auto found = g_contexts.find(context);
+    if (found == g_contexts.end()) {
+        if (error != nullptr) *error = "Invalid context handle.";
+        return false;
+    }
+    dispatch->backend_name = found->second.device.backend_name;
+    dispatch->device_index = found->second.device.device_index;
+    return true;
+}
 #endif
 
 std::string easygpu_push_constant_name(const IrResource& resource) {
@@ -2719,6 +2754,10 @@ size_t ad_scalar_slot_count_for_type(const std::string& type_name) {
 }
 
 void release_ad_gradient_buffers(KernelState& kernel) {
+    if (kernel.context != kDefaultContext) {
+        release_ad_gradient_buffers_with_backend(kernel, nullptr);
+        return;
+    }
     GPU::Runtime::AutoInitContext();
     release_ad_gradient_buffers_with_backend(kernel, GPU::Runtime::Context::GetBackend());
 }
@@ -5672,12 +5711,12 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
             .bytes = &buffer->second.bytes});
     }
 
-    const auto* configured_runtime = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
-    const auto* configured_backend = std::getenv("FEATHER_LUISA_BACKEND");
-    auto backend_name = configured_backend == nullptr || configured_backend[0] == '\0'
-                            ? Feather::Luisa::DefaultBackendName
-                            : std::string_view{configured_backend};
-    if (backend_name == "vulkan") backend_name = "vk";
+    Feather::Luisa::DispatchInputs context_dispatch{};
+    std::string context_error;
+    if (!configure_luisa_dispatch_locked(kernel.context, &context_dispatch, &context_error)) {
+        return fail(FE_ERROR_INVALID_HANDLE, context_error);
+    }
+    const auto& backend_name = context_dispatch.backend_name;
     if (backend_name != "vk" && backend_name != "metal" &&
         backend_name != "cuda" && backend_name != "hip") {
         return fail(FE_ERROR_INVALID_ARGUMENT,
@@ -5749,10 +5788,10 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         .logical_y = logical_y,
         .logical_z = logical_z,
         .shader_cache_key = shader_cache_key,
-        .backend_name = std::string{backend_name},
-        .runtime_directory = configured_runtime != nullptr && configured_runtime[0] != '\0'
-                                 ? configured_runtime
-                                 : Feather::Luisa::RuntimeDirectory()};
+        .backend_name = backend_name,
+        .runtime_directory = context_dispatch.runtime_directory,
+        .context_key = context_dispatch.context_key,
+        .device_index = context_dispatch.device_index};
     std::vector<Feather::Luisa::AdGradientBinding> gradient_bindings;
     gradient_bindings.reserve(next_gradients.size());
     for (auto& gradient : next_gradients) {
@@ -10756,7 +10795,6 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     output->assign(static_cast<size_t>(invocation_count) * *output_stride, 0u);
     buffers.push_back({output_binding, 2u, *output_stride, output});
 
-    const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     const auto base_cache_key = luisa_graphics_shader_cache_key(
         pipeline.vertex_ir, lowering, buffers, textures, 0x766572746578ull);
     *output_resident_key = base_cache_key ^ 0x7665727465786f75ull;
@@ -10767,11 +10805,11 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     const auto shader_cache_key = luisa_graphics_shader_cache_key(
         pipeline.vertex_ir, lowering, buffers, textures, 0x766572746578ull);
     Feather::Luisa::DispatchInputs dispatch{
-        1u, 1u, 1u, static_cast<uint32_t>(invocation_count), 1u, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0'
-            ? backend_value
-            : std::string{Feather::Luisa::DefaultBackendName},
-        Feather::Luisa::RuntimeDirectory()};
+        1u, 1u, 1u, static_cast<uint32_t>(invocation_count), 1u, 1u};
+    std::string context_error;
+    if (!configure_luisa_dispatch_locked(pipeline.context, &dispatch, &context_error)) {
+        return fail(FE_ERROR_INVALID_HANDLE, context_error);
+    }
     dispatch.shader_cache_key = shader_cache_key;
     dispatch.execution_cache_key = luisa_graphics_execution_cache_key(lowering);
     dispatch.reuse_if_inputs_clean = true;
@@ -10958,7 +10996,11 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                             false, false});
     }
 
-    const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
+    Feather::Luisa::DispatchInputs context_dispatch{};
+    std::string context_error;
+    if (!configure_luisa_dispatch_locked(pipeline.context, &context_dispatch, &context_error)) {
+        return fail(FE_ERROR_INVALID_HANDLE, context_error);
+    }
     if (prepare_fused) fused_callable_keys->clear();
     if (sample_count > 1u && !prepare_fused) {
         for (uint32_t target_index = 0u; target_index < targets.size(); ++target_index) {
@@ -10974,7 +11016,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                 target_handles[target_index], false, false, false};
             std::string error;
             if (!Feather::Luisa::ClearMultisampleTexture(
-                    sample_keys, target_binding, clear_color, &error)) {
+                    pipeline.context, sample_keys, target_binding, clear_color, &error)) {
                 return fail(FE_ERROR_UNSUPPORTED,
                             error.empty() ? "Compute raster multisample clear failed." : error);
             }
@@ -10995,11 +11037,11 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
             pipeline.fragment_ir, lowering, buffers, textures,
             prepare_fused ? 0x6675736564667261ull : 0x667261676d656e74ull);
         Feather::Luisa::DispatchInputs dispatch{
-            1u, 1u, 1u, first_target.width, first_target.height, 1u, 0u,
-            backend_value != nullptr && backend_value[0] != '\0'
-                ? backend_value
-                : std::string{Feather::Luisa::DefaultBackendName},
-            Feather::Luisa::RuntimeDirectory()};
+            1u, 1u, 1u, first_target.width, first_target.height, 1u};
+        dispatch.backend_name = context_dispatch.backend_name;
+        dispatch.runtime_directory = context_dispatch.runtime_directory;
+        dispatch.context_key = context_dispatch.context_key;
+        dispatch.device_index = context_dispatch.device_index;
         dispatch.shader_cache_key = shader_cache_key;
         dispatch.synchronize = sample_count == 1u;
         std::string error;
@@ -11046,7 +11088,8 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                 target_handles[target_index], false, false, false};
             std::string error;
             if (!Feather::Luisa::ResolveMultisampleTexture(
-                    sample_keys, target_binding, target_index + 1u == targets.size(), &error)) {
+                    pipeline.context, sample_keys, target_binding,
+                    target_index + 1u == targets.size(), &error)) {
                 return fail(FE_ERROR_UNSUPPORTED,
                             error.empty() ? "Compute raster multisample resolve failed." : error);
             }
@@ -11283,13 +11326,12 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     }
     const auto& raster_indices = pipeline.compute_raster_indices;
     const auto maximum_vertex = pipeline.compute_raster_maximum_vertex;
-    const auto backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
-        1u, 1u, 1u, target.width, target.height, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0'
-            ? backend_value
-            : std::string{Feather::Luisa::DefaultBackendName},
-        Feather::Luisa::RuntimeDirectory()};
+        1u, 1u, 1u, target.width, target.height, 1u};
+    std::string context_error;
+    if (!configure_luisa_dispatch_locked(pipeline.context, &dispatch, &context_error)) {
+        return fail(FE_ERROR_INVALID_HANDLE, context_error);
+    }
     std::vector<unsigned char> all_transformed_vertices;
     uint32_t transformed_stride = 0u;
     uint64_t vertex_resident_key = 0u;
@@ -12270,9 +12312,34 @@ FE_API FeResult fe_context_initialize(FeContextHandle context) {
 FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     if (context != kDefaultContext && context != 0) {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_contexts.erase(context) == 0u) {
+        if (g_contexts.find(context) == g_contexts.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
+#if FEATHER_HAS_LUISA
+        Feather::Luisa::Shutdown(context);
+#endif
+        for (auto it = g_pipelines.begin(); it != g_pipelines.end();) {
+            if (it->second.context == context) {
+                // Explicit contexts never create EasyGPU pipeline objects.
+                it->second.backend_cache.clear();
+                it = g_pipelines.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = g_kernels.begin(); it != g_kernels.end();) {
+            if (it->second.context == context) {
+                erase_compute_kernel_cache(it->first);
+                it->second.ad_gradients.clear();
+                it = g_kernels.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        std::erase_if(g_textures, [context](const auto& entry) { return entry.second.context == context; });
+        std::erase_if(g_buffers, [context](const auto& entry) { return entry.second.context == context; });
+        std::erase_if(g_samplers, [context](const auto& entry) { return entry.second.context == context; });
+        g_contexts.erase(context);
         return ok();
     }
 #if FEATHER_HAS_LUISA
@@ -12864,7 +12931,7 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
         if (texture_state.luisa_dirty && !async->has_presented_frame) {
             std::string error;
             if (!Feather::Luisa::DownloadResidentTexture(
-                    texture, texture_state.bytes.data(), texture_state.bytes.size(), &error)) {
+                    texture_state.context, texture, texture_state.bytes.data(), texture_state.bytes.size(), &error)) {
                 return fail(FE_ERROR_BACKEND_UNAVAILABLE,
                             error.empty() ? "Luisa texture presentation download failed." : error);
             }
@@ -12886,7 +12953,7 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
                 (*frame)->state.store(kPresentationFramePending, std::memory_order_release);
                 std::string error;
                 if (!Feather::Luisa::DownloadResidentTextureAsync(
-                        texture, (*frame)->bytes.data(), (*frame)->bytes.size(),
+                        texture_state.context, texture, (*frame)->bytes.data(), (*frame)->bytes.size(),
                         [frame = *frame] {
                             frame->state.store(kPresentationFrameReady, std::memory_order_release);
                         },
@@ -12969,14 +13036,12 @@ FE_API FeResult fe_texture_presenter_present_pixels(FeTexturePresenterHandle pre
 FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* desc, const void* initial_data,
                                  FeBufferHandle* out_buffer) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_buffer == nullptr || desc->size_in_bytes == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Buffer descriptor and output handle are required.");
         }
 
         BufferState state;
+        state.context = context;
         state.bytes.resize(static_cast<size_t>(desc->size_in_bytes));
         state.mode = desc->mode;
         state.stride = desc->element_stride;
@@ -12985,6 +13050,9 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_buffers.emplace(handle, std::move(state));
         *out_buffer = handle;
@@ -13101,14 +13169,12 @@ FE_API FeResult fe_buffer_unmap(FeBufferHandle buffer) {
 FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_texture == nullptr || desc->width == 0 || desc->height == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Texture descriptor and output handle are required.");
         }
         trace_graphics_step("create texture2d");
         TextureState state;
+        state.context = context;
         state.width = desc->width;
         state.height = desc->height;
         state.depth = 1;
@@ -13120,6 +13186,9 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
         }
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_textures.emplace(handle, std::move(state));
         *out_texture = handle;
@@ -13130,14 +13199,12 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
 FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_texture == nullptr || desc->width == 0 || desc->height == 0 || desc->depth == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture descriptor and output handle are required.");
         }
 
         TextureState state;
+        state.context = context;
         state.width = desc->width;
         state.height = desc->height;
         state.depth = desc->depth;
@@ -13151,6 +13218,9 @@ FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDe
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_textures.emplace(handle, std::move(state));
         *out_texture = handle;
@@ -13199,7 +13269,7 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
         if (it->second.luisa_dirty) {
             std::string error;
             if (!Feather::Luisa::DownloadResidentTexture(
-                    texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
+                    it->second.context, texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
                 return fail(FE_ERROR_BACKEND_UNAVAILABLE,
                             error.empty() ? "Luisa texture upload could not preserve resident data." : error);
             }
@@ -13242,7 +13312,7 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
         if (it->second.luisa_dirty) {
             std::string error;
             if (!Feather::Luisa::DownloadResidentTexture(
-                    texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
+                    it->second.context, texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
                 return fail(FE_ERROR_BACKEND_UNAVAILABLE,
                             error.empty() ? "Luisa texture download failed." : error);
             }
@@ -13445,9 +13515,6 @@ FE_API FeResult fe_bilinear_upscale_rgba8(const uint8_t* source, uint32_t source
 
 FE_API FeResult fe_sampler_create(FeContextHandle context, const FeSamplerDesc* desc, FeSamplerHandle* out_sampler) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_sampler == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Sampler descriptor and output handle are required.");
         }
@@ -13457,8 +13524,12 @@ FE_API FeResult fe_sampler_create(FeContextHandle context, const FeSamplerDesc* 
         }
 
         SamplerState state;
+        state.context = context;
         state.desc = *desc;
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_samplers.emplace(handle, state);
         *out_sampler = handle;
@@ -13482,9 +13553,6 @@ FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler) {
 FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernelCreateDesc* desc,
                                          FeKernelHandle* out_kernel) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_kernel == nullptr || desc->ir_data == nullptr || desc->ir_size == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Kernel IR and output handle are required.");
         }
@@ -13493,12 +13561,19 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
             return fail(validation, "Kernel IR failed Feather IR validation.");
         }
         KernelState state;
+        state.context = context;
         const auto* bytes = static_cast<const unsigned char*>(desc->ir_data);
         state.ir.assign(bytes, bytes + desc->ir_size);
         state.debug_name = copy_debug_name(desc->debug_name, "Kernel");
         state.auto_diff = desc->auto_diff;
         state.bounds_check = desc->bounds_check;
+        state.execution_backend = context == kDefaultContext
+                                      ? FE_EXECUTION_BACKEND_EASYGPU
+                                      : FE_EXECUTION_BACKEND_LUISA;
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_kernels.emplace(handle, std::move(state));
         *out_kernel = handle;
@@ -13529,8 +13604,12 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end() || g_buffers.find(buffer) == g_buffers.end()) {
+    const auto resource = g_buffers.find(buffer);
+    if (it == g_kernels.end() || resource == g_buffers.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or buffer handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a buffer from a different GPU context.");
     }
     it->second.buffers[binding] = buffer;
     return ok();
@@ -13539,8 +13618,12 @@ FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, F
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end() || g_textures.find(texture) == g_textures.end()) {
+    const auto resource = g_textures.find(texture);
+    if (it == g_kernels.end() || resource == g_textures.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or texture handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a texture from a different GPU context.");
     }
     it->second.textures[binding] = texture;
     return ok();
@@ -13552,8 +13635,14 @@ FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, 
     if (it == g_kernels.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
     }
-    if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+    if (sampler != 0) {
+        const auto resource = g_samplers.find(sampler);
+        if (resource == g_samplers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+        }
+        if (it->second.context != resource->second.context) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a sampler from a different GPU context.");
+        }
     }
     it->second.samplers[binding] = sampler;
     return ok();
@@ -13567,6 +13656,9 @@ FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t 
     }
     if (backend != FE_EXECUTION_BACKEND_EASYGPU && backend != FE_EXECUTION_BACKEND_LUISA) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Unknown kernel execution backend.");
+    }
+    if (it->second.context != kDefaultContext && backend != FE_EXECUTION_BACKEND_LUISA) {
+        return fail(FE_ERROR_UNSUPPORTED, "Explicit GPU contexts execute through their selected Luisa device.");
     }
     it->second.execution_backend = static_cast<FeExecutionBackend>(backend);
     return ok();
@@ -13835,9 +13927,17 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
         if (destination_it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid destination buffer handle.");
         }
+        if (kernel_it->second.context != destination_it->second.context) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Cannot reduce a gradient into a buffer from a different GPU context.");
+        }
 
         if (destination_size == 0) {
             return ok();
+        }
+        if (kernel_it->second.context != kDefaultContext) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Device-side AD gradient reduction is not yet available on explicit GPU contexts.");
         }
 
         GPU::Runtime::AutoInitContext();
@@ -13890,9 +13990,6 @@ FE_API FeResult fe_kernel_get_ad_backward_glsl(FeKernelHandle kernel, char* buff
 FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, const FeGraphicsPipelineCreateDesc* desc,
                                                     FeGraphicsPipelineHandle* out_pipeline) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (desc == nullptr || out_pipeline == nullptr || desc->ir_data == nullptr || desc->ir_size == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline IR and output handle are required.");
         }
@@ -13958,6 +14055,7 @@ FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, con
         }
 
         GraphicsPipelineState state;
+        state.context = context;
         const auto* bytes = static_cast<const unsigned char*>(desc->ir_data);
         state.ir.assign(bytes, bytes + desc->ir_size);
         const auto* vertex_bytes = static_cast<const unsigned char*>(vertex_ir_data);
@@ -14005,6 +14103,9 @@ FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, con
         state.polygon_mode = desc->polygon_mode;
         state.depth_clamp = desc->depth_clamp;
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
         const auto handle = next_handle();
         g_pipelines.emplace(handle, std::move(state));
         *out_pipeline = handle;
@@ -14035,8 +14136,12 @@ FE_API FeResult fe_graphics_pipeline_set_vertex_buffer(FeGraphicsPipelineHandle 
                                                        uint32_t stride) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
+    const auto resource = g_buffers.find(buffer);
+    if (it == g_pipelines.end() || resource == g_buffers.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a vertex buffer from a different GPU context.");
     }
     it->second.vertex_buffer = buffer;
     it->second.vertex_stride = stride;
@@ -14053,8 +14158,12 @@ FE_API FeResult fe_graphics_pipeline_set_index_buffer(FeGraphicsPipelineHandle p
 FE_API FeResult fe_graphics_pipeline_bind_buffer(FeGraphicsPipelineHandle pipeline, uint32_t binding, FeBufferHandle buffer) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
+    const auto resource = g_buffers.find(buffer);
+    if (it == g_pipelines.end() || resource == g_buffers.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a buffer from a different GPU context.");
     }
     it->second.buffers[binding] = buffer;
     return ok();
@@ -14064,8 +14173,12 @@ FE_API FeResult fe_graphics_pipeline_bind_texture(FeGraphicsPipelineHandle pipel
                                                   FeTextureHandle texture) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_textures.find(texture) == g_textures.end()) {
+    const auto resource = g_textures.find(texture);
+    if (it == g_pipelines.end() || resource == g_textures.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or texture handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a texture from a different GPU context.");
     }
     it->second.textures[binding] = texture;
     return ok();
@@ -14078,8 +14191,14 @@ FE_API FeResult fe_graphics_pipeline_bind_sampler(FeGraphicsPipelineHandle pipel
     if (it == g_pipelines.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline handle.");
     }
-    if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+    if (sampler != 0) {
+        const auto resource = g_samplers.find(sampler);
+        if (resource == g_samplers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+        }
+        if (it->second.context != resource->second.context) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a sampler from a different GPU context.");
+        }
     }
     it->second.samplers[binding] = sampler;
     return ok();
@@ -14137,18 +14256,37 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
         }
 
         for (uint32_t i = 0; i < desc->color_target_count; ++i) {
-            if (desc->color_targets[i] == 0 || g_textures.find(desc->color_targets[i]) == g_textures.end()) {
+            const auto target = g_textures.find(desc->color_targets[i]);
+            if (desc->color_targets[i] == 0 || target == g_textures.end()) {
                 it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
                 return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid color target.");
             }
+            if (target->second.context != it->second.context) {
+                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics color target belongs to a different GPU context.");
+            }
         }
-        if (desc->depth_target != 0 && g_textures.find(desc->depth_target) == g_textures.end()) {
-            it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid depth target.");
+        if (desc->depth_target != 0) {
+            const auto target = g_textures.find(desc->depth_target);
+            if (target == g_textures.end()) {
+                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
+                return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid depth target.");
+            }
+            if (target->second.context != it->second.context) {
+                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics depth target belongs to a different GPU context.");
+            }
         }
-        if (desc->indexed != 0 && (desc->index_buffer == 0 || g_buffers.find(desc->index_buffer) == g_buffers.end())) {
-            it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw requires a valid explicit index buffer.");
+        if (desc->indexed != 0) {
+            const auto index = g_buffers.find(desc->index_buffer);
+            if (desc->index_buffer == 0 || index == g_buffers.end()) {
+                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
+                return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw requires a valid explicit index buffer.");
+            }
+            if (index->second.context != it->second.context) {
+                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics index buffer belongs to a different GPU context.");
+            }
         }
 
         const auto should_profile = profiler_enabled_locked();
@@ -14157,7 +14295,8 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
         FeDispatchPath dispatch_path = FE_DISPATCH_PATH_REJECTED;
         const auto* compute_raster = std::getenv("FEATHER_GRAPHICS_COMPUTE");
 #if FEATHER_HAS_LUISA
-        if (compute_raster != nullptr && compute_raster[0] != '\0' && std::strcmp(compute_raster, "0") != 0) {
+        if (it->second.context != kDefaultContext ||
+            (compute_raster != nullptr && compute_raster[0] != '\0' && std::strcmp(compute_raster, "0") != 0)) {
             result = draw_graphics_pipeline_compute_raster(it->second, *desc);
             dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
         } else

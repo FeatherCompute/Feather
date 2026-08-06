@@ -266,14 +266,49 @@ quad operations, so those three fields deliberately report `Unknown`; requiring
 one fails before device creation instead of guessing support.
 
 The existing `GPU.Context` remains the compatibility default and reports the
-same platform-default Luisa device. Per-context resource and stream ownership is
-still M8.2; M8.1 contexts represent a validated selection and non-default
-handles remain rejected by resource creation until that ownership migration.
+same platform-default Luisa device. M8.2 now gives non-default contexts native
+resource and kernel ownership; stream ownership remains an M8.3 deliverable.
+
+### M8.2 implementation status
+
+M8.2 implements independent logical context ownership. `GPU.WithContext(context)`
+returns a non-ambient `GpuContextOperations` facade for context-owned buffer
+creation and 1D/2D/3D dispatch. It never replaces `GPU.Context`, so existing
+static calls retain their default EasyGPU behavior while explicit contexts
+execute through the Luisa backend and device selected by `GpuContextOptions`.
+`GpuContext.Backend` and `GpuContext.Device` expose that immutable selection;
+the legacy `BackendType`/`Caps` properties remain EasyGPU compatibility queries.
+
+Native buffers, textures, samplers, kernels, and graphics pipelines record their
+owner context. Kernel/pipeline bindings, render targets, index buffers, and AD
+gradient destinations reject a different owner with `FE_ERROR_INVALID_ARGUMENT`.
+Destroying an explicit context synchronizes and removes its Luisa runtime state,
+kernels, pipelines, and resources; managed operations retain the owner and throw
+`ObjectDisposedException` after context disposal. A `GpuKernel` also retains its
+creator context and rejects dispatch through a different context before native
+binding begins.
+
+Luisa residency is stored in a `RuntimeRegistry` keyed by the Feather context
+handle. Metal contexts hold independent LC `Context`/`Device`/`Stream` states.
+The pinned Vulkan backend asserts that only one `Device` can be live because
+Volk dispatch tables are process-global
+([LuisaCompute/src/backends/vk/device.cpp](../LuisaCompute/src/backends/vk/device.cpp):513-528).
+Feather therefore preserves multiple logical Vulkan contexts but synchronizes
+and releases the previously active Vulkan state before reconstructing the next
+context's selected device. Compute resources use their context-owned host state
+when submitted again. This is correct isolation, not concurrent multi-device
+Vulkan execution; removing that serialization requires an upstream LC change.
+
+Local Apple M5 coverage creates two contexts selecting Metal device 0, alternates
+real FEIR-to-XIR dispatches between them, verifies independent buffer results and
+`DispatchPath.Luisa`, exercises managed and native cross-context rejection, and
+checks disposal without changing `GPU.Context`. `GpuStream` and `GpuFence`,
+including true concurrent submission, remain M8.3.
 
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
 | M8.1 Runtime discovery (implemented) | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Device list/default semantics and invalid selection are covered by managed tests; a GPU test creates the selected LC device; multi-device hardware coverage remains conditional |
-| M8.2 Context-native ownership | Native per-context LC state; resources, pipelines, and kernels carry owner context | Two contexts allocate and dispatch independently; cross-context binding is rejected; disposal order and leak tests pass |
+| M8.2 Context-native ownership (implemented) | `GPU.WithContext`; native per-context LC state; resources, pipelines, and kernels carry owner context | Two same-device Metal contexts dispatch independently; cross-context binding and post-disposal use are rejected; pinned Vulkan contexts are serialized because LC permits one live device |
 | M8.3 Streams and fences | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` no longer relies on transient memory; ordered and cross-stream dependency tests pass on Metal/Vulkan/DX runners where available |
 | M8.4 Resource interop and presentation | Capability-gated external resource contract; native presenter/swapchain route where supported | Host staging fallback remains correct; every enabled zero-copy path has ownership/state/fence tests and a non-black multi-frame presentation test |
 | M8.5 API migration | Static `GPU` facade delegates to default context/stream; samples migrate to explicit contexts where appropriate | Existing public examples compile unchanged; new multi-context/stream samples pass; no public API selects EasyGPU |

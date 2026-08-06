@@ -33,6 +33,11 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets the Luisa backend selected for this context.
+    /// </summary>
+    public GpuBackend Backend => Device.Backend;
+
     public BackendType BackendType
     {
         get
@@ -87,9 +92,17 @@ public sealed class GpuContext : IDisposable
         }
     }
 
-    private void ThrowIfDisposed()
+    internal void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+    }
+
+    internal bool HasSameNativeContext(GpuContext other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        ThrowIfDisposed();
+        other.ThrowIfDisposed();
+        return Handle.RawValue == other.Handle.RawValue;
     }
 }
 

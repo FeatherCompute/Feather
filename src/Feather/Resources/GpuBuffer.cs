@@ -52,6 +52,8 @@ public sealed class GpuBuffer<T> : IDisposable
     /// <returns>The created buffer.</returns>
     public static GpuBuffer<T> Create(GpuContext context, int count, BufferAccess access)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         var desc = new FeBufferDesc((ulong)checked(count * GpuValueLayout<T>.BufferElementStride), (uint)access, (uint)GpuValueLayout<T>.BufferElementStride);
         NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context.Handle, in desc, IntPtr.Zero, out var handle));
@@ -76,19 +78,31 @@ public sealed class GpuBuffer<T> : IDisposable
     /// Creates a read-only shader binding for this buffer.
     /// </summary>
     /// <returns>The read-only binding view.</returns>
-    public ReadOnlyBuffer<T> AsReadOnly() => new(Handle, Length);
+    public ReadOnlyBuffer<T> AsReadOnly()
+    {
+        ThrowIfDisposed();
+        return new ReadOnlyBuffer<T>(Handle, Length);
+    }
 
     /// <summary>
     /// Creates a write-only shader binding for this buffer.
     /// </summary>
     /// <returns>The write-only binding view.</returns>
-    public WriteOnlyBuffer<T> AsWriteOnly() => new(Handle, Length);
+    public WriteOnlyBuffer<T> AsWriteOnly()
+    {
+        ThrowIfDisposed();
+        return new WriteOnlyBuffer<T>(Handle, Length);
+    }
 
     /// <summary>
     /// Creates a read-write shader binding for this buffer.
     /// </summary>
     /// <returns>The read-write binding view.</returns>
-    public ReadWriteBuffer<T> AsReadWrite() => new(Handle, Length);
+    public ReadWriteBuffer<T> AsReadWrite()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteBuffer<T>(Handle, Length);
+    }
 
     /// <summary>
     /// Uploads CPU values starting at the first element.
@@ -186,6 +200,7 @@ public sealed class GpuBuffer<T> : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        Context.ThrowIfDisposed();
     }
 }
 

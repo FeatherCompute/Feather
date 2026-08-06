@@ -454,6 +454,7 @@ private:
     std::unique_ptr<Stream> stream_;
     std::string runtime_directory_;
     std::string backend_name_;
+    uint32_t device_index_ = UINT32_MAX;
     std::unordered_map<uint64_t, std::unique_ptr<CachedKernel>> kernels_;
     std::unordered_map<uint64_t, CachedFragment> fragment_callables_;
     std::unordered_map<uint64_t, CachedRasterGeometry> raster_geometries_;
@@ -480,16 +481,24 @@ public:
     RuntimeState(const RuntimeState &) = delete;
     RuntimeState &operator=(const RuntimeState &) = delete;
 
-    void ensure(std::string_view runtime_directory, std::string_view backend_name) {
-        if (context_ != nullptr && runtime_directory_ == runtime_directory && backend_name_ == backend_name) return;
+    void ensure(std::string_view runtime_directory, std::string_view backend_name, uint32_t device_index) {
+        if (context_ != nullptr && runtime_directory_ == runtime_directory &&
+            backend_name_ == backend_name && device_index_ == device_index) return;
         reset();
         // Vulkan device enumeration must happen before a Vulkan Device is live.
         // Warm Feather's discovery cache so later managed discovery remains safe.
         (void)EnumerateDevices(runtime_directory);
         runtime_directory_ = runtime_directory;
         backend_name_ = backend_name;
+        device_index_ = device_index;
         context_ = std::make_unique<Context>(runtime_directory_);
-        device_ = std::make_unique<Device>(context_->create_device(backend_name_));
+        if (device_index == UINT32_MAX) {
+            device_ = std::make_unique<Device>(context_->create_device(backend_name_));
+        } else {
+            DeviceConfig config{};
+            config.device_index = device_index;
+            device_ = std::make_unique<Device>(context_->create_device(backend_name_, &config));
+        }
         stream_ = std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE));
     }
 
@@ -497,6 +506,7 @@ public:
     Stream &stream() noexcept { return *stream_; }
     [[nodiscard]] bool has_device() const noexcept { return device_ != nullptr; }
     [[nodiscard]] std::string_view backend_name() const noexcept { return backend_name_; }
+    [[nodiscard]] uint32_t device_index() const noexcept { return device_index_; }
 
     CachedKernel *find(uint64_t key) noexcept {
         const auto it = kernels_.find(key);
@@ -987,6 +997,7 @@ public:
         context_.reset();
         runtime_directory_.clear();
         backend_name_.clear();
+        device_index_ = UINT32_MAX;
     }
 
     void abandon() noexcept {
@@ -995,58 +1006,151 @@ public:
         (void)context_.release();
         (void)device_.release();
         (void)stream_.release();
-        // The owner is intentionally leaked by runtime_state(); leave cached
+        // The owner is intentionally leaked by runtime_registry(); leave cached
         // shaders and resources untouched so their destructors cannot run after
         // the dynamically loaded Luisa backend has been unloaded.
         runtime_directory_.clear();
         backend_name_.clear();
+        device_index_ = UINT32_MAX;
     }
 };
 
-RuntimeState &runtime_state() {
+class RuntimeRegistry {
+private:
+    std::unordered_map<uint64_t, std::unique_ptr<RuntimeState>> states_;
+
+public:
+    RuntimeState& prepare(uint64_t context_key, std::string_view runtime_directory,
+                          std::string_view backend_name, uint32_t device_index) {
+        if (backend_name == "vk") {
+            for (auto& [key, state] : states_) {
+                if (key != context_key && state->has_device() && state->backend_name() == "vk") {
+                    state->reset();
+                }
+            }
+        }
+        auto& state = states_[context_key];
+        if (state == nullptr) state = std::make_unique<RuntimeState>();
+        state->ensure(runtime_directory, backend_name, device_index);
+        return *state;
+    }
+
+    RuntimeState* find(uint64_t context_key) noexcept {
+        const auto found = states_.find(context_key);
+        return found == states_.end() ? nullptr : found->second.get();
+    }
+
+    RuntimeState* find_active(std::string_view backend_name, uint32_t device_index) noexcept {
+        for (auto& [key, state] : states_) {
+            (void)key;
+            if (state->has_device() && state->backend_name() == backend_name &&
+                (state->device_index() == device_index ||
+                 (state->device_index() == UINT32_MAX && device_index == 0u))) {
+                return state.get();
+            }
+        }
+        return nullptr;
+    }
+
+    bool has_active(std::string_view backend_name) const noexcept {
+        return std::any_of(states_.begin(), states_.end(), [backend_name](const auto& entry) {
+            return entry.second->has_device() && entry.second->backend_name() == backend_name;
+        });
+    }
+
+    void erase(uint64_t context_key) {
+        const auto found = states_.find(context_key);
+        if (found == states_.end()) return;
+        found->second->reset();
+        states_.erase(found);
+    }
+
+    void reset() noexcept {
+        for (auto& [key, state] : states_) {
+            (void)key;
+            state->reset();
+        }
+        states_.clear();
+    }
+
+    void abandon() noexcept {
+        for (auto& [key, state] : states_) {
+            (void)key;
+            state->abandon();
+        }
+        states_.clear();
+    }
+};
+
+RuntimeRegistry &runtime_registry() {
     // The native backend may be unloaded before C++ static destructors run.
     // Keep the owner itself alive until process exit; explicit Shutdown handles
     // normal context teardown and Abandon releases only the dynamically loaded
     // runtime objects on the process-exit path.
-    static auto *state = new RuntimeState();
-    return *state;
+    static auto *registry = new RuntimeRegistry();
+    return *registry;
 }
 
 } // namespace
 
 void Shutdown() {
-    runtime_state().reset();
+    runtime_registry().reset();
+}
+
+void Shutdown(uint64_t context_key) {
+    runtime_registry().erase(context_key);
 }
 
 void Abandon() noexcept {
-    runtime_state().abandon();
+    runtime_registry().abandon();
 }
 
-bool DownloadResidentTexture(uint64_t resident_key, void* destination, size_t size, std::string* error) {
+bool DownloadResidentTexture(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
+                             std::string* error) {
     if (error != nullptr) error->clear();
-    return runtime_state().download_texture(resident_key, destination, size, error);
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->download_texture(resident_key, destination, size, error);
 }
 
-bool DownloadResidentTextureAsync(uint64_t resident_key, void* destination, size_t size,
+bool DownloadResidentTextureAsync(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                                   std::function<void()> completion, std::string* error) {
     if (error != nullptr) error->clear();
-    return runtime_state().download_texture_async(
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->download_texture_async(
         resident_key, destination, size, std::move(completion), error);
 }
 
-bool ResolveMultisampleTexture(std::span<const uint64_t> sample_keys,
+bool ResolveMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                                const HostTextureBinding& target,
                                bool synchronize, std::string* error) {
     if (error != nullptr) error->clear();
-    return runtime_state().resolve_multisample(sample_keys, target, synchronize, error);
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->resolve_multisample(sample_keys, target, synchronize, error);
 }
 
-bool ClearMultisampleTexture(std::span<const uint64_t> sample_keys,
+bool ClearMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                              const HostTextureBinding& target,
                              const std::array<float, 4u>& color,
                              std::string* error) {
     if (error != nullptr) error->clear();
-    return runtime_state().clear_multisample(
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->clear_multisample(
         sample_keys, target, make_float4(color[0], color[1], color[2], color[3]), error);
 }
 
@@ -1120,19 +1224,15 @@ bool ValidateDevice(std::string_view runtime_directory, std::string_view backend
         return false;
     }
 
-    auto& state = runtime_state();
-    if (state.has_device()) {
-        if (state.backend_name() != backend_name || device_index != 0u) {
-            if (error != nullptr) {
-                *error = "A Luisa device is already active; selecting a different device is unavailable "
-                         "until per-context device ownership is enabled.";
-            }
-            return false;
-        }
+    if (auto state = runtime_registry().find_active(backend_name, device_index)) {
         if (info != nullptr) {
             *info = *selected;
-            info->compute_warp_size = state.device().compute_warp_size();
+            info->compute_warp_size = state->device().compute_warp_size();
         }
+        return true;
+    }
+    if (backend_name == "vk" && runtime_registry().has_active("vk")) {
+        if (info != nullptr) *info = *selected;
         return true;
     }
 
@@ -1165,8 +1265,8 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         if (error != nullptr) *error = "asynchronous Luisa dispatch cannot return gradients";
         return false;
     }
-    auto &state = runtime_state();
-    state.ensure(dispatch.runtime_directory, dispatch.backend_name);
+    auto &state = runtime_registry().prepare(
+        dispatch.context_key, dispatch.runtime_directory, dispatch.backend_name, dispatch.device_index);
     auto *cached = dispatch.shader_cache_key == 0u ? nullptr : state.find(dispatch.shader_cache_key);
     const auto inputs_clean = std::none_of(
                                   host_buffers.begin(), host_buffers.end(),
@@ -1606,8 +1706,8 @@ bool PrepareGraphicsFragment(const TypedIR::Module& module,
         if (error != nullptr) *error = "fused fragment callable requires a cache key";
         return false;
     }
-    auto& state = runtime_state();
-    state.ensure(dispatch.runtime_directory, dispatch.backend_name);
+    auto& state = runtime_registry().prepare(
+        dispatch.context_key, dispatch.runtime_directory, dispatch.backend_name, dispatch.device_index);
     const auto inputs_clean = std::none_of(
                                   host_buffers.begin(), host_buffers.end(),
                                   [](const auto& binding) { return binding.upload; }) &&
@@ -1768,8 +1868,8 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
         return false;
     }
 
-    auto &runtime = runtime_state();
-    runtime.ensure(dispatch.runtime_directory, dispatch.backend_name);
+    auto &runtime = runtime_registry().prepare(
+        dispatch.context_key, dispatch.runtime_directory, dispatch.backend_name, dispatch.device_index);
     auto &device = runtime.device();
     auto &stream = runtime.stream();
     std::vector<RuntimeState::CachedFragment*> fused_fragments;

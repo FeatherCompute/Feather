@@ -11,9 +11,11 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
     where TVaryings : unmanaged
 {
     private bool disposed;
+    private readonly GpuContext context;
 
-    private GpuGraphicsPipeline(FeGraphicsPipelineHandle handle, GraphicsPipelineDesc desc)
+    private GpuGraphicsPipeline(GpuContext context, FeGraphicsPipelineHandle handle, GraphicsPipelineDesc desc)
     {
+        this.context = context;
         Handle = handle;
         Desc = desc;
     }
@@ -36,6 +38,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
 
     internal static GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings> Create(GpuContext context, GraphicsPipelineDesc desc)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         var normalized = NormalizeDesc(desc);
         var ir = TVertexShader.IR;
         var vertexIr = TVertexShader.VertexIR;
@@ -101,7 +105,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     normalized.Raster.DepthClamp ? 1u : 0u,
                     normalized.DebugName ?? typeof(TVertexShader).Name + "+" + typeof(TFragmentShader).Name);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(handle, normalized);
+                return new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(context, handle, normalized);
             }
         }
     }
@@ -432,6 +436,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        context.ThrowIfDisposed();
     }
 }
 

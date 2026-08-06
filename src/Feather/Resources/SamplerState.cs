@@ -100,6 +100,8 @@ public readonly struct SamplerState : IDisposable, IGpuSamplerBinding
 
     internal static SamplerState Create(GpuContext context, SamplerDesc desc)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         var nativeDesc = new FeSamplerDesc(
             (uint)desc.MinFilter,
             (uint)desc.MagFilter,

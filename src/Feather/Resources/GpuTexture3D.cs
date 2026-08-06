@@ -76,6 +76,7 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
     public static GpuTexture3D<TPixel, TValue> Create(GpuContext context, int width, int height, int depth, int mipLevels, PixelFormat format, TextureAccess access)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(depth);
@@ -95,22 +96,38 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
     /// <summary>
     /// Creates a shader-facing read-only texture view over this texture.
     /// </summary>
-    public ReadOnlyTexture3D<TValue> AsReadOnly() => new(Handle, Size);
+    public ReadOnlyTexture3D<TValue> AsReadOnly()
+    {
+        ThrowIfDisposed();
+        return new ReadOnlyTexture3D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing write-only texture view over this texture.
     /// </summary>
-    public WriteOnlyTexture3D<TValue> AsWriteOnly() => new(Handle, Size);
+    public WriteOnlyTexture3D<TValue> AsWriteOnly()
+    {
+        ThrowIfDisposed();
+        return new WriteOnlyTexture3D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing read-write texture view over this texture.
     /// </summary>
-    public ReadWriteTexture3D<TValue> AsReadWrite() => new(Handle, Size);
+    public ReadWriteTexture3D<TValue> AsReadWrite()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteTexture3D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Creates a shader-facing normalized read-write texture view over this texture.
     /// </summary>
-    public ReadWriteNormalizedTexture3D<TValue> AsReadWriteNormalized() => new(Handle, Size);
+    public ReadWriteNormalizedTexture3D<TValue> AsReadWriteNormalized()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteNormalizedTexture3D<TValue>(Handle, Size);
+    }
 
     /// <summary>
     /// Uploads voxels into the base texture level.
@@ -185,6 +202,7 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        Context.ThrowIfDisposed();
     }
 }
 

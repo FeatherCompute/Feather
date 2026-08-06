@@ -8,17 +8,19 @@ public sealed class GpuKernel : IDisposable
 {
     private bool disposed;
     private readonly Type kernelType;
+    private readonly GpuContext context;
     internal delegate byte[] IrTransform(ReadOnlySpan<byte> ir);
 
     // Test-only hook used to validate native behavior against transformed generated IR without
     // adding public APIs for raw native kernel creation.
     internal static IrTransform? IrTransformForTesting;
 
-    private GpuKernel(FeKernelHandle handle, KernelDescriptor descriptor, Type kernelType)
+    private GpuKernel(FeKernelHandle handle, KernelDescriptor descriptor, Type kernelType, GpuContext context)
     {
         Handle = handle;
         Descriptor = descriptor;
         this.kernelType = kernelType;
+        this.context = context;
     }
 
     internal FeKernelHandle Handle { get; }
@@ -44,6 +46,8 @@ public sealed class GpuKernel : IDisposable
     internal static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
         var descriptor = TKernel.Descriptor;
         var transformedIr = IrTransformForTesting?.Invoke(TKernel.IR);
         var ir = transformedIr is null ? TKernel.IR : transformedIr.AsSpan();
@@ -58,7 +62,7 @@ public sealed class GpuKernel : IDisposable
                     autoDiff,
                     descriptor.BoundsCheck);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuKernel(handle, descriptor, typeof(TKernel));
+                return new GpuKernel(handle, descriptor, typeof(TKernel), context);
             }
         }
     }
@@ -95,6 +99,13 @@ public sealed class GpuKernel : IDisposable
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(gpuKernel);
         gpuKernel.ThrowIfDisposed();
+        context.ThrowIfDisposed();
+        if (!gpuKernel.context.HasSameNativeContext(context))
+        {
+            throw new ArgumentException(
+                "GPU kernel and dispatch context must have the same owner context.",
+                nameof(context));
+        }
         if (gpuKernel.kernelType != typeof(TKernel))
         {
             throw new ArgumentException(

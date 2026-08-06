@@ -12,6 +12,16 @@ public static class GPU
 
     public static GpuContext Context => DefaultContext.Value;
 
+    /// <summary>
+    /// Creates an explicit, non-ambient operation facade bound to <paramref name="context"/>.
+    /// </summary>
+    public static GpuContextOperations WithContext(GpuContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
+        return new GpuContextOperations(context);
+    }
+
     public static GpuBuffer<T> CreateBuffer<T>(int count, BufferAccess access = BufferAccess.ReadWrite)
         where T : unmanaged
         => GpuBuffer<T>.Create(Context, count, access);
