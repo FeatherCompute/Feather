@@ -596,6 +596,15 @@ struct ContextDeviceState {
     FeDeviceInfo device{};
 };
 
+struct StreamState {
+    FeContextHandle context = 0u;
+};
+
+struct FenceState {
+    FeContextHandle context = 0u;
+    FeStreamHandle stream = 0u;
+};
+
 std::mutex g_mutex;
 std::atomic<uint64_t> g_next_handle{100};
 std::atomic<bool> g_runtime_shutting_down{false};
@@ -606,6 +615,8 @@ std::unordered_map<FeKernelHandle, KernelState> g_kernels;
 std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
 std::unordered_map<FeContextHandle, ContextDeviceState> g_contexts;
+std::unordered_map<FeStreamHandle, StreamState> g_streams;
+std::unordered_map<FeFenceHandle, FenceState> g_fences;
 #if FEATHER_BUILD_WINDOW
 std::unordered_map<FeWindowHandle, WindowState> g_windows;
 std::unordered_map<FeTexturePresenterHandle, TexturePresenterState> g_texture_presenters;
@@ -827,6 +838,8 @@ void destroy_backend_resources_for_shutdown() {
     g_textures.clear();
     g_buffers.clear();
     g_samplers.clear();
+    g_fences.clear();
+    g_streams.clear();
     g_contexts.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
@@ -892,6 +905,9 @@ void abandon_native_resources_for_process_exit() {
     g_buffers.clear();
 
     g_samplers.clear();
+    g_fences.clear();
+    g_streams.clear();
+    g_contexts.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
 
@@ -2539,6 +2555,10 @@ bool configure_luisa_dispatch_locked(FeContextHandle context,
     dispatch->backend_name = found->second.device.backend_name;
     dispatch->device_index = found->second.device.device_index;
     return true;
+}
+
+bool synchronize_luisa_context_locked(FeContextHandle context, std::string* error = nullptr) {
+    return Feather::Luisa::Synchronize(context, error);
 }
 #endif
 
@@ -5554,8 +5574,9 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
     return true;
 }
 
-FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
-                               uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait) {
+FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x, uint32_t group_y,
+                               uint32_t group_z, uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait,
+                               uint64_t stream_key = 0u, uint64_t fence_key = 0u) {
 #if !FEATHER_HAS_LUISA
     (void)kernel_handle;
     (void)kernel;
@@ -5568,10 +5589,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     (void)wait;
     return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Feather was built without the LuisaCompute Vulkan backend.");
 #else
-    if (!wait) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "Luisa dispatch requires wait=true until asynchronous staging lifetimes are implemented.");
-    }
     // Luisa's resident stream and resource cache are per native context. Keep
     // command recording and cache mutation serialized when managed callers
     // dispatch from multiple worker threads.
@@ -5669,16 +5686,17 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
                     return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU is unavailable to stage a device-dirty texture for Luisa.");
                 download_easygpu_texture(texture->second, *easygpu_backend);
             }
-            texture_bindings.push_back(Feather::Luisa::HostTextureBinding{
-                .binding = resource.binding,
-                .kind = resource.kind,
-                .access = resource.access,
-                .width = texture->second.width,
-                .height = texture->second.height,
-                .depth = texture->second.depth,
-                .mip_levels = texture->second.mip_levels,
-                .pixel_format = texture->second.pixel_format,
-                .bytes = &texture->second.bytes});
+            texture_bindings.push_back(Feather::Luisa::HostTextureBinding{.binding = resource.binding,
+                                                                          .kind = resource.kind,
+                                                                          .access = resource.access,
+                                                                          .width = texture->second.width,
+                                                                          .height = texture->second.height,
+                                                                          .depth = texture->second.depth,
+                                                                          .mip_levels = texture->second.mip_levels,
+                                                                          .pixel_format = texture->second.pixel_format,
+                                                                          .bytes = &texture->second.bytes,
+                                                                          .resident_key = bound->second,
+                                                                          .upload = !texture->second.luisa_uploaded});
             continue;
         }
         if (resource.kind != kIrResourceKindBuffer) {
@@ -5704,11 +5722,12 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
             }
             download_easygpu_buffer(buffer->second, *easygpu_backend);
         }
-        bindings.push_back(Feather::Luisa::HostBufferBinding{
-            .binding = resource.binding,
-            .access = resource.access,
-            .stride = buffer->second.stride,
-            .bytes = &buffer->second.bytes});
+        bindings.push_back(Feather::Luisa::HostBufferBinding{.binding = resource.binding,
+                                                             .access = resource.access,
+                                                             .stride = buffer->second.stride,
+                                                             .bytes = &buffer->second.bytes,
+                                                             .resident_key = bound->second,
+                                                             .upload = !buffer->second.luisa_uploaded});
     }
 
     Feather::Luisa::DispatchInputs context_dispatch{};
@@ -5780,18 +5799,21 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
             }
         }
     }
-    Feather::Luisa::DispatchInputs dispatch{
-        .group_x = group_x,
-        .group_y = group_y,
-        .group_z = group_z,
-        .logical_x = logical_x,
-        .logical_y = logical_y,
-        .logical_z = logical_z,
-        .shader_cache_key = shader_cache_key,
-        .backend_name = backend_name,
-        .runtime_directory = context_dispatch.runtime_directory,
-        .context_key = context_dispatch.context_key,
-        .device_index = context_dispatch.device_index};
+    Feather::Luisa::DispatchInputs dispatch{.group_x = group_x,
+                                            .group_y = group_y,
+                                            .group_z = group_z,
+                                            .logical_x = logical_x,
+                                            .logical_y = logical_y,
+                                            .logical_z = logical_z,
+                                            .shader_cache_key = shader_cache_key,
+                                            .backend_name = backend_name,
+                                            .runtime_directory = context_dispatch.runtime_directory,
+                                            .synchronize = wait,
+                                            .context_key = context_dispatch.context_key,
+                                            .device_index = context_dispatch.device_index,
+                                            .stream_key = stream_key,
+                                            .fence_key = fence_key,
+                                            .retain_fence = stream_key != 0u};
     std::vector<Feather::Luisa::AdGradientBinding> gradient_bindings;
     gradient_bindings.reserve(next_gradients.size());
     for (auto& gradient : next_gradients) {
@@ -5811,6 +5833,19 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         kernel.last_ad_backward_glsl.clear();
     }
 
+    for (const auto& [binding, handle] : kernel.buffers) {
+        (void)binding;
+        if (auto buffer = g_buffers.find(handle); buffer != g_buffers.end()) {
+            buffer->second.luisa_uploaded = true;
+        }
+    }
+    for (const auto& [binding, handle] : kernel.textures) {
+        (void)binding;
+        if (auto texture = g_textures.find(handle); texture != g_textures.end()) {
+            texture->second.luisa_uploaded = true;
+        }
+    }
+
     for (const auto& resource : lowering.resources) {
         if (resource.kind != kIrResourceKindBuffer) continue;
         if (resource.access == 1) continue;
@@ -5818,7 +5853,7 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         auto buffer = g_buffers.find(bound->second);
         buffer->second.host_dirty = true;
         buffer->second.device_dirty = false;
-        buffer->second.luisa_uploaded = false;
+        buffer->second.luisa_uploaded = true;
         ++buffer->second.content_revision;
     }
     for (const auto& resource : lowering.resources) {
@@ -5828,11 +5863,11 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         auto texture = g_textures.find(bound->second);
         texture->second.host_dirty = true;
         texture->second.device_dirty = false;
+        texture->second.luisa_uploaded = true;
     }
     return ok();
 #endif
 }
-
 
 bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                      bool wait) {
@@ -12318,6 +12353,8 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
 #if FEATHER_HAS_LUISA
         Feather::Luisa::Shutdown(context);
 #endif
+        std::erase_if(g_fences, [context](const auto& entry) { return entry.second.context == context; });
+        std::erase_if(g_streams, [context](const auto& entry) { return entry.second.context == context; });
         for (auto it = g_pipelines.begin(); it != g_pipelines.end();) {
             if (it->second.context == context) {
                 // Explicit contexts never create EasyGPU pipeline objects.
@@ -12483,6 +12520,159 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
         }
 
         return ok();
+    });
+}
+
+FE_API FeResult fe_stream_create(FeContextHandle context, FeStreamHandle* out_stream) {
+    return protect([&] {
+        if (out_stream == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_stream must not be null.");
+        }
+#if FEATHER_HAS_LUISA
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        Feather::Luisa::DispatchInputs configured{};
+        std::string error;
+        if (!configure_luisa_dispatch_locked(context, &configured, &error)) {
+            return fail(FE_ERROR_INVALID_HANDLE, error);
+        }
+        const auto handle = next_handle();
+        if (!Feather::Luisa::CreateStream(configured.context_key, configured.runtime_directory, configured.backend_name,
+                                          configured.device_index, handle, &error)) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, error.empty() ? "Luisa stream creation failed." : error);
+        }
+        g_streams.emplace(handle, StreamState{context});
+        *out_stream = handle;
+        return ok();
+#else
+        (void)context;
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_stream_destroy(FeStreamHandle stream) {
+    return protect([&] {
+        if (stream == 0u || g_runtime_shutting_down.load(std::memory_order_acquire))
+            return ok();
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto found = g_streams.find(stream);
+        if (found == g_streams.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid stream handle.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::DestroyStream(found->second.context, stream, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa stream destruction failed." : error);
+        }
+#endif
+        g_streams.erase(found);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_stream_synchronize(FeStreamHandle stream) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto found = g_streams.find(stream);
+        if (found == g_streams.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid stream handle.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::SynchronizeStream(found->second.context, stream, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa stream synchronization failed." : error);
+        }
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_stream_wait_fence(FeStreamHandle stream, FeFenceHandle fence) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto stream_state = g_streams.find(stream);
+        const auto fence_state = g_fences.find(fence);
+        if (stream_state == g_streams.end() || fence_state == g_fences.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid stream or fence handle.");
+        }
+        if (stream_state->second.context != fence_state->second.context) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot wait on a fence from a different GPU context.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::WaitFence(stream_state->second.context, stream, fence, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa stream wait failed." : error);
+        }
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_fence_destroy(FeFenceHandle fence) {
+    return protect([&] {
+        if (fence == 0u || g_runtime_shutting_down.load(std::memory_order_acquire))
+            return ok();
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto found = g_fences.find(fence);
+        if (found == g_fences.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::DestroyFence(found->second.context, fence, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa fence destruction failed." : error);
+        }
+#endif
+        g_fences.erase(found);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_is_completed(FeFenceHandle fence, bool* out_completed) {
+    return protect([&] {
+        if (out_completed == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_completed must not be null.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto found = g_fences.find(fence);
+        if (found == g_fences.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::IsFenceCompleted(found->second.context, fence, out_completed, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa fence query failed." : error);
+        }
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
+    });
+}
+
+FE_API FeResult fe_fence_wait(FeFenceHandle fence) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto found = g_fences.find(fence);
+        if (found == g_fences.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+        }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!Feather::Luisa::SynchronizeFence(found->second.context, fence, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa fence wait failed." : error);
+        }
+        return ok();
+#else
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Luisa runtime support was not built.");
+#endif
     });
 }
 
@@ -13073,6 +13263,12 @@ FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer) {
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!synchronize_luisa_context_locked(it->second.context, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
+        }
+#endif
 
         if (it->second.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
             if (auto* backend = GPU::Runtime::Context::GetBackend(); backend != nullptr) {
@@ -13098,6 +13294,12 @@ FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_
         if (offset + size > it->second.bytes.size()) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Upload range exceeds buffer size.");
         }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!synchronize_luisa_context_locked(it->second.context, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
+        }
+#endif
         std::memcpy(it->second.bytes.data() + offset, data, static_cast<size_t>(size));
         it->second.host_dirty = true;
         it->second.device_dirty = false;
@@ -13120,6 +13322,12 @@ FE_API FeResult fe_buffer_download(FeBufferHandle buffer, uint64_t offset, uint6
         if (offset + size > it->second.bytes.size()) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Download range exceeds buffer size.");
         }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!synchronize_luisa_context_locked(it->second.context, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
+        }
+#endif
         if (it->second.device_dirty) {
             auto* backend = GPU::Runtime::Context::GetBackend();
             if (backend == nullptr) {
@@ -13144,6 +13352,12 @@ FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t, void** out_ptr) {
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
+#if FEATHER_HAS_LUISA
+        std::string error;
+        if (!synchronize_luisa_context_locked(it->second.context, &error)) {
+            return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
+        }
+#endif
         if (it->second.device_dirty) {
             auto* backend = GPU::Runtime::Context::GetBackend();
             if (backend == nullptr) {
@@ -13241,6 +13455,13 @@ FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
+#if FEATHER_HAS_LUISA
+        std::string synchronization_error;
+        if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
+            return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
+                                                                        : synchronization_error);
+        }
+#endif
 
         // Destroy the backend GPU texture if one was created.
         if (it->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
@@ -13266,6 +13487,11 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
 #if FEATHER_HAS_LUISA
+        std::string synchronization_error;
+        if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
+            return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
+                                                                        : synchronization_error);
+        }
         if (it->second.luisa_dirty) {
             std::string error;
             if (!Feather::Luisa::DownloadResidentTexture(
@@ -13309,6 +13535,11 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
 
         // If the device has newer data, download it first.
 #if FEATHER_HAS_LUISA
+        std::string synchronization_error;
+        if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
+            return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
+                                                                        : synchronization_error);
+        }
         if (it->second.luisa_dirty) {
             std::string error;
             if (!Feather::Luisa::DownloadResidentTexture(
@@ -13351,6 +13582,13 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
+#if FEATHER_HAS_LUISA
+        std::string synchronization_error;
+        if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
+            return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
+                                                                        : synchronization_error);
+        }
+#endif
 
         const auto pixel = pixel_size(it->second.pixel_format);
         if (x + width > it->second.width || y + height > it->second.height || z + depth > it->second.depth) {
@@ -13387,6 +13625,13 @@ FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint3
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
+#if FEATHER_HAS_LUISA
+        std::string synchronization_error;
+        if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
+            return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
+                                                                        : synchronization_error);
+        }
+#endif
 
         if (it->second.device_dirty) {
             auto* backend = GPU::Runtime::Context::GetBackend();
@@ -13716,8 +13961,9 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
 
         it->second.last_dispatch_path = FE_DISPATCH_PATH_NONE;
         if (it->second.execution_backend == FE_EXECUTION_BACKEND_LUISA) {
-            result = dispatch_luisa_kernel(kernel, it->second, group_x, group_y, group_z,
-                                           logical_x, logical_y, logical_z, wait);
+            const auto fence_key = wait ? 0u : next_handle();
+            result = dispatch_luisa_kernel(kernel, it->second, group_x, group_y, group_z, logical_x, logical_y,
+                                           logical_z, wait, 0u, fence_key);
             it->second.last_dispatch_path =
                 result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
         // Use the AD dispatch path for AutoDiff kernels, which sets up the GradientTape
@@ -13749,6 +13995,45 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         }
 
         return result;
+    });
+}
+
+FE_API FeResult fe_kernel_dispatch_stream(FeKernelHandle kernel, FeStreamHandle stream, uint32_t group_x,
+                                          uint32_t group_y, uint32_t group_z, uint32_t logical_x, uint32_t logical_y,
+                                          uint32_t logical_z, FeFenceHandle* out_fence) {
+    return protect([&] {
+        if (out_fence == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_fence must not be null.");
+        }
+        if (group_x == 0u || group_y == 0u || group_z == 0u || logical_x == 0u || logical_y == 0u || logical_z == 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Kernel dispatch group counts and logical sizes must be positive.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto kernel_state = g_kernels.find(kernel);
+        const auto stream_state = g_streams.find(stream);
+        if (kernel_state == g_kernels.end() || stream_state == g_streams.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or stream handle.");
+        }
+        if (kernel_state->second.context != stream_state->second.context) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "GPU kernel and stream must have the same owner context.");
+        }
+        if (kernel_state->second.auto_diff) {
+            return fail(
+                FE_ERROR_UNSUPPORTED,
+                "Asynchronous autodiff dispatch is not supported because gradient retrieval is host-synchronous.");
+        }
+        kernel_state->second.logical_x = static_cast<int32_t>(logical_x);
+        kernel_state->second.logical_y = static_cast<int32_t>(logical_y);
+        kernel_state->second.logical_z = static_cast<int32_t>(logical_z);
+        const auto fence = next_handle();
+        const auto result = dispatch_luisa_kernel(kernel, kernel_state->second, group_x, group_y, group_z, logical_x,
+                                                  logical_y, logical_z, false, stream, fence);
+        kernel_state->second.last_dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
+        if (result != FE_OK)
+            return result;
+        g_fences.emplace(fence, FenceState{stream_state->second.context, stream});
+        *out_fence = fence;
+        return ok();
     });
 }
 

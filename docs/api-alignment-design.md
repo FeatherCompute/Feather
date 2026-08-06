@@ -2,8 +2,9 @@
 
 ## Status And Scope
 
-This is a design for M8 and M9. M8.1 device discovery is implemented; later
-milestones in this document remain design-only.
+This is a design for M8 and M9. M8.1 device discovery, M8.2 multi-context
+ownership, and M8.3 explicit streams/fences are implemented; later milestones
+in this document remain design-only.
 LuisaCompute is the target runtime model. EasyGPU is scheduled for removal in
 M9, so new public API must describe Luisa concepts directly rather than add
 another backend-selection layer.
@@ -303,13 +304,43 @@ Local Apple M5 coverage creates two contexts selecting Metal device 0, alternate
 real FEIR-to-XIR dispatches between them, verifies independent buffer results and
 `DispatchPath.Luisa`, exercises managed and native cross-context rejection, and
 checks disposal without changing `GPU.Context`. `GpuStream` and `GpuFence`,
-including true concurrent submission, remain M8.3.
+including true concurrent submission, are implemented by M8.3.
+
+### M8.3 implementation status
+
+M8.3 adds `GpuContext.CreateStream`, `GpuStream.Dispatch`, `Synchronize`, and
+`Wait`, plus `GpuFence.IsCompleted`, `Wait`, and `WaitAsync`. Explicit stream
+dispatch always selects the context's Luisa device and returns immediately after
+submission. Existing `GpuKernel.Dispatch(..., wait: true)` remains synchronous;
+the compatibility `wait: false` route now retains native staging, readback,
+uncached shader, and repacking state until the default stream completes.
+
+The native runtime owns a stream set and LC events per Feather context. LC
+35a06cb creates streams and events through `Device::create_stream` and
+`create_event`
+([LuisaCompute/include/luisa/runtime/device.h](../LuisaCompute/include/luisa/runtime/device.h):141-145).
+`Event` provides signal, device wait, completion polling, and host synchronization
+([LuisaCompute/include/luisa/runtime/event.h](../LuisaCompute/include/luisa/runtime/event.h):48-52),
+while `Stream` accepts commands/events and exposes synchronization
+([LuisaCompute/include/luisa/runtime/stream.h](../LuisaCompute/include/luisa/runtime/stream.h):85-95).
+Feather uses a real event for each fence and `Event::is_completed` for polling.
+
+Host-visible output repacking is part of Feather's fence completion contract.
+For deterministic behavior across the pinned backends, `GpuFence.Wait` and
+`GpuStream.Wait(fence)` synchronize the producer stream before releasing its
+retained submission. Consequently, same-context cross-stream dependencies are
+correct but `GpuStream.Wait` is currently host-blocking; independent streams
+still submit and execute concurrently. Cross-context waits are rejected because
+LC events belong to one device. Context, stream, buffer, and texture teardown or
+host access synchronizes affected work before native storage is released, so an
+in-flight dispatch cannot retain dangling host pointers. Autodiff remains
+host-synchronous because gradient retrieval has no asynchronous managed contract.
 
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
 | M8.1 Runtime discovery (implemented) | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Device list/default semantics and invalid selection are covered by managed tests; a GPU test creates the selected LC device; multi-device hardware coverage remains conditional |
 | M8.2 Context-native ownership (implemented) | `GPU.WithContext`; native per-context LC state; resources, pipelines, and kernels carry owner context | Two same-device Metal contexts dispatch independently; cross-context binding and post-disposal use are rejected; pinned Vulkan contexts are serialized because LC permits one live device |
-| M8.3 Streams and fences | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` no longer relies on transient memory; ordered and cross-stream dependency tests pass on Metal/Vulkan/DX runners where available |
+| M8.3 Streams and fences (implemented) | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` retains staging safely; GPU tests cover completion polling/wait, two streams, cross-stream ordering, cross-context rejection, teardown, and Vulkan context activation switches |
 | M8.4 Resource interop and presentation | Capability-gated external resource contract; native presenter/swapchain route where supported | Host staging fallback remains correct; every enabled zero-copy path has ownership/state/fence tests and a non-black multi-frame presentation test |
 | M8.5 API migration | Static `GPU` facade delegates to default context/stream; samples migrate to explicit contexts where appropriate | Existing public examples compile unchanged; new multi-context/stream samples pass; no public API selects EasyGPU |
 | M8.6 RT readiness | Capability schema and inert RT type/descriptor design review, then a separate implementation proposal | No fake RT success path; construction is capability-gated; FEIR/XIR/backend coverage proposal approved before implementation |

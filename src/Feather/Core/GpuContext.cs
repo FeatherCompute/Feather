@@ -38,6 +38,14 @@ public sealed class GpuContext : IDisposable
     /// </summary>
     public GpuBackend Backend => Device.Backend;
 
+    /// <summary>Creates an independent compute stream owned by this context.</summary>
+    public GpuStream CreateStream()
+    {
+        ThrowIfDisposed();
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_stream_create(Handle, out var stream));
+        return new GpuStream(this, stream);
+    }
+
     public BackendType BackendType
     {
         get

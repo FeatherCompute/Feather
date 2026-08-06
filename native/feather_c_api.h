@@ -31,6 +31,8 @@ typedef uint64_t FeADKernelHandle;
 typedef uint64_t FeTensorHandle;
 typedef uint64_t FeWindowHandle;
 typedef uint64_t FeTexturePresenterHandle;
+typedef uint64_t FeStreamHandle;
+typedef uint64_t FeFenceHandle;
 
 typedef enum FeResult {
     FE_OK = 0,
@@ -282,6 +284,13 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context);
 FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeDeviceInfo* out_info);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
+FE_API FeResult fe_stream_create(FeContextHandle context, FeStreamHandle* out_stream);
+FE_API FeResult fe_stream_destroy(FeStreamHandle stream);
+FE_API FeResult fe_stream_synchronize(FeStreamHandle stream);
+FE_API FeResult fe_stream_wait_fence(FeStreamHandle stream, FeFenceHandle fence);
+FE_API FeResult fe_fence_destroy(FeFenceHandle fence);
+FE_API FeResult fe_fence_is_completed(FeFenceHandle fence, bool* out_completed);
+FE_API FeResult fe_fence_wait(FeFenceHandle fence);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_runtime_flush_caches(void);
 FE_API FeResult fe_runtime_shutdown(void);
@@ -349,6 +358,9 @@ FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t 
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size);
 FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                    uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait);
+FE_API FeResult fe_kernel_dispatch_stream(FeKernelHandle kernel, FeStreamHandle stream, uint32_t group_x,
+                                          uint32_t group_y, uint32_t group_z, uint32_t logical_x, uint32_t logical_y,
+                                          uint32_t logical_z, FeFenceHandle* out_fence);
 FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                              size_t* out_required_size);

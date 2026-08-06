@@ -4,10 +4,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdio>
-#include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -17,6 +17,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -30,17 +31,18 @@
 
 #include <luisa/ast/function.h>
 #include <luisa/ast/type.h>
+#include <luisa/dsl/dispatch_indirect.h>
 #include <luisa/dsl/sugar.h>
 #include <luisa/runtime/buffer.h>
 #include <luisa/runtime/byte_buffer.h>
 #include <luisa/runtime/context.h>
 #include <luisa/runtime/device.h>
 #include <luisa/runtime/dispatch_buffer.h>
+#include <luisa/runtime/event.h>
 #include <luisa/runtime/image.h>
 #include <luisa/runtime/shader.h>
 #include <luisa/runtime/stream.h>
 #include <luisa/runtime/volume.h>
-#include <luisa/dsl/dispatch_indirect.h>
 #include <luisa/xir/instructions/arithmetic.h>
 #include <luisa/xir/module.h>
 #include <luisa/xir/passes/autodiff.h>
@@ -415,18 +417,20 @@ void clip_homogeneous_triangle(ArrayFloat4<kMaximumClippedVertices>& positions,
 
 class RuntimeState {
 public:
-    struct CachedKernel {
-        std::unique_ptr<Shader3D<>> shader;
-        std::vector<ByteBuffer*> buffers;
-        std::vector<ByteBuffer*> push_constants;
-        std::vector<RuntimeTexture*> textures;
-        std::vector<ByteBuffer*> gradients;
-        std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
-        std::vector<std::unique_ptr<ByteBuffer>> owned_push_constants;
-        std::vector<RuntimeTexture> owned_textures;
-        std::vector<std::unique_ptr<ByteBuffer>> owned_gradients;
-        uint64_t execution_cache_key = ~0ull;
-    };
+  using Completion = std::function<bool(std::string*)>;
+
+  struct CachedKernel {
+      std::unique_ptr<Shader3D<>> shader;
+      std::vector<ByteBuffer*> buffers;
+      std::vector<ByteBuffer*> push_constants;
+      std::vector<RuntimeTexture*> textures;
+      std::vector<ByteBuffer*> gradients;
+      std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
+      std::vector<std::unique_ptr<ByteBuffer>> owned_push_constants;
+      std::vector<RuntimeTexture> owned_textures;
+      std::vector<std::unique_ptr<ByteBuffer>> owned_gradients;
+      uint64_t execution_cache_key = ~0ull;
+  };
 
     struct CachedFragment {
         luisa::shared_ptr<const luisa::compute::detail::FunctionBuilder> callable;
@@ -449,9 +453,24 @@ public:
     };
 
 private:
+  struct FenceState {
+      Event event;
+      uint64_t fence = 0u;
+      uint64_t stream_key = 0u;
+      uint64_t sequence = 0u;
+      Completion completion;
+      bool finalized = false;
+      bool retained = false;
+      std::string error;
+  };
+
     std::unique_ptr<Context> context_;
     std::unique_ptr<Device> device_;
     std::unique_ptr<Stream> stream_;
+    std::unordered_map<uint64_t, std::unique_ptr<Stream>> streams_;
+    std::unordered_set<uint64_t> stream_keys_;
+    std::unordered_map<uint64_t, FenceState> fences_;
+    uint64_t next_fence_sequence_ = 1u;
     std::string runtime_directory_;
     std::string backend_name_;
     uint32_t device_index_ = UINT32_MAX;
@@ -500,10 +519,201 @@ public:
             device_ = std::make_unique<Device>(context_->create_device(backend_name_, &config));
         }
         stream_ = std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE));
+        for (const auto key : stream_keys_) {
+            streams_.emplace(key, std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE)));
+        }
     }
 
     Device &device() noexcept { return *device_; }
     Stream &stream() noexcept { return *stream_; }
+    Stream* stream(uint64_t key) noexcept {
+        if (key == 0u)
+            return stream_.get();
+        const auto found = streams_.find(key);
+        return found == streams_.end() ? nullptr : found->second.get();
+    }
+
+    [[nodiscard]] bool has_stream(uint64_t key) const noexcept {
+        return key == 0u || stream_keys_.contains(key);
+    }
+
+    bool create_stream(uint64_t key, std::string* error) {
+        if (key == 0u || streams_.contains(key)) {
+            if (error != nullptr)
+                *error = "Luisa stream handle is invalid or already exists";
+            return false;
+        }
+        stream_keys_.emplace(key);
+        streams_.emplace(key, std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE)));
+        return true;
+    }
+
+    bool finalize_fence(FenceState& state, std::string* error) {
+        if (!state.finalized) {
+            state.finalized = true;
+            if (state.completion && !state.completion(&state.error) && state.error.empty()) {
+                state.error = "Luisa asynchronous dispatch finalization failed";
+            }
+            state.completion = {};
+        }
+        if (!state.error.empty()) {
+            if (error != nullptr)
+                *error = state.error;
+            return false;
+        }
+        return true;
+    }
+
+    bool finalize_stream_through(uint64_t stream_key, uint64_t sequence, bool release_orphans, std::string* error) {
+        std::vector<std::pair<uint64_t, uint64_t>> ordered;
+        for (const auto& [key, fence] : fences_) {
+            if (fence.stream_key == stream_key && fence.sequence <= sequence) {
+                ordered.emplace_back(fence.sequence, key);
+            }
+        }
+        std::ranges::sort(ordered);
+        bool succeeded = true;
+        std::vector<uint64_t> completed_orphans;
+        for (const auto [fence_sequence, key] : ordered) {
+            (void)fence_sequence;
+            auto& fence = fences_.at(key);
+            if (!finalize_fence(fence, error))
+                succeeded = false;
+            if (release_orphans && !fence.retained)
+                completed_orphans.push_back(key);
+        }
+        for (const auto key : completed_orphans)
+            fences_.erase(key);
+        return succeeded;
+    }
+
+    bool signal_fence(uint64_t stream_key, uint64_t fence_key, bool retained, Completion completion,
+                      std::string* error) {
+        auto* target = stream(stream_key);
+        if (target == nullptr || fence_key == 0u || fences_.contains(fence_key)) {
+            if (error != nullptr)
+                *error = "Luisa stream or fence handle is invalid";
+            return false;
+        }
+        auto event = device_->create_event();
+        *target << event.signal();
+        const auto value = event.last_fence();
+        fences_.emplace(fence_key, FenceState{std::move(event),
+                                              value,
+                                              stream_key,
+                                              next_fence_sequence_++,
+                                              std::move(completion),
+                                              false,
+                                              retained,
+                                              {}});
+        return true;
+    }
+
+    bool is_fence_completed(uint64_t key, bool* completed, std::string* error) {
+        const auto found = fences_.find(key);
+        if (found == fences_.end() || completed == nullptr) {
+            if (error != nullptr)
+                *error = "Luisa fence handle is invalid";
+            return false;
+        }
+        if (found->second.finalized) {
+            *completed = true;
+            return finalize_fence(found->second, error);
+        }
+        *completed = found->second.event.is_completed(found->second.fence);
+        return !*completed || finalize_stream_through(found->second.stream_key, found->second.sequence, false, error);
+    }
+
+    bool synchronize_fence(uint64_t key, std::string* error) {
+        const auto found = fences_.find(key);
+        if (found == fences_.end()) {
+            if (error != nullptr)
+                *error = "Luisa fence handle is invalid";
+            return false;
+        }
+        if (found->second.finalized)
+            return finalize_fence(found->second, error);
+        auto* producer = stream(found->second.stream_key);
+        if (producer == nullptr) {
+            if (error != nullptr)
+                *error = "Luisa fence producer stream is unavailable";
+            return false;
+        }
+        producer->synchronize();
+        return finalize_stream_through(found->second.stream_key, found->second.sequence, false, error);
+    }
+
+    bool wait_fence(uint64_t stream_key, uint64_t fence_key, std::string* error) {
+        const auto found = fences_.find(fence_key);
+        if (!has_stream(stream_key) || found == fences_.end()) {
+            if (error != nullptr)
+                *error = "Luisa stream or fence handle is invalid";
+            return false;
+        }
+        if (found->second.finalized)
+            return finalize_fence(found->second, error);
+        // LC 35a06cb exposes device-side event waits, but completion of Feather's
+        // host readback/repacking is part of the fence contract too. Synchronize
+        // the producer stream before returning so both GPU and host-visible state
+        // are ordered consistently on every backend.
+        auto* producer = stream(found->second.stream_key);
+        if (producer == nullptr) {
+            if (error != nullptr)
+                *error = "Luisa fence producer stream is unavailable";
+            return false;
+        }
+        producer->synchronize();
+        return finalize_stream_through(found->second.stream_key, found->second.sequence, false, error);
+    }
+
+    bool synchronize_stream(uint64_t key, std::string* error) {
+        auto* target = stream(key);
+        if (target == nullptr) {
+            if (!has_device() && has_stream(key))
+                return finalize_stream_through(key, std::numeric_limits<uint64_t>::max(), true, error);
+            if (error != nullptr)
+                *error = "Luisa stream handle is invalid";
+            return false;
+        }
+        target->synchronize();
+        return finalize_stream_through(key, std::numeric_limits<uint64_t>::max(), true, error);
+    }
+
+    bool synchronize(std::string* error) {
+        if (!has_device())
+            return true;
+        bool succeeded = synchronize_stream(0u, error);
+        for (const auto& [key, value] : streams_) {
+            (void)value;
+            if (!synchronize_stream(key, error))
+                succeeded = false;
+        }
+        return succeeded;
+    }
+
+    bool destroy_fence(uint64_t key, std::string* error) {
+        if (!synchronize_fence(key, error))
+            return false;
+        fences_.erase(key);
+        return true;
+    }
+
+    bool destroy_stream(uint64_t key, std::string* error) {
+        if (key == 0u || !has_stream(key)) {
+            if (error != nullptr)
+                *error = "Luisa stream handle is invalid";
+            return false;
+        }
+        if (!has_device()) {
+            stream_keys_.erase(key);
+            return true;
+        }
+        if (!synchronize_stream(key, error))
+            return false;
+        streams_.erase(key);
+        stream_keys_.erase(key);
+        return true;
+    }
     [[nodiscard]] bool has_device() const noexcept { return device_ != nullptr; }
     [[nodiscard]] std::string_view backend_name() const noexcept { return backend_name_; }
     [[nodiscard]] uint32_t device_index() const noexcept { return device_index_; }
@@ -765,7 +975,9 @@ public:
         return *tile_fill_dispatch_buffer_;
     }
 
-    ByteBuffer* resident_buffer(uint64_t key, size_t size) {
+    ByteBuffer* resident_buffer(uint64_t key, size_t size, bool* created = nullptr) {
+        if (created != nullptr)
+            *created = false;
         if (key == 0u || size == 0u) return nullptr;
         if (const auto found = resident_buffers_.find(key); found != resident_buffers_.end()) {
             return found->second->size_bytes() == size ? found->second.get() : nullptr;
@@ -773,11 +985,15 @@ public:
         auto buffer = std::make_unique<ByteBuffer>(device_->create_byte_buffer(size));
         auto* result = buffer.get();
         resident_buffers_.emplace(key, std::move(buffer));
+        if (created != nullptr)
+            *created = true;
         return result;
     }
 
-    RuntimeTexture* resident_texture(uint64_t key, uint8_t kind, PixelStorage storage,
-                                     uint3 size, uint32_t mip_levels) {
+    RuntimeTexture* resident_texture(uint64_t key, uint8_t kind, PixelStorage storage, uint3 size, uint32_t mip_levels,
+                                     bool* created = nullptr) {
+        if (created != nullptr)
+            *created = false;
         if (key == 0u || size.x == 0u || size.y == 0u || size.z == 0u) return nullptr;
         if (const auto found = resident_textures_.find(key); found != resident_textures_.end()) {
             const auto& entry = found->second;
@@ -800,6 +1016,8 @@ public:
         auto* result = resource.get();
         resident_textures_.emplace(
             key, ResidentTexture{std::move(resource), kind, storage, size, mip_levels});
+        if (created != nullptr)
+            *created = true;
         return result;
     }
 
@@ -882,7 +1100,8 @@ public:
         *stream_ << (*msaa_resolve_shader_)(
                         *sources[0], *sources[1], *sources[2], *sources[3], *destination)
                         .dispatch(target.width, target.height);
-        if (synchronize_stream) *stream_ << synchronize();
+        if (synchronize_stream)
+            *stream_ << luisa::compute::synchronize();
         return true;
     }
 
@@ -943,7 +1162,7 @@ public:
             if (error != nullptr) *error = "Luisa resident texture size changed";
             return false;
         }
-        *stream_ << synchronize();
+        *stream_ << luisa::compute::synchronize();
         return true;
     }
 
@@ -971,7 +1190,15 @@ public:
     }
 
     void reset() noexcept {
-        if (stream_ != nullptr) stream_->synchronize();
+        if (stream_ != nullptr) {
+            std::string ignored;
+            (void)synchronize(&ignored);
+        }
+        for (auto& [key, fence] : fences_) {
+            (void)key;
+            fence.event = Event{};
+        }
+        streams_.clear();
         kernels_.clear();
         fragment_callables_.clear();
         raster_geometries_.clear();
@@ -1006,6 +1233,17 @@ public:
         (void)context_.release();
         (void)device_.release();
         (void)stream_.release();
+        for (auto& [key, stream] : streams_) {
+            (void)key;
+            (void)stream.release();
+        }
+        streams_.clear();
+        stream_keys_.clear();
+        for (auto& [key, fence] : fences_) {
+            (void)key;
+            (void)fence.event.release();
+        }
+        fences_.clear();
         // The owner is intentionally leaked by runtime_registry(); leave cached
         // shaders and resources untouched so their destructors cannot run after
         // the dynamically loaded Luisa backend has been unloaded.
@@ -1099,6 +1337,90 @@ void Shutdown() {
 
 void Shutdown(uint64_t context_key) {
     runtime_registry().erase(context_key);
+}
+
+bool CreateStream(uint64_t context_key, std::string_view runtime_directory, std::string_view backend_name,
+                  uint32_t device_index, uint64_t stream_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto& state = runtime_registry().prepare(context_key, runtime_directory, backend_name, device_index);
+    return state.create_stream(stream_key, error);
+}
+
+bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa context has no runtime state";
+        return false;
+    }
+    return state->destroy_stream(stream_key, error);
+}
+
+bool Synchronize(uint64_t context_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    return state == nullptr || state->synchronize(error);
+}
+
+bool SynchronizeStream(uint64_t context_key, uint64_t stream_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa context has no runtime state";
+        return false;
+    }
+    return state->synchronize_stream(stream_key, error);
+}
+
+bool WaitFence(uint64_t context_key, uint64_t stream_key, uint64_t fence_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa context has no runtime state";
+        return false;
+    }
+    return state->wait_fence(stream_key, fence_key, error);
+}
+
+bool IsFenceCompleted(uint64_t context_key, uint64_t fence_key, bool* completed, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa context has no runtime state";
+        return false;
+    }
+    return state->is_fence_completed(fence_key, completed, error);
+}
+
+bool SynchronizeFence(uint64_t context_key, uint64_t fence_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa context has no runtime state";
+        return false;
+    }
+    return state->synchronize_fence(fence_key, error);
+}
+
+bool DestroyFence(uint64_t context_key, uint64_t fence_key, std::string* error) {
+    if (error != nullptr)
+        error->clear();
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr)
+        return true;
+    return state->destroy_fence(fence_key, error);
 }
 
 void Abandon() noexcept {
@@ -1281,14 +1603,13 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         return true;
     }
     ensure_luisa_spirv_optimization_preset();
-    xir::Module xir_module;
+    auto xir_module = std::make_shared<xir::Module>();
     std::vector<BufferLayout> buffer_layouts;
     std::vector<AdGradientLayout> gradient_layouts;
-    auto* kernel = LowerToXir(module, lowering, xir_module, &buffer_layouts,
-                              ad_inputs, &gradient_layouts, error);
+    auto* kernel = LowerToXir(module, lowering, *xir_module, &buffer_layouts, ad_inputs, &gradient_layouts, error);
     if (kernel == nullptr)
         return false;
-    auto verification = xir_verify_module(&xir_module);
+    auto verification = xir_verify_module(xir_module.get());
     if (!verification.succeeded()) {
         if (error != nullptr) {
             *error = "generated Luisa XIR failed verification: ";
@@ -1314,7 +1635,13 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
     }
 
     auto &device = state.device();
-    auto &stream = state.stream();
+    auto* dispatch_stream = state.stream(dispatch.stream_key);
+    if (dispatch_stream == nullptr) {
+        if (error != nullptr)
+            *error = "Luisa dispatch stream handle is invalid";
+        return false;
+    }
+    auto& stream = *dispatch_stream;
     bool cache_hit = cached != nullptr && cached->shader != nullptr;
     std::vector<ByteBuffer *> runtime_buffers;
     std::vector<std::unique_ptr<ByteBuffer>> owned_buffers;
@@ -1399,6 +1726,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 return false;
             }
             RuntimeTexture *runtime = nullptr;
+            bool resident_created = false;
             if (cache_hit) {
                 if (texture_index >= cached->textures.size()) {
                     if (error != nullptr) *error = "Luisa shader cache resource layout changed";
@@ -1406,9 +1734,9 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 }
                 runtime = cached->textures[texture_index];
             } else if (found->resident_key != 0u) {
-                runtime = state.resident_texture(
-                    found->resident_key, resource.kind, *storage,
-                    make_uint3(found->width, found->height, found->depth), found->mip_levels);
+                runtime = state.resident_texture(found->resident_key, resource.kind, *storage,
+                                                 make_uint3(found->width, found->height, found->depth),
+                                                 found->mip_levels, &resident_created);
                 if (runtime == nullptr) {
                     if (error != nullptr) *error = "Luisa resident texture layout changed";
                     return false;
@@ -1422,14 +1750,17 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                     *storage, luisa::make_uint3(found->width, found->height, found->depth), found->mip_levels, true));
                 runtime = &owned_textures.back();
             }
+            const auto upload = found->upload || resident_created;
             runtime_textures.push_back(runtime);
-            std::visit([&](auto& texture) {
-                if (found->upload) stream << texture.copy_from(found->bytes->data());
-                if (!cache_hit)
-                    bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
-            }, *runtime);
-            if (found->upload && found->generate_mipmaps &&
-                !state.generate_mipmaps(*runtime, found->mip_levels, error)) {
+            std::visit(
+                [&](auto& texture) {
+                    if (upload)
+                        stream << texture.copy_from(found->bytes->data());
+                    if (!cache_hit)
+                        bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
+                },
+                *runtime);
+            if (upload && found->generate_mipmaps && !state.generate_mipmaps(*runtime, found->mip_levels, error)) {
                 return false;
             }
             staged_textures.push_back(&*found);
@@ -1454,20 +1785,8 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
         const auto count = found->bytes->size() / found->stride;
         const auto device_size = count * layout->device_type->size();
-        staged_bytes.emplace_back(
-            found->upload || found->download ? device_size : 0u, 0u);
-        auto& packed = staged_bytes.back();
-        if (found->upload) {
-            for (size_t i = 0; i < count; ++i) {
-                if (!repack_value(module, layout->feir_type_id, layout->device_type,
-                                  found->bytes->data() + i * found->stride,
-                                  packed.data() + i * layout->device_type->size(), true)) {
-                    if (error != nullptr) *error = "Luisa failed to repack a Feather buffer element";
-                    return false;
-                }
-            }
-        }
         ByteBuffer *runtime = nullptr;
+        bool resident_created = false;
         if (cache_hit) {
             if (buffer_index >= cached->buffers.size() ||
                 cached->buffers[buffer_index]->size_bytes() != device_size) {
@@ -1476,7 +1795,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             runtime = cached->buffers[buffer_index];
         } else if (found->resident_key != 0u) {
-            runtime = state.resident_buffer(found->resident_key, device_size);
+            runtime = state.resident_buffer(found->resident_key, device_size, &resident_created);
             if (runtime == nullptr) {
                 if (error != nullptr) *error = "Luisa resident buffer layout changed";
                 return false;
@@ -1485,7 +1804,21 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             owned_buffers.emplace_back(std::make_unique<ByteBuffer>(device.create_byte_buffer(device_size)));
             runtime = owned_buffers.back().get();
         }
-        if (found->upload) stream << runtime->copy_from(packed.data());
+        const auto upload = found->upload || resident_created;
+        staged_bytes.emplace_back(upload || found->download ? device_size : 0u, 0u);
+        auto& packed = staged_bytes.back();
+        if (upload) {
+            for (size_t i = 0; i < count; ++i) {
+                if (!repack_value(module, layout->feir_type_id, layout->device_type,
+                                  found->bytes->data() + i * found->stride,
+                                  packed.data() + i * layout->device_type->size(), true)) {
+                    if (error != nullptr)
+                        *error = "Luisa failed to repack a Feather buffer element";
+                    return false;
+                }
+            }
+            stream << runtime->copy_from(packed.data());
+        }
         if (!cache_hit)
             bound_arguments.emplace_back(
                 luisa::compute::Function::BufferBinding{runtime->handle(), 0u, runtime->size_bytes()});
@@ -1532,12 +1865,12 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         // function it translates, so a callable's own parameters would be mistaken for resource
         // bindings. Destructuring before inlining permits multi-block callable bodies to be
         // inlined into the kernel, leaving only the function the bindings actually describe.
-        auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
+        auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
         if (destructured.error_count != 0u) {
             if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before callable inlining";
             return false;
         }
-        auto inlined = inline_all_pass_run_on_module(&xir_module);
+        auto inlined = inline_all_pass_run_on_module(xir_module.get());
         if (inlined.skipped_recursive_callable_count != 0u ||
             inlined.skipped_structured_call_count != 0u ||
             inlined.skipped_constrained_call_count != 0u ||
@@ -1547,8 +1880,8 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             if (error != nullptr) *error = "Luisa could not inline the generated FEIR callable graph";
             return false;
         }
-        xir_to_ast_normalize_module(&xir_module);
-        auto inlined_verification = xir_verify_module(&xir_module);
+        xir_to_ast_normalize_module(xir_module.get());
+        auto inlined_verification = xir_verify_module(xir_module.get());
         if (!inlined_verification.succeeded()) {
             if (error != nullptr) {
                 *error = "Luisa inlined XIR failed verification: ";
@@ -1559,14 +1892,14 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
     }
     if (!cache_hit && ad_inputs != nullptr) {
-        xir_to_ast_normalize_module(&xir_module);
-        auto destructured = destructure_cfg_pass_run_on_module(&xir_module);
+        xir_to_ast_normalize_module(xir_module.get());
+        auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
         if (destructured.error_count != 0u) {
             if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
             return false;
         }
-        auto inlined = inline_all_pass_run_on_module(
-            &xir_module, InlineOptions{.allow_autodiff_scope_in_caller = true});
+        auto inlined =
+            inline_all_pass_run_on_module(xir_module.get(), InlineOptions{.allow_autodiff_scope_in_caller = true});
         if (inlined.skipped_recursive_callable_count != 0u ||
             inlined.skipped_structured_call_count != 0u ||
             inlined.skipped_constrained_call_count != 0u ||
@@ -1574,19 +1907,19 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             if (error != nullptr) *error = "Luisa could not inline the complete FEIR callable graph before autodiff";
             return false;
         }
-        static_cast<void>(reg2mem_pass_run_on_module(&xir_module));
-        auto restructured = restructure_cfg_pass_run_on_module(&xir_module);
+        static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
+        auto restructured = restructure_cfg_pass_run_on_module(xir_module.get());
         if (!restructured.succeeded()) {
             if (error != nullptr) *error = "Luisa failed to restructure XIR control flow before autodiff";
             return false;
         }
-        static_cast<void>(reg2mem_pass_run_on_module(&xir_module));
-        auto ad = autodiff_pass_run_on_module(&xir_module);
+        static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
+        auto ad = autodiff_pass_run_on_module(xir_module.get());
         if (ad.transformed_scope_count == 0u) {
             if (error != nullptr) *error = "Luisa XIR autodiff did not transform the generated AD scope";
             return false;
         }
-        auto ad_verification = xir_verify_module(&xir_module);
+        auto ad_verification = xir_verify_module(xir_module.get());
         if (!ad_verification.succeeded()) {
             if (error != nullptr) {
                 *error = "Luisa autodiff output failed XIR verification: ";
@@ -1594,7 +1927,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             return false;
         }
-        xir_to_ast_normalize_module(&xir_module);
+        xir_to_ast_normalize_module(xir_module.get());
     }
     std::unique_ptr<Shader3D<>> shader;
     if (!cache_hit) {
@@ -1654,7 +1987,78 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         auto& packed = staged_gradients[i];
         stream << runtime_gradients[i]->copy_to(packed.data());
     }
-    if (dispatch.synchronize) stream << synchronize();
+    if (!dispatch.synchronize) {
+        if (dispatch.fence_key == 0u) {
+            if (error != nullptr)
+                *error = "asynchronous Luisa dispatch requires a fence handle";
+            return false;
+        }
+        auto resources = lowering.resources;
+        auto bindings = std::vector<HostBufferBinding>{host_buffers.begin(), host_buffers.end()};
+        auto completion = [typed_module = xir_module, source_module = std::make_shared<TypedIR::Module>(module),
+                           resources = std::move(resources), layouts = std::move(buffer_layouts),
+                           bindings = std::move(bindings), staged = std::move(staged_bytes),
+                           push_constants = std::move(staged_push_constants), buffers = std::move(owned_buffers),
+                           owned_push = std::move(owned_push_constants), textures = std::move(owned_textures),
+                           gradients = std::move(owned_gradients),
+                           uncached_shader = std::move(shader)](std::string* completion_error) mutable {
+            (void)typed_module;
+            (void)push_constants;
+            (void)buffers;
+            (void)owned_push;
+            (void)textures;
+            (void)gradients;
+            (void)uncached_shader;
+            size_t staged_index = 0u;
+            for (const auto& resource : resources) {
+                if (resource.kind != kResourceBuffer)
+                    continue;
+                const auto found = std::find_if(bindings.begin(), bindings.end(), [&](const auto& binding) {
+                    return binding.binding == resource.binding;
+                });
+                if (found == bindings.end() || staged_index >= staged.size()) {
+                    if (completion_error != nullptr) {
+                        *completion_error = "Luisa asynchronous buffer completion metadata is missing";
+                    }
+                    return false;
+                }
+                auto& packed = staged[staged_index++];
+                if ((resource.access != kAccessWrite && resource.access != kAccessReadWrite) || !found->download) {
+                    continue;
+                }
+                const auto layout = std::find_if(layouts.begin(), layouts.end(), [&](const auto& candidate) {
+                    return candidate.binding == resource.binding;
+                });
+                if (layout == layouts.end() || found->bytes == nullptr) {
+                    if (completion_error != nullptr) {
+                        *completion_error = "Luisa asynchronous buffer layout is missing";
+                    }
+                    return false;
+                }
+                const auto count = found->bytes->size() / found->stride;
+                for (size_t i = 0u; i < count; ++i) {
+                    if (!repack_value(*source_module, layout->feir_type_id, layout->device_type,
+                                      found->bytes->data() + i * found->stride,
+                                      packed.data() + i * layout->device_type->size(), false)) {
+                        if (completion_error != nullptr) {
+                            *completion_error = "Luisa failed to restore an asynchronous buffer element layout";
+                        }
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+        auto completion_lifetime = std::make_shared<decltype(completion)>(std::move(completion));
+        return state.signal_fence(
+            dispatch.stream_key, dispatch.fence_key, dispatch.retain_fence,
+            [completion_lifetime](std::string* completion_error) { return (*completion_lifetime)(completion_error); },
+            error);
+    }
+    stream << synchronize();
+    if (!state.finalize_stream_through(dispatch.stream_key, std::numeric_limits<uint64_t>::max(), true, error)) {
+        return false;
+    }
 
     staged_index = 0;
     for (const auto& resource : lowering.resources) {
@@ -1752,20 +2156,23 @@ bool PrepareGraphicsFragment(const TypedIR::Module& module,
                 if (error != nullptr) *error = "fused fragment texture binding is not resident";
                 return false;
             }
-            auto* runtime = state.resident_texture(
-                found->resident_key, resource.kind, *storage,
-                make_uint3(found->width, found->height, found->depth), found->mip_levels);
+            bool resident_created = false;
+            auto* runtime = state.resident_texture(found->resident_key, resource.kind, *storage,
+                                                   make_uint3(found->width, found->height, found->depth),
+                                                   found->mip_levels, &resident_created);
             if (runtime == nullptr) {
                 if (error != nullptr) *error = "fused fragment resident texture layout changed";
                 return false;
             }
-            std::visit([&](auto& texture) {
-                if (found->upload) stream << texture.copy_from(found->bytes->data());
-                bound_arguments.emplace_back(
-                    luisa::compute::Function::TextureBinding{texture.handle(), 0u});
-            }, *runtime);
-            if (found->upload && found->generate_mipmaps &&
-                !state.generate_mipmaps(*runtime, found->mip_levels, error)) {
+            const auto upload = found->upload || resident_created;
+            std::visit(
+                [&](auto& texture) {
+                    if (upload)
+                        stream << texture.copy_from(found->bytes->data());
+                    bound_arguments.emplace_back(luisa::compute::Function::TextureBinding{texture.handle(), 0u});
+                },
+                *runtime);
+            if (upload && found->generate_mipmaps && !state.generate_mipmaps(*runtime, found->mip_levels, error)) {
                 return false;
             }
             continue;
@@ -1783,12 +2190,13 @@ bool PrepareGraphicsFragment(const TypedIR::Module& module,
         }
         const auto count = found->bytes->size() / found->stride;
         const auto device_size = count * layout->device_type->size();
-        auto* runtime = state.resident_buffer(found->resident_key, device_size);
+        bool resident_created = false;
+        auto* runtime = state.resident_buffer(found->resident_key, device_size, &resident_created);
         if (runtime == nullptr) {
             if (error != nullptr) *error = "fused fragment resident buffer layout changed";
             return false;
         }
-        if (found->upload) {
+        if (found->upload || resident_created) {
             auto& packed = staged_buffers.emplace_back(device_size, 0u);
             for (size_t i = 0u; i < count; ++i) {
                 if (!repack_value(module, layout->feir_type_id, layout->device_type,

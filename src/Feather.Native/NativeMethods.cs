@@ -238,6 +238,27 @@ public static class NativeMethods
     public static extern FeResult fe_context_get_caps(FeContextHandle context, out FeBackendCaps out_caps);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_stream_create(FeContextHandle context, out FeStreamHandle out_stream);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_stream_destroy(IntPtr stream);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_stream_synchronize(FeStreamHandle stream);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_stream_wait_fence(FeStreamHandle stream, FeFenceHandle fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_destroy(IntPtr fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_is_completed(FeFenceHandle fence, [MarshalAs(UnmanagedType.I1)] out bool out_completed);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_wait(FeFenceHandle fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_get_last_error(IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -391,6 +412,18 @@ public static class NativeMethods
         uint logical_y,
         uint logical_z,
         [MarshalAs(UnmanagedType.I1)] bool wait);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_dispatch_stream(
+        FeKernelHandle kernel,
+        FeStreamHandle stream,
+        uint group_x,
+        uint group_y,
+        uint group_z,
+        uint logical_x,
+        uint logical_y,
+        uint logical_z,
+        out FeFenceHandle out_fence);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_glsl(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);

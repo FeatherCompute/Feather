@@ -63,6 +63,9 @@ struct DispatchInputs {
     uint64_t execution_cache_key = 0;
     uint64_t context_key = 1;
     uint32_t device_index = UINT32_MAX;
+    uint64_t stream_key = 0;
+    uint64_t fence_key = 0;
+    bool retain_fence = false;
 };
 
 struct RasterDispatchInputs {
@@ -133,6 +136,16 @@ bool ValidateDevice(std::string_view runtime_directory, std::string_view backend
 void Shutdown();
 void Shutdown(uint64_t context_key);
 void Abandon() noexcept;
+
+bool CreateStream(uint64_t context_key, std::string_view runtime_directory, std::string_view backend_name,
+                  uint32_t device_index, uint64_t stream_key, std::string* error = nullptr);
+bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error = nullptr);
+bool Synchronize(uint64_t context_key, std::string* error = nullptr);
+bool SynchronizeStream(uint64_t context_key, uint64_t stream_key, std::string* error = nullptr);
+bool WaitFence(uint64_t context_key, uint64_t stream_key, uint64_t fence_key, std::string* error = nullptr);
+bool IsFenceCompleted(uint64_t context_key, uint64_t fence_key, bool* completed, std::string* error = nullptr);
+bool SynchronizeFence(uint64_t context_key, uint64_t fence_key, std::string* error = nullptr);
+bool DestroyFence(uint64_t context_key, uint64_t fence_key, std::string* error = nullptr);
 
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> buffers, std::span<HostTextureBinding> textures,

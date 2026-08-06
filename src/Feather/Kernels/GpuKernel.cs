@@ -127,6 +127,46 @@ public sealed class GpuKernel : IDisposable
             wait));
     }
 
+    /// <summary>Submits a generated kernel to an explicit stream and returns its completion fence.</summary>
+    public static GpuFence Dispatch<TKernel>(
+        GpuStream stream,
+        GpuKernel gpuKernel,
+        TKernel kernel,
+        GpuDispatchSize size)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(gpuKernel);
+        stream.ThrowIfDisposed();
+        gpuKernel.ThrowIfDisposed();
+        if (!gpuKernel.context.HasSameNativeContext(stream.Context))
+        {
+            throw new ArgumentException(
+                "GPU kernel and stream must have the same owner context.", nameof(gpuKernel));
+        }
+        if (gpuKernel.kernelType != typeof(TKernel))
+        {
+            throw new ArgumentException(
+                $"GPU kernel was created for '{gpuKernel.kernelType.FullName}', not "
+                + $"'{typeof(TKernel).FullName}'.",
+                nameof(gpuKernel));
+        }
+        var command = new GpuKernelCommand(gpuKernel.Handle);
+        TKernel.Bind(in kernel, command);
+        var groups = ComputeGroups(size, TKernel.Descriptor.ThreadGroupSize);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_dispatch_stream(
+            gpuKernel.Handle,
+            stream.Handle,
+            (uint)groups.X,
+            (uint)groups.Y,
+            (uint)groups.Z,
+            (uint)size.X,
+            (uint)size.Y,
+            (uint)size.Z,
+            out var fence));
+        return new GpuFence(stream.Context, fence);
+    }
+
     /// <summary>
     /// Creates a generated compute kernel for an explicitly selected execution backend.
     /// </summary>
