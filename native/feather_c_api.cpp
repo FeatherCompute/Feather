@@ -3294,6 +3294,9 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     std::optional<Feather::Luisa::AdInputs> ad_inputs;
     std::vector<ADGradientState> next_gradients;
     if (kernel.auto_diff) {
+        // XIR reverse mode accepts only fixed-trip loops. Specialize AD shaders
+        // for their uniform values so loop bounds remain compile-time constants.
+        lowering.dynamic_push_constants = false;
         std::vector<IrAdAnnotation> parameters;
         std::vector<IrAdAnnotation> losses;
         for (const auto& annotation : ir.ad_annotations) {
@@ -3434,6 +3437,15 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     mix_cache_key(logical_x);
     mix_cache_key(logical_y);
     mix_cache_key(logical_z);
+    if (kernel.auto_diff) {
+        for (const auto& push : lowering.push_constants) {
+            mix_cache_key(push.binding);
+            mix_cache_key(push.size);
+            const auto* bytes = static_cast<const unsigned char*>(push.data);
+            for (size_t i = 0u; bytes != nullptr && i < push.size; ++i)
+                mix_cache_key(bytes[i]);
+        }
+    }
     for (const auto& resource : lowering.resources) {
         mix_cache_key(resource.kind);
         mix_cache_key(resource.binding);

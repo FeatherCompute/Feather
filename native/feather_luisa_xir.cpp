@@ -6,6 +6,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <optional>
 #include <numeric>
 #include <string_view>
@@ -143,6 +145,7 @@ class Lowerer {
             ad_merge = scope->create_merge_block();
             builder_.set_insertion_point(scope->create_entry_block());
             inside_ad_scope_ = true;
+            if (!begin_ad_scope()) return nullptr;
         }
         if (!lower_statement(entry.body_statement_index)) return nullptr;
         if (ad_inputs_ != nullptr) {
@@ -188,6 +191,7 @@ class Lowerer {
         ResourceArgument* argument = nullptr;
         const Type* element_type = nullptr;
         uint32_t binding = 0;
+        uint32_t element_count = 0;
         uint8_t kind = 0;
         uint8_t access = 0;
     };
@@ -214,6 +218,7 @@ class Lowerer {
         Value* pointer = nullptr;
         Resource* resource = nullptr;
         Value* resource_index = nullptr;
+        uint32_t resource_index_expression = TypedIR::NoIndex;
         const Type* root_type = nullptr;
         std::vector<Value*> indices;
         explicit operator bool() const noexcept { return pointer != nullptr || resource != nullptr; }
@@ -234,12 +239,30 @@ class Lowerer {
         Resource* source = nullptr;
         ResourceArgument* gradient = nullptr;
         uint32_t element_count = 0;
+        Value* parameter = nullptr;
     };
 
-    struct AdRead {
-        AdResource* resource = nullptr;
-        Value* index = nullptr;
-        Value* value = nullptr;
+    struct AdIndexTerm {
+        uint32_t expression = TypedIR::NoIndex;
+        int sign = 1;
+        std::string key;
+    };
+
+    struct AdIndex {
+        std::vector<AdIndexTerm> terms;
+        int64_t offset = 0;
+    };
+
+    struct AdLocalSlot {
+        Value* pointer = nullptr;
+        AdIndex index;
+        bool written = false;
+    };
+
+    struct AdLocalBuffer {
+        Resource* resource = nullptr;
+        uint32_t element_count = 0;
+        std::unordered_map<std::string, AdLocalSlot> slots;
     };
 
     bool fail(std::string message) {
@@ -252,6 +275,14 @@ class Lowerer {
     }
 
     Constant* index_constant(uint32_t value) { return xir_module_.create_constant(Type::of<uint32_t>(), &value); }
+
+    bool is_feir_matrix_type(uint32_t id) const {
+        return id < module_.types.size() && module_.types[id].kind == kTypeMatrix;
+    }
+
+    uint32_t feir_matrix_dimension(uint32_t id) const {
+        return is_feir_matrix_type(id) ? module_.types[id].b : 0u;
+    }
 
     const Type* type(uint32_t id) {
         if (id >= module_.types.size()) return nullptr;
@@ -274,8 +305,11 @@ class Lowerer {
                 result = Type::vector(element, source.b);
             break;
         case kTypeMatrix:
-            if (source.b == source.c && source.b >= 2u && source.b <= 4u && type(source.a) == Type::of<float>())
-                result = Type::matrix(source.b);
+            if (source.b == source.c && source.b >= 2u && source.b <= 4u && type(source.a) == Type::of<float>()) {
+                result = ad_inputs_ == nullptr
+                             ? Type::matrix(source.b)
+                             : Type::array(Type::vector(Type::of<float>(), source.b), source.b);
+            }
             break;
         case kTypeArray:
             if (auto* element = type(source.a); element != nullptr && source.b != TypedIR::NoIndex && source.b > 0u)
@@ -412,7 +446,8 @@ class Lowerer {
             auto* resource_type = texture ? Type::texture(Type::of<float>(), source.kind == kResourceTexture2D ? 2u : 3u)
                                           : Type::buffer(element);
             auto* argument = function_->create_resource_argument(resource_type);
-            resources_.emplace(source.name, Resource{argument, element, source.binding, source.kind, source.access});
+            resources_.emplace(source.name, Resource{argument, element, source.binding,
+                                                     source.element_count, source.kind, source.access});
             if (!texture && buffer_layouts_ != nullptr) {
                 auto source_type = TypedIR::NoIndex;
                 for (uint32_t i = 0; i < module_.types.size(); ++i) {
@@ -577,16 +612,235 @@ class Lowerer {
                 ad_gradient_layouts_->push_back(
                     AdGradientLayout{parameter.source_binding, parameter.element_count, source->second.element_type});
         }
+        for (auto& [name, resource] : resources_) {
+            if (resource.kind != kResourceBuffer || ad_resources_.contains(resource.binding) ||
+                resource.access != kAccessReadWrite || resource.element_count == 0u ||
+                (!resource.element_type->is_float() && !resource.element_type->is_vector()) ||
+                !resource_is_read(name) || !resource_is_written(name)) continue;
+            ad_local_buffers_.emplace(resource.binding,
+                                      AdLocalBuffer{&resource, resource.element_count});
+        }
         return true;
     }
 
-    Value* track_ad_read(Resource& resource, Value* index, Value* value) {
+    std::string raw_expression_key(uint32_t id, uint32_t depth = 0u) const {
+        if (id >= module_.expressions.size() || depth > 64u) return {};
+        if (auto constant = integer_expression(id)) return "#" + std::to_string(*constant);
+        const auto& expression = module_.expressions[id];
+        std::string key = std::to_string(expression.kind) + ":" + std::to_string(expression.op) + ":" +
+                          std::to_string(expression.type_id) + ":" + std::string{string(expression.name_id)};
+        const auto append = [&](uint32_t child) {
+            key += "(" + raw_expression_key(child, depth + 1u) + ")";
+        };
+        switch (expression.kind) {
+        case kExpressionUnary:
+        case kExpressionConversion:
+        case kExpressionField:
+        case kExpressionMemberAccess:
+        case kExpressionResourceElement:
+            append(expression.a);
+            break;
+        case kExpressionBinary:
+        case kExpressionComparison:
+        case kExpressionLogical:
+        case kExpressionIndexAccess:
+        case kExpressionMatrixColumn:
+            append(expression.a);
+            append(expression.b);
+            break;
+        case kExpressionConditional:
+            append(expression.a);
+            append(expression.b);
+            append(expression.c);
+            break;
+        case kExpressionConstructor:
+        case kExpressionIntrinsic:
+        case kExpressionCallableCall:
+            if (expression.first_argument != TypedIR::NoIndex &&
+                expression.first_argument <= module_.arguments.size() &&
+                expression.argument_count <= module_.arguments.size() - expression.first_argument) {
+                for (uint32_t i = 0u; i < expression.argument_count; ++i)
+                    append(module_.arguments[expression.first_argument + i]);
+            }
+            break;
+        default:
+            break;
+        }
+        return key;
+    }
+
+    bool collect_ad_index_terms(uint32_t id, int sign, uint32_t depth,
+                                std::vector<AdIndexTerm>& terms, int64_t& offset) const {
+        if (id >= module_.expressions.size() || depth > 64u) return false;
+        if (auto constant = integer_expression(id)) {
+            auto sum = sign > 0 ? checked_add(offset, *constant)
+                                : checked_subtract(offset, *constant);
+            if (!sum) return false;
+            offset = *sum;
+            return true;
+        }
+        const auto& expression = module_.expressions[id];
+        if (expression.kind == kExpressionBinary && (expression.op == 0u || expression.op == 1u)) {
+            return collect_ad_index_terms(expression.a, sign, depth + 1u, terms, offset) &&
+                   collect_ad_index_terms(expression.b, expression.op == 0u ? sign : -sign,
+                                          depth + 1u, terms, offset);
+        }
+        auto key = raw_expression_key(id, depth);
+        if (key.empty()) return false;
+        terms.emplace_back(AdIndexTerm{id, sign, std::move(key)});
+        return true;
+    }
+
+    std::optional<AdIndex> canonical_ad_index(uint32_t id) const {
+        AdIndex index;
+        if (!collect_ad_index_terms(id, 1, 0u, index.terms, index.offset)) return std::nullopt;
+        std::sort(index.terms.begin(), index.terms.end(), [](const auto& left, const auto& right) {
+            return left.sign != right.sign ? left.sign < right.sign : left.key < right.key;
+        });
+        return index;
+    }
+
+    static std::string ad_index_key(const AdIndex& index) {
+        std::string key = "offset=" + std::to_string(index.offset);
+        for (const auto& term : index.terms)
+            key += term.sign > 0 ? "+(" + term.key + ")" : "-(" + term.key + ")";
+        return key;
+    }
+
+    static bool ad_index_terms_include(const AdIndex& index, const AdIndex& subset) {
+        const auto less = [](const auto& left, const auto& right) {
+            return left.sign != right.sign ? left.sign < right.sign : left.key < right.key;
+        };
+        return std::includes(index.terms.begin(), index.terms.end(),
+                             subset.terms.begin(), subset.terms.end(), less);
+    }
+
+    Value* lower_ad_index(const AdIndex& index) {
+        const auto magnitude = index.offset < 0
+                                   ? static_cast<uint64_t>(-(index.offset + 1)) + 1u
+                                   : static_cast<uint64_t>(index.offset);
+        if (magnitude > std::numeric_limits<uint32_t>::max()) return nullptr;
+        auto value = static_cast<uint32_t>(magnitude);
+        Value* result = xir_module_.create_constant_zero(Type::of<uint32_t>());
+        if (value != 0u) {
+            auto* constant = xir_module_.create_constant(Type::of<uint32_t>(), &value);
+            result = builder_.call(Type::of<uint32_t>(),
+                                   index.offset < 0 ? ArithmeticOp::BINARY_SUB : ArithmeticOp::BINARY_ADD,
+                                   {result, constant});
+        }
+        for (const auto& term : index.terms) {
+            auto* term_value = lower_expression(term.expression);
+            if (term_value == nullptr) return nullptr;
+            term_value = builder_.static_cast_if_necessary(Type::of<uint32_t>(), term_value);
+            result = builder_.call(Type::of<uint32_t>(),
+                                   term.sign > 0 ? ArithmeticOp::BINARY_ADD : ArithmeticOp::BINARY_SUB,
+                                   {result, term_value});
+        }
+        return result;
+    }
+
+    Value* select_ad_local_read(const AdLocalBuffer& local, const AdIndex& read_index,
+                                Value* runtime_index, Value* fallback) {
+        Value* result = fallback;
+        std::vector<std::pair<std::string_view, const AdLocalSlot*>> candidates;
+        candidates.reserve(local.slots.size());
+        for (const auto& [key, slot] : local.slots) {
+            if (!slot.written || slot.index.terms.size() >= read_index.terms.size() ||
+                !ad_index_terms_include(read_index, slot.index)) continue;
+            candidates.emplace_back(key, &slot);
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+        for (const auto& [_, slot] : candidates) {
+            auto* candidate_index = lower_ad_index(slot->index);
+            if (candidate_index == nullptr) return nullptr;
+            auto* matches = builder_.call(Type::of<bool>(), ArithmeticOp::BINARY_EQUAL,
+                                          {runtime_index, candidate_index});
+            auto* candidate = builder_.load(local.resource->element_type, slot->pointer);
+            result = builder_.call(local.resource->element_type, ArithmeticOp::SELECT,
+                                   {result, candidate, matches});
+        }
+        return candidates.empty() ? nullptr : result;
+    }
+
+    Value* ad_local_slot(Resource& resource, Value* runtime_index,
+                         uint32_t index_expression, Value* initial,
+                         Value** selected_result = nullptr) {
+        auto local = ad_local_buffers_.find(resource.binding);
+        if (local == ad_local_buffers_.end()) return nullptr;
+        auto index = canonical_ad_index(index_expression);
+        if (!index) return nullptr;
+        auto key = ad_index_key(*index);
+        if (auto found = local->second.slots.find(key); found != local->second.slots.end()) {
+            if (initial == nullptr) found->second.written = true;
+            return found->second.pointer;
+        }
+        if (initial != nullptr && selected_result != nullptr) {
+            if (auto* selected = select_ad_local_read(local->second, *index, runtime_index, initial);
+                selected != nullptr) {
+                *selected_result = selected;
+                return nullptr;
+            }
+        }
+        XIRBuilder allocation_builder;
+        allocation_builder.set_insertion_point(
+            function_->definition()->body_block()->instructions().head_sentinel());
+        auto* slot = allocation_builder.alloca_local(resource.element_type);
+        local->second.slots.emplace(key, AdLocalSlot{slot, std::move(*index), initial == nullptr});
+        if (initial != nullptr) builder_.store(slot, initial);
+        return slot;
+    }
+
+    Value* track_ad_read(Resource& resource, Value* index, Value* value,
+                         uint32_t index_expression = TypedIR::NoIndex) {
         if (!inside_ad_scope_ || value == nullptr) return value;
-        auto found = ad_resources_.find(resource.binding);
-        if (found == ad_resources_.end()) return value;
-        builder_.call(Type::of<void>(), AutodiffIntrinsicOp::AUTODIFF_REQUIRES_GRADIENT, {value});
-        ad_reads_.push_back(AdRead{&found->second, index, value});
+        if (auto parameter = ad_resources_.find(resource.binding);
+            parameter != ad_resources_.end() && parameter->second.parameter != nullptr)
+            return extract(parameter->second.parameter, resource.element_type, {index});
+        Value* selected = nullptr;
+        if (auto* slot = ad_local_slot(resource, index, index_expression, value, &selected); slot != nullptr)
+            return builder_.load(resource.element_type, slot);
+        if (selected != nullptr) return selected;
         return value;
+    }
+
+    bool resource_is_read(std::string_view name) const {
+        for (const auto& expression : module_.expressions) {
+            if (expression.kind == kExpressionResourceElement && string(expression.name_id) == name)
+                return true;
+            if (expression.kind == kExpressionIndexAccess && expression.a < module_.expressions.size()) {
+                const auto& base = module_.expressions[expression.a];
+                if ((base.kind == kExpressionLocal || base.kind == kExpressionParameter) &&
+                    string(base.name_id) == name) return true;
+            }
+        }
+        return false;
+    }
+
+    bool resource_is_written(std::string_view name) const {
+        for (const auto& lvalue : module_.lvalues) {
+            if (lvalue.kind == kLValueResourceElement && string(lvalue.name_id) == name)
+                return true;
+        }
+        return false;
+    }
+
+    bool begin_ad_scope() {
+        for (auto& [_, resource] : ad_resources_) {
+            auto* parameter_type = Type::array(resource.source->element_type, resource.element_count);
+            std::vector<Value*> elements;
+            elements.reserve(resource.element_count);
+            for (uint32_t i = 0u; i < resource.element_count; ++i) {
+                elements.emplace_back(builder_.call(
+                    resource.source->element_type, ResourceReadOp::BUFFER_READ,
+                    {resource.source->argument, index_constant(i)}));
+            }
+            resource.parameter = builder_.call(parameter_type, ArithmeticOp::AGGREGATE, elements);
+            builder_.call(Type::of<void>(), AutodiffIntrinsicOp::AUTODIFF_REQUIRES_GRADIENT,
+                          {resource.parameter});
+        }
+        return true;
     }
 
     bool finish_ad_scope() {
@@ -600,15 +854,18 @@ class Lowerer {
 
         auto* dispatch_id = xir_module_.create_dispatch_id();
         auto* thread = extract(dispatch_id, Type::of<uint32_t>(), {index_constant(0u)});
-        for (const auto& read : ad_reads_) {
-            auto* gradient = builder_.call(read.value->type(), AutodiffIntrinsicOp::AUTODIFF_GRADIENT, {read.value});
-            auto* count = index_constant(read.resource->element_count);
+        for (const auto& [_, resource] : ad_resources_) {
+            auto* gradient_type = Type::array(resource.source->element_type, resource.element_count);
+            auto* gradient = builder_.call(gradient_type, AutodiffIntrinsicOp::AUTODIFF_GRADIENT,
+                                           {resource.parameter});
+            auto* count = index_constant(resource.element_count);
             auto* base = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {thread, count});
-            auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {base, read.index});
-            auto* old = builder_.call(read.value->type(), ResourceReadOp::BUFFER_READ,
-                                      {read.resource->gradient, index});
-            auto* sum = builder_.call(read.value->type(), ArithmeticOp::BINARY_ADD, {old, gradient});
-            builder_.call(ResourceWriteOp::BUFFER_WRITE, {read.resource->gradient, index, sum});
+            for (uint32_t i = 0u; i < resource.element_count; ++i) {
+                auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD,
+                                            {base, index_constant(i)});
+                auto* element = extract(gradient, resource.source->element_type, {index_constant(i)});
+                builder_.call(ResourceWriteOp::BUFFER_WRITE, {resource.gradient, index, element});
+            }
         }
         return true;
     }
@@ -677,11 +934,13 @@ class Lowerer {
         for (auto& [name, callable] : callables_) {
             const auto& source = module_.functions[callable.function_id];
             auto saved_locals = std::move(locals_);
+            auto saved_constant_integers = std::move(constant_integers_);
             auto saved_resources = std::move(resources_);
             auto saved_samplers = std::move(samplers_);
             auto saved_shared = std::move(shared_);
             auto saved_loops = std::move(loops_);
             locals_.clear();
+            constant_integers_.clear();
             resources_.clear();
             samplers_.clear();
             shared_.clear();
@@ -706,7 +965,7 @@ class Lowerer {
                                             ? texture_element_type(parameter_type.b)
                                             : type(parameter_type.b);
                         resources_.emplace(parameter_name,
-                            Resource{static_cast<ResourceArgument*>(lowered.argument), element, 0u, kind, access});
+                            Resource{static_cast<ResourceArgument*>(lowered.argument), element, 0u, 0u, kind, access});
                     }
                 } else if (parameter.direction == 0u) {
                     auto* storage = builder_.alloca_local(type(parameter.type_id));
@@ -722,6 +981,7 @@ class Lowerer {
                 else return fail("non-void FEIR callable does not terminate with a return");
             }
             locals_ = std::move(saved_locals);
+            constant_integers_ = std::move(saved_constant_integers);
             resources_ = std::move(saved_resources);
             samplers_ = std::move(saved_samplers);
             shared_ = std::move(saved_shared);
@@ -915,12 +1175,12 @@ class Lowerer {
         return fail("unsupported FEIR numeric conversion"), nullptr;
     }
 
-    Value* matrix_multiply(Value* left, Value* right, const Type* result_type) {
-        auto scalar = [](const Type* value) { return value->is_matrix() ? value->element() : value->element(); };
-        const auto* element = scalar(result_type);
+    Value* matrix_multiply(Value* left, Value* right, const Type* result_type,
+                           bool left_matrix, bool right_matrix, uint32_t dimension) {
+        const auto* element = Type::of<float>();
         auto dot_row = [&](Value* matrix, Value* vector, uint32_t row) -> Value* {
             Value* sum = nullptr;
-            for (uint32_t column = 0; column < matrix->type()->dimension(); ++column) {
+            for (uint32_t column = 0; column < dimension; ++column) {
                 auto* matrix_value = extract(matrix, element, {index_constant(column), index_constant(row)});
                 auto* vector_value = extract(vector, element, {index_constant(column)});
                 auto* product = builder_.call(element, ArithmeticOp::BINARY_MUL, {matrix_value, vector_value});
@@ -930,31 +1190,31 @@ class Lowerer {
         };
         auto multiply_matrix_vector = [&](Value* matrix, Value* vector) -> Value* {
             std::vector<Value*> rows;
-            rows.reserve(matrix->type()->dimension());
-            for (uint32_t row = 0; row < matrix->type()->dimension(); ++row)
+            rows.reserve(dimension);
+            for (uint32_t row = 0; row < dimension; ++row)
                 rows.push_back(dot_row(matrix, vector, row));
-            return builder_.call(Type::vector(element, matrix->type()->dimension()), ArithmeticOp::AGGREGATE, rows);
+            return builder_.call(Type::vector(element, dimension), ArithmeticOp::AGGREGATE, rows);
         };
-        if (left->type()->is_matrix() && right->type()->is_vector())
+        if (left_matrix && !right_matrix)
             return multiply_matrix_vector(left, right);
-        if (left->type()->is_matrix() && right->type()->is_matrix()) {
+        if (left_matrix && right_matrix) {
             std::vector<Value*> columns;
-            columns.reserve(right->type()->dimension());
-            auto* column_type = Type::vector(element, right->type()->dimension());
-            for (uint32_t column = 0; column < right->type()->dimension(); ++column) {
+            columns.reserve(dimension);
+            auto* column_type = Type::vector(element, dimension);
+            for (uint32_t column = 0; column < dimension; ++column) {
                 auto* right_column = extract(right, column_type, {index_constant(column)});
                 columns.push_back(multiply_matrix_vector(left, right_column));
             }
             return builder_.call(result_type, ArithmeticOp::AGGREGATE, columns);
         }
-        if (left->type()->is_vector() && right->type()->is_matrix()) {
+        if (!left_matrix && right_matrix) {
             std::vector<Value*> values;
-            values.reserve(right->type()->dimension());
-            auto* column_type = Type::vector(element, right->type()->dimension());
-            for (uint32_t column = 0; column < right->type()->dimension(); ++column) {
+            values.reserve(dimension);
+            auto* column_type = Type::vector(element, dimension);
+            for (uint32_t column = 0; column < dimension; ++column) {
                 auto* right_column = extract(right, column_type, {index_constant(column)});
                 Value* sum = nullptr;
-                for (uint32_t row = 0; row < right->type()->dimension(); ++row) {
+                for (uint32_t row = 0; row < dimension; ++row) {
                     auto* a = extract(left, element, {index_constant(row)});
                     auto* b = extract(right_column, element, {index_constant(row)});
                     auto* product = builder_.call(element, ArithmeticOp::BINARY_MUL, {a, b});
@@ -998,7 +1258,19 @@ class Lowerer {
             return literal(expression, result_type);
         case kExpressionLocal:
         case kExpressionParameter: {
-            const auto found = locals_.find(std::string{string(expression.name_id)});
+            auto name = std::string{string(expression.name_id)};
+            if (ad_inputs_ != nullptr && is_integer_type(expression.type_id)) {
+                if (const auto constant = constant_integers_.find(name);
+                    constant != constant_integers_.end()) {
+                    if (module_.types[expression.type_id].a == 1u) {
+                        const auto value = static_cast<int32_t>(constant->second);
+                        return xir_module_.create_constant(result_type, &value);
+                    }
+                    const auto value = static_cast<uint32_t>(constant->second);
+                    return xir_module_.create_constant(result_type, &value);
+                }
+            }
+            const auto found = locals_.find(name);
             return found == locals_.end() ? (fail("FEIR references an unknown local"), nullptr)
                                           : builder_.load(result_type, found->second);
         }
@@ -1019,7 +1291,8 @@ class Lowerer {
             index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
             return track_ad_read(found->second, index,
                                  builder_.call(result_type, ResourceReadOp::BUFFER_READ,
-                                               {found->second.argument, index}));
+                                               {found->second.argument, index}),
+                                 expression.a);
         }
         case kExpressionUnary: {
             auto* value = lower_expression(expression.a);
@@ -1036,8 +1309,16 @@ class Lowerer {
             auto* right = lower_expression(expression.b);
             auto op = binary_op(expression.op);
             if (left == nullptr || right == nullptr || !op) return fail("invalid FEIR binary operation"), nullptr;
-            if (expression.op == 2u && (left->type()->is_matrix() || right->type()->is_matrix()))
-                return matrix_multiply(left, right, result_type);
+            const auto left_matrix = expression.a < module_.expressions.size() &&
+                                     is_feir_matrix_type(module_.expressions[expression.a].type_id);
+            const auto right_matrix = expression.b < module_.expressions.size() &&
+                                      is_feir_matrix_type(module_.expressions[expression.b].type_id);
+            if (expression.op == 2u && (left_matrix || right_matrix)) {
+                const auto dimension = left_matrix
+                                           ? feir_matrix_dimension(module_.expressions[expression.a].type_id)
+                                           : feir_matrix_dimension(module_.expressions[expression.b].type_id);
+                return matrix_multiply(left, right, result_type, left_matrix, right_matrix, dimension);
+            }
             if (is_shift_op(*op)) return builder_.call(result_type, *op, {splat_to(left, result_type), right});
             return builder_.call(result_type, *op, {splat_to(left, result_type), splat_to(right, result_type)});
         }
@@ -1073,7 +1354,33 @@ class Lowerer {
         case kExpressionConstructor: {
             auto values = arguments(expression);
             if (values.empty()) return fail("FEIR aggregate constructor requires arguments"), nullptr;
-            if (values.size() == 1u && values.front()->type()->is_scalar() && result_type->is_vector()) {
+            if (is_feir_matrix_type(expression.type_id)) {
+                const auto dimension = feir_matrix_dimension(expression.type_id);
+                if (values.size() == dimension * dimension &&
+                    std::all_of(values.begin(), values.end(), [](const auto* value) {
+                        return value->type()->is_scalar();
+                    })) {
+                    std::vector<Value*> columns;
+                    columns.reserve(dimension);
+                    const auto* column_type = result_type->is_matrix()
+                                                  ? Type::vector(result_type->element(), dimension)
+                                                  : result_type->element();
+                    for (uint32_t column = 0u; column < dimension; ++column) {
+                        const auto first = values.begin() + static_cast<std::ptrdiff_t>(column * dimension);
+                        std::vector<Value*> column_values(
+                            first, first + static_cast<std::ptrdiff_t>(dimension));
+                        columns.push_back(builder_.call(column_type, ArithmeticOp::AGGREGATE, column_values));
+                    }
+                    values = std::move(columns);
+                }
+                const auto* column_type = result_type->is_matrix()
+                                              ? Type::vector(result_type->element(), dimension)
+                                              : result_type->element();
+                if (values.size() != dimension ||
+                    std::any_of(values.begin(), values.end(), [&](const auto* value) {
+                        return value->type() != column_type;
+                    })) return fail("FEIR matrix constructor requires column vectors or column-major scalars"), nullptr;
+            } else if (values.size() == 1u && values.front()->type()->is_scalar() && result_type->is_vector()) {
                 values.resize(result_type->dimension(), values.front());
             } else if (result_type->is_vector()) {
                 std::vector<Value*> flattened;
@@ -1112,7 +1419,8 @@ class Lowerer {
                         index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
                         return track_ad_read(resource->second, index,
                                              builder_.call(result_type, ResourceReadOp::BUFFER_READ,
-                                                           {resource->second.argument, index}));
+                                                           {resource->second.argument, index}),
+                                             expression.b);
                     }
                 }
             }
@@ -1499,8 +1807,20 @@ class Lowerer {
                     values[i] = builder_.call(result_type, ArithmeticOp::AGGREGATE, splat);
                 }
         }
-        if (*op == ArithmeticOp::MATRIX_LINALG_MUL && values.size() == 2u)
-            return matrix_multiply(values[0], values[1], result_type);
+        if (*op == ArithmeticOp::MATRIX_LINALG_MUL && values.size() == 2u) {
+            if (expression.first_argument == TypedIR::NoIndex || expression.first_argument > module_.arguments.size() ||
+                expression.argument_count > module_.arguments.size() - expression.first_argument)
+                return fail("matrix multiplication has an invalid FEIR argument range"), nullptr;
+            const auto left_id = module_.arguments[expression.first_argument];
+            const auto right_id = module_.arguments[expression.first_argument + 1u];
+            if (left_id >= module_.expressions.size() || right_id >= module_.expressions.size())
+                return fail("matrix multiplication has an invalid FEIR argument"), nullptr;
+            const auto left_matrix = is_feir_matrix_type(module_.expressions[left_id].type_id);
+            const auto right_matrix = is_feir_matrix_type(module_.expressions[right_id].type_id);
+            const auto dimension = left_matrix ? feir_matrix_dimension(module_.expressions[left_id].type_id)
+                                               : feir_matrix_dimension(module_.expressions[right_id].type_id);
+            return matrix_multiply(values[0], values[1], result_type, left_matrix, right_matrix, dimension);
+        }
         return builder_.call(result_type, *op, values);
     }
 
@@ -1524,6 +1844,7 @@ class Lowerer {
                 index = convert(index, Type::vector(Type::of<uint32_t>(), dimension));
             } else index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
             return Address{.resource = &found->second, .resource_index = index,
+                           .resource_index_expression = lvalue.a,
                            .root_type = found->second.element_type};
         }
         if (lvalue.kind == kLValueSharedMemoryElement) {
@@ -1546,6 +1867,7 @@ class Lowerer {
                         index = convert(index, Type::vector(Type::of<uint32_t>(), dimension));
                     } else index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
                     base->resource_index = index;
+                    base->resource_index_expression = lvalue.b;
                 } else base->indices.push_back(index);
             } else {
                 auto field = field_index(module_.lvalues[lvalue.a].type_id, string(lvalue.name_id));
@@ -1573,6 +1895,7 @@ class Lowerer {
             if (found == resources_.end() || index == nullptr) return std::nullopt;
             index = builder_.static_cast_if_necessary(Type::of<uint32_t>(), index);
             return Address{.resource = &found->second, .resource_index = index,
+                           .resource_index_expression = expression.a,
                            .root_type = found->second.element_type};
         }
         if (expression.kind == kExpressionField || expression.kind == kExpressionMemberAccess ||
@@ -1608,7 +1931,8 @@ class Lowerer {
                                  {address.resource->argument, address.resource_index});
         } else root = track_ad_read(*address.resource, address.resource_index,
                                     builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
-                                                  {address.resource->argument, address.resource_index}));
+                                                  {address.resource->argument, address.resource_index}),
+                                    address.resource_index_expression);
         return address.indices.empty() ? root : extract(root, result_type, address.indices);
     }
 
@@ -1630,11 +1954,18 @@ class Lowerer {
             return true;
         }
         if (!address.indices.empty()) {
-            auto* root = builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
-                                       {address.resource->argument, address.resource_index});
+            auto* root = track_ad_read(*address.resource, address.resource_index,
+                                       builder_.call(address.root_type, ResourceReadOp::BUFFER_READ,
+                                                     {address.resource->argument, address.resource_index}),
+                                       address.resource_index_expression);
             std::vector<Value*> operands{root, value};
             operands.insert(operands.end(), address.indices.begin(), address.indices.end());
             value = builder_.call(address.root_type, ArithmeticOp::INSERT, operands);
+        }
+        if (inside_ad_scope_) {
+            if (auto* slot = ad_local_slot(*address.resource, address.resource_index,
+                                           address.resource_index_expression, nullptr);
+                slot != nullptr) builder_.store(slot, value);
         }
         builder_.call(ResourceWriteOp::BUFFER_WRITE, {address.resource->argument, address.resource_index, value});
         return true;
@@ -1680,6 +2011,348 @@ class Lowerer {
         return true;
     }
 
+    bool is_integer_type(uint32_t type_id) const {
+        return type_id < module_.types.size() && module_.types[type_id].kind == kTypePrimitive &&
+               module_.types[type_id].b == 32u &&
+               (module_.types[type_id].a == 1u || module_.types[type_id].a == 2u);
+    }
+
+    static std::optional<int64_t> checked_add(int64_t left, int64_t right) {
+        if ((right > 0 && left > std::numeric_limits<int64_t>::max() - right) ||
+            (right < 0 && left < std::numeric_limits<int64_t>::min() - right)) return std::nullopt;
+        return left + right;
+    }
+
+    static std::optional<int64_t> checked_subtract(int64_t left, int64_t right) {
+        if ((right < 0 && left > std::numeric_limits<int64_t>::max() + right) ||
+            (right > 0 && left < std::numeric_limits<int64_t>::min() + right)) return std::nullopt;
+        return left - right;
+    }
+
+    static std::optional<int64_t> checked_multiply(int64_t left, int64_t right) {
+        if (left == 0 || right == 0) return 0;
+        if ((left == -1 && right == std::numeric_limits<int64_t>::min()) ||
+            (right == -1 && left == std::numeric_limits<int64_t>::min())) return std::nullopt;
+        if (left > 0) {
+            if ((right > 0 && left > std::numeric_limits<int64_t>::max() / right) ||
+                (right < 0 && right < std::numeric_limits<int64_t>::min() / left)) return std::nullopt;
+        } else {
+            if ((right > 0 && left < std::numeric_limits<int64_t>::min() / right) ||
+                (right < 0 && left < std::numeric_limits<int64_t>::max() / right)) return std::nullopt;
+        }
+        return left * right;
+    }
+
+    std::optional<int64_t> integer_expression(uint32_t id) const {
+        if (id >= module_.expressions.size()) return std::nullopt;
+        const auto& expression = module_.expressions[id];
+        if (!is_integer_type(expression.type_id) && expression.kind != kExpressionConversion) return std::nullopt;
+        switch (expression.kind) {
+        case kExpressionLiteral: {
+            auto text = string(expression.name_id);
+            if (!text.empty() && (text.back() == 'u' || text.back() == 'U')) text.remove_suffix(1u);
+            int64_t value{};
+            auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+            return ec == std::errc{} && end == text.data() + text.size() ? std::optional{value} : std::nullopt;
+        }
+        case kExpressionLocal:
+        case kExpressionParameter: {
+            const auto found = constant_integers_.find(std::string{string(expression.name_id)});
+            return found == constant_integers_.end() ? std::nullopt : std::optional{found->second};
+        }
+        case kExpressionPushConstant: {
+            if (inputs_.dynamic_push_constants || !is_integer_type(expression.type_id)) return std::nullopt;
+            const TypedIR::PushConstantInfo* found = nullptr;
+            for (const auto& push : inputs_.push_constants)
+                if (push.binding == expression.op) found = &push;
+            if (found == nullptr || found->data == nullptr || found->size < sizeof(uint32_t)) return std::nullopt;
+            if (module_.types[expression.type_id].a == 1u) {
+                int32_t value{};
+                std::memcpy(&value, found->data, sizeof(value));
+                return value;
+            }
+            uint32_t value{};
+            std::memcpy(&value, found->data, sizeof(value));
+            return value;
+        }
+        case kExpressionUnary: {
+            auto value = integer_expression(expression.a);
+            if (!value) return std::nullopt;
+            if (expression.op == 0u) return checked_subtract(0, *value);
+            if (expression.op == 2u) return ~*value;
+            return std::nullopt;
+        }
+        case kExpressionBinary: {
+            auto left = integer_expression(expression.a);
+            auto right = integer_expression(expression.b);
+            if (!left || !right) return std::nullopt;
+            switch (expression.op) {
+            case 0u: return checked_add(*left, *right);
+            case 1u: return checked_subtract(*left, *right);
+            case 2u: return checked_multiply(*left, *right);
+            case 3u:
+                if (*right == 0 || (*left == std::numeric_limits<int64_t>::min() && *right == -1))
+                    return std::nullopt;
+                return *left / *right;
+            case 4u:
+                if (*right == 0 || (*left == std::numeric_limits<int64_t>::min() && *right == -1))
+                    return std::nullopt;
+                return *left % *right;
+            default: return std::nullopt;
+            }
+        }
+        case kExpressionConversion:
+            return integer_expression(expression.a);
+        default:
+            return std::nullopt;
+        }
+    }
+
+    static bool compare_integers(uint32_t op, int64_t left, int64_t right) {
+        switch (op) {
+        case 0u: return left == right;
+        case 1u: return left != right;
+        case 2u: return left < right;
+        case 3u: return left <= right;
+        case 4u: return left > right;
+        case 5u: return left >= right;
+        default: return false;
+        }
+    }
+
+    const TypedIR::Statement* single_statement(uint32_t id) const {
+        if (id >= module_.statements.size()) return nullptr;
+        const auto* statement = &module_.statements[id];
+        while (statement->kind == kStatementBlock) {
+            if (statement->child_count != 1u || statement->first_child == TypedIR::NoIndex ||
+                statement->first_child >= module_.children.size()) return nullptr;
+            id = module_.children[statement->first_child];
+            if (id >= module_.statements.size()) return nullptr;
+            statement = &module_.statements[id];
+        }
+        return statement;
+    }
+
+    std::optional<std::string> direct_local_lvalue(uint32_t id) const {
+        if (id >= module_.lvalues.size()) return std::nullopt;
+        const auto& lvalue = module_.lvalues[id];
+        if (lvalue.kind != kLValueLocal && lvalue.kind != kLValueParameter) return std::nullopt;
+        auto name = std::string{string(lvalue.name_id)};
+        return name.empty() ? std::nullopt : std::optional{std::move(name)};
+    }
+
+    bool expression_references_local(uint32_t id, std::string_view name) const {
+        if (id >= module_.expressions.size()) return false;
+        const auto& expression = module_.expressions[id];
+        if ((expression.kind == kExpressionLocal || expression.kind == kExpressionParameter) &&
+            string(expression.name_id) == name) return true;
+        if (expression.a != TypedIR::NoIndex && expression_references_local(expression.a, name)) return true;
+        if (expression.b != TypedIR::NoIndex && expression_references_local(expression.b, name)) return true;
+        if (expression.c != TypedIR::NoIndex && expression_references_local(expression.c, name)) return true;
+        if (expression.first_argument != TypedIR::NoIndex &&
+            expression.first_argument <= module_.arguments.size() &&
+            expression.argument_count <= module_.arguments.size() - expression.first_argument) {
+            for (uint32_t i = 0u; i < expression.argument_count; ++i)
+                if (expression_references_local(module_.arguments[expression.first_argument + i], name)) return true;
+        }
+        return false;
+    }
+
+    bool statement_contains_loop_control(uint32_t id) const {
+        if (id >= module_.statements.size()) return true;
+        const auto& statement = module_.statements[id];
+        if (statement.kind == kStatementBreak || statement.kind == kStatementContinue) return true;
+        auto contains = [&](uint32_t child) {
+            return child != TypedIR::NoIndex && statement_contains_loop_control(child);
+        };
+        switch (statement.kind) {
+        case kStatementBlock:
+            if (statement.child_count != 0u &&
+                (statement.first_child == TypedIR::NoIndex || statement.first_child > module_.children.size() ||
+                 statement.child_count > module_.children.size() - statement.first_child)) return true;
+            for (uint32_t i = 0u; i < statement.child_count; ++i)
+                if (statement_contains_loop_control(module_.children[statement.first_child + i])) return true;
+            return false;
+        case kStatementIf: return contains(statement.b) || contains(statement.c);
+        case kStatementFor: return contains(statement.a) || contains(statement.c) || contains(statement.op);
+        case kStatementWhile: return contains(statement.b);
+        case kStatementDoWhile: return contains(statement.a);
+        default: return false;
+        }
+    }
+
+    bool statement_writes_local(uint32_t id, std::string_view name) const {
+        if (id >= module_.statements.size()) return true;
+        const auto& statement = module_.statements[id];
+        if (statement.kind == kStatementLocalDeclaration && string(statement.name_id) == name) return true;
+        if (statement.kind == kStatementAssignment || statement.kind == kStatementCompoundAssignment ||
+            statement.kind == kStatementIncrementDecrement) {
+            auto target = direct_local_lvalue(statement.a);
+            if (target && *target == name) return true;
+        }
+        auto writes = [&](uint32_t child) {
+            return child != TypedIR::NoIndex && statement_writes_local(child, name);
+        };
+        switch (statement.kind) {
+        case kStatementBlock:
+            if (statement.child_count != 0u &&
+                (statement.first_child == TypedIR::NoIndex || statement.first_child > module_.children.size() ||
+                 statement.child_count > module_.children.size() - statement.first_child)) return true;
+            for (uint32_t i = 0u; i < statement.child_count; ++i)
+                if (statement_writes_local(module_.children[statement.first_child + i], name)) return true;
+            return false;
+        case kStatementIf: return writes(statement.b) || writes(statement.c);
+        case kStatementFor: return writes(statement.a) || writes(statement.c) || writes(statement.op);
+        case kStatementWhile: return writes(statement.b);
+        case kStatementDoWhile: return writes(statement.a);
+        default: return false;
+        }
+    }
+
+    std::optional<int64_t> for_step(const TypedIR::Statement& statement, std::string_view induction) const {
+        const auto* step = single_statement(statement.c);
+        if (step == nullptr) return std::nullopt;
+        auto target = direct_local_lvalue(step->a);
+        if (!target || *target != induction) return std::nullopt;
+        if (step->kind == kStatementIncrementDecrement)
+            return (step->op & 1u) != 0u ? 1 : -1;
+        if (step->kind == kStatementCompoundAssignment && (step->op == 0u || step->op == 1u)) {
+            auto amount = integer_expression(step->b);
+            if (!amount) return std::nullopt;
+            return step->op == 0u ? amount : checked_subtract(0, *amount);
+        }
+        if (step->kind != kStatementAssignment || step->b >= module_.expressions.size()) return std::nullopt;
+        const auto& value = module_.expressions[step->b];
+        if (value.kind != kExpressionBinary || (value.op != 0u && value.op != 1u)) return std::nullopt;
+        const auto references = [&](uint32_t id) {
+            return id < module_.expressions.size() &&
+                   (module_.expressions[id].kind == kExpressionLocal ||
+                    module_.expressions[id].kind == kExpressionParameter) &&
+                   string(module_.expressions[id].name_id) == induction;
+        };
+        if (references(value.a)) {
+            auto amount = integer_expression(value.b);
+            if (!amount) return std::nullopt;
+            return value.op == 0u ? amount : checked_subtract(0, *amount);
+        }
+        if (value.op == 0u && references(value.b)) return integer_expression(value.a);
+        return std::nullopt;
+    }
+
+    struct StaticForLoop { uint32_t trip_count = 0u; };
+
+    std::optional<StaticForLoop> analyze_static_for(const TypedIR::Statement& statement) const {
+        if (statement.a == TypedIR::NoIndex || statement.b == TypedIR::NoIndex ||
+            statement.c == TypedIR::NoIndex || statement.op == TypedIR::NoIndex ||
+            statement_contains_loop_control(statement.op)) return std::nullopt;
+        const auto* initializer = single_statement(statement.a);
+        if (initializer == nullptr) return std::nullopt;
+        std::string induction;
+        uint32_t induction_type = TypedIR::NoIndex;
+        uint32_t initial_expression = TypedIR::NoIndex;
+        if (initializer->kind == kStatementLocalDeclaration) {
+            induction = std::string{string(initializer->name_id)};
+            induction_type = initializer->op;
+            initial_expression = initializer->a;
+        } else if (initializer->kind == kStatementAssignment) {
+            auto target = direct_local_lvalue(initializer->a);
+            if (!target) return std::nullopt;
+            induction = std::move(*target);
+            induction_type = module_.lvalues[initializer->a].type_id;
+            initial_expression = initializer->b;
+        } else return std::nullopt;
+        if (induction.empty() || !is_integer_type(induction_type) ||
+            initial_expression == TypedIR::NoIndex || statement_writes_local(statement.op, induction))
+            return std::nullopt;
+        auto initial = integer_expression(initial_expression);
+        auto step = for_step(statement, induction);
+        if (!initial || !step || *step == 0 || statement.b >= module_.expressions.size()) return std::nullopt;
+        const auto& condition = module_.expressions[statement.b];
+        if (condition.kind != kExpressionComparison || condition.op > 5u) return std::nullopt;
+        const auto is_induction = [&](uint32_t id) {
+            return id < module_.expressions.size() &&
+                   (module_.expressions[id].kind == kExpressionLocal ||
+                    module_.expressions[id].kind == kExpressionParameter) &&
+                   string(module_.expressions[id].name_id) == induction;
+        };
+        const auto induction_left = is_induction(condition.a);
+        const auto induction_right = is_induction(condition.b);
+        if (induction_left == induction_right) return std::nullopt;
+        const auto bound_id = induction_left ? condition.b : condition.a;
+        if (expression_references_local(bound_id, induction)) return std::nullopt;
+        auto bound = integer_expression(bound_id);
+        if (!bound) return std::nullopt;
+        const auto unsigned_induction = module_.types[induction_type].a == 2u;
+        auto in_range = [&](int64_t value) {
+            return unsigned_induction ? value >= 0 && value <= std::numeric_limits<uint32_t>::max()
+                                      : value >= std::numeric_limits<int32_t>::min() &&
+                                            value <= std::numeric_limits<int32_t>::max();
+        };
+        if (!in_range(*initial)) return std::nullopt;
+        auto value = *initial;
+        for (uint32_t trips = 0u; trips <= 64u; ++trips) {
+            const auto condition_true = induction_left
+                                            ? compare_integers(condition.op, value, *bound)
+                                            : compare_integers(condition.op, *bound, value);
+            if (!condition_true) return StaticForLoop{trips};
+            if (trips == 64u) return std::nullopt;
+            auto next = checked_add(value, *step);
+            if (!next || !in_range(*next)) return std::nullopt;
+            value = *next;
+        }
+        return std::nullopt;
+    }
+
+    void update_constant_integer(const TypedIR::Statement& statement,
+                                 std::optional<int64_t> value = std::nullopt) {
+        if (ad_inputs_ == nullptr) return;
+        std::optional<std::string> name;
+        if (statement.kind == kStatementLocalDeclaration) {
+            auto local = std::string{string(statement.name_id)};
+            if (!local.empty()) name = std::move(local);
+        } else if (statement.kind == kStatementAssignment ||
+                   statement.kind == kStatementCompoundAssignment ||
+                   statement.kind == kStatementIncrementDecrement) {
+            name = direct_local_lvalue(statement.a);
+        }
+        if (!name) return;
+        if (value) constant_integers_[*name] = *value;
+        else constant_integers_.erase(*name);
+    }
+
+    std::optional<int64_t> assigned_integer_value(const TypedIR::Statement& statement) const {
+        if (ad_inputs_ == nullptr) return std::nullopt;
+        if (statement.kind == kStatementLocalDeclaration)
+            return is_integer_type(statement.op) && statement.a != TypedIR::NoIndex
+                       ? integer_expression(statement.a)
+                       : std::nullopt;
+        auto name = direct_local_lvalue(statement.a);
+        if (!name || statement.a >= module_.lvalues.size() ||
+            !is_integer_type(module_.lvalues[statement.a].type_id)) return std::nullopt;
+        if (statement.kind == kStatementAssignment) return integer_expression(statement.b);
+        const auto old = constant_integers_.find(*name);
+        if (old == constant_integers_.end()) return std::nullopt;
+        if (statement.kind == kStatementIncrementDecrement)
+            return (statement.op & 1u) != 0u ? checked_add(old->second, 1) : checked_subtract(old->second, 1);
+        if (statement.kind != kStatementCompoundAssignment) return std::nullopt;
+        auto right = integer_expression(statement.b);
+        if (!right) return std::nullopt;
+        switch (statement.op) {
+        case 0u: return checked_add(old->second, *right);
+        case 1u: return checked_subtract(old->second, *right);
+        case 2u: return checked_multiply(old->second, *right);
+        case 3u:
+            if (*right == 0 || (old->second == std::numeric_limits<int64_t>::min() && *right == -1))
+                return std::nullopt;
+            return old->second / *right;
+        case 4u:
+            if (*right == 0 || (old->second == std::numeric_limits<int64_t>::min() && *right == -1))
+                return std::nullopt;
+            return old->second % *right;
+        default: return std::nullopt;
+        }
+    }
+
     bool lower_statement(uint32_t id) {
         if (id >= module_.statements.size()) return fail("FEIR statement index is out of range");
         const auto& statement = module_.statements[id];
@@ -1697,6 +2370,7 @@ class Lowerer {
             auto name = std::string{string(statement.name_id)};
             auto* local_type = type(statement.op);
             if (name.empty() || local_type == nullptr) return fail("invalid FEIR local declaration");
+            auto constant = assigned_integer_value(statement);
             auto* local = builder_.alloca_local(local_type);
             local->set_name(name);
             locals_[name] = local;
@@ -1705,6 +2379,7 @@ class Lowerer {
                 if (initial == nullptr) return false;
                 builder_.store(local, initial);
             }
+            update_constant_integer(statement, constant);
             return true;
         }
         case kStatementSharedMemoryDeclaration: {
@@ -1720,6 +2395,7 @@ class Lowerer {
         case kStatementAssignment:
         case kStatementCompoundAssignment:
         case kStatementIncrementDecrement: {
+            auto constant = assigned_integer_value(statement);
             auto target = address(statement.a);
             if (!target) return false;
             auto* value_type = type(module_.lvalues[statement.a].type_id);
@@ -1742,22 +2418,48 @@ class Lowerer {
                     op = (statement.op & 1u) != 0u ? ArithmeticOp::BINARY_ADD : ArithmeticOp::BINARY_SUB;
                 } else right = lower_expression(statement.b);
                 if (old == nullptr || right == nullptr || !op) return fail("invalid FEIR compound assignment");
-                if (*op == ArithmeticOp::BINARY_MUL && (old->type()->is_matrix() || right->type()->is_matrix()))
-                    value = matrix_multiply(old, right, value_type);
-                else if (is_shift_op(*op)) value = builder_.call(value_type, *op, {old, right});
+                const auto left_matrix = is_feir_matrix_type(module_.lvalues[statement.a].type_id);
+                const auto right_matrix = statement.b < module_.expressions.size() &&
+                                          is_feir_matrix_type(module_.expressions[statement.b].type_id);
+                if (*op == ArithmeticOp::BINARY_MUL && (left_matrix || right_matrix)) {
+                    const auto dimension = left_matrix
+                                               ? feir_matrix_dimension(module_.lvalues[statement.a].type_id)
+                                               : feir_matrix_dimension(module_.expressions[statement.b].type_id);
+                    value = matrix_multiply(old, right, value_type, left_matrix, right_matrix, dimension);
+                } else if (is_shift_op(*op)) value = builder_.call(value_type, *op, {old, right});
                 else value = builder_.call(value_type, *op, {splat_to(old, value_type), splat_to(right, value_type)});
             }
-            return value != nullptr && write_address(*target, value_type, value);
+            if (value == nullptr || !write_address(*target, value_type, value)) return false;
+            update_constant_integer(statement, constant);
+            return true;
         }
         case kStatementIf:
             return lower_if(statement);
-        case kStatementFor:
+        case kStatementFor: {
+            auto unrolled = ad_inputs_ == nullptr ? std::nullopt : analyze_static_for(statement);
             if (statement.a != TypedIR::NoIndex && !lower_statement(statement.a)) return false;
-            return lower_loop(statement.op, statement.b, statement.c, false);
-        case kStatementWhile:
-            return lower_loop(statement.b, statement.a, TypedIR::NoIndex, false);
-        case kStatementDoWhile:
-            return lower_loop(statement.a, statement.b, TypedIR::NoIndex, true);
+            if (unrolled) {
+                for (uint32_t i = 0u; i < unrolled->trip_count; ++i) {
+                    if (!lower_statement(statement.op)) return false;
+                    if (builder_.is_insertion_point_terminator()) return true;
+                    if (!lower_statement(statement.c)) return false;
+                }
+                return true;
+            }
+            auto result = lower_loop(statement.op, statement.b, statement.c, false);
+            if (ad_inputs_ != nullptr) constant_integers_.clear();
+            return result;
+        }
+        case kStatementWhile: {
+            auto result = lower_loop(statement.b, statement.a, TypedIR::NoIndex, false);
+            if (ad_inputs_ != nullptr) constant_integers_.clear();
+            return result;
+        }
+        case kStatementDoWhile: {
+            auto result = lower_loop(statement.a, statement.b, TypedIR::NoIndex, true);
+            if (ad_inputs_ != nullptr) constant_integers_.clear();
+            return result;
+        }
         case kStatementBreak:
             if (loops_.empty()) return fail("FEIR break appears outside a loop");
             builder_.break_(loops_.back().break_target);
@@ -1819,15 +2521,25 @@ class Lowerer {
     bool lower_if(const TypedIR::Statement& statement) {
         auto* condition = lower_expression(statement.a);
         if (condition == nullptr) return false;
+        auto constants_before = constant_integers_;
         auto* branch = builder_.if_(builder_.static_cast_if_necessary(Type::of<bool>(), condition));
         auto* merge = branch->create_merge_block();
         builder_.set_insertion_point(branch->create_true_block());
         if (!lower_statement(statement.b)) return false;
+        auto constants_true = constant_integers_;
         if (!builder_.is_insertion_point_terminator()) builder_.br(merge);
         builder_.set_insertion_point(branch->create_false_block());
+        constant_integers_ = constants_before;
         if (statement.c != TypedIR::NoIndex && !lower_statement(statement.c)) return false;
+        auto constants_false = constant_integers_;
         if (!builder_.is_insertion_point_terminator()) builder_.br(merge);
         builder_.set_insertion_point(merge);
+        constant_integers_.clear();
+        for (const auto& [name, value] : constants_true) {
+            const auto found = constants_false.find(name);
+            if (found != constants_false.end() && found->second == value)
+                constant_integers_.emplace(name, value);
+        }
         return true;
     }
 
@@ -1887,11 +2599,12 @@ class Lowerer {
     std::unordered_map<std::string, Sampler> samplers_;
     std::unordered_map<std::string, CallableRecord> callables_;
     std::unordered_map<std::string, Value*> locals_;
+    std::unordered_map<std::string, int64_t> constant_integers_;
     struct SharedMemory { Value* pointer; uint32_t length; };
     std::unordered_map<std::string, SharedMemory> shared_;
     std::vector<LoopTargets> loops_;
     std::unordered_map<uint32_t, AdResource> ad_resources_;
-    std::vector<AdRead> ad_reads_;
+    std::unordered_map<uint32_t, AdLocalBuffer> ad_local_buffers_;
     bool inside_ad_scope_ = false;
     bool uses_group_semantics_ = false;
     Resource* stage_input_ = nullptr;

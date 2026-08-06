@@ -2127,6 +2127,11 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
     }
     if (!cache_hit && ad_inputs != nullptr) {
+        auto preinline_destructured = destructure_cfg_pass_run_on_module(xir_module.get());
+        if (preinline_destructured.error_count != 0u) {
+            if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before AD callable inlining";
+            return false;
+        }
         auto inlined =
             inline_all_pass_run_on_module(xir_module.get(), InlineOptions{.allow_autodiff_scope_in_caller = true});
         if (inlined.skipped_recursive_callable_count != 0u ||
@@ -2136,7 +2141,6 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             if (error != nullptr) *error = "Luisa could not inline the complete FEIR callable graph before autodiff";
             return false;
         }
-        xir_to_ast_normalize_module(xir_module.get());
         auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
         if (destructured.error_count != 0u) {
             if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
@@ -2162,7 +2166,18 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             return false;
         }
-        xir_to_ast_normalize_module(xir_module.get());
+        auto ad_destructured = destructure_cfg_pass_run_on_module(xir_module.get());
+        if (ad_destructured.error_count != 0u) {
+            if (error != nullptr) *error = "Luisa failed to destructure autodiff output for AST translation";
+            return false;
+        }
+        static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
+        auto ad_restructured = restructure_cfg_pass_run_on_module(xir_module.get());
+        if (!ad_restructured.succeeded()) {
+            if (error != nullptr) *error = "Luisa failed to restructure autodiff output for AST translation";
+            return false;
+        }
+        static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
     }
     std::unique_ptr<Shader3D<>> shader;
     if (!cache_hit) {
@@ -2175,8 +2190,15 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 *error = "Luisa failed to translate generated XIR to its executable AST";
             return false;
         }
+        ShaderOption shader_option{};
+        if (ad_inputs != nullptr && dispatch.backend_name == "vk") {
+            // LC's native Vulkan XIR emitter currently assigns incompatible SPIR-V type IDs to
+            // otherwise identical AD aggregate stores after the executable AST is re-imported.
+            // A non-empty native include selects LC's existing HLSL compatibility route.
+            shader_option.native_include = "// Feather XIR autodiff compatibility route\n";
+        }
         shader = std::make_unique<Shader3D<>>(
-            device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, ShaderOption{}));
+            device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, std::move(shader_option)));
         if (dispatch.shader_cache_key != 0u) {
             auto entry = std::make_unique<RuntimeState::CachedKernel>();
             entry->shader = std::move(shader);
