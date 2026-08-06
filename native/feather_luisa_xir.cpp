@@ -1465,6 +1465,33 @@ class Lowerer {
         }
         auto values = arguments(expression);
         if (!op || values.empty()) return fail("unsupported FEIR intrinsic '" + std::string{string(expression.name_id)} + "'"), nullptr;
+        // Keep domain-invalid logarithm sentinels as runtime values. LC's Metal
+        // AST builder folds a literal Log(negative) to NaN while emitting the
+        // shader, and Metal's literal printer rejects that non-finite constant.
+        // Adding a dynamic zero preserves the runtime result (including NaN for
+        // invalid labels) without making the compiler materialize NaN in MSL.
+        if (*op == ArithmeticOp::LOG && values.front()->type()->is_scalar() &&
+            values.front()->type()->is_float() && expression.argument_count != 0u &&
+            expression.first_argument != TypedIR::NoIndex &&
+            expression.first_argument < module_.arguments.size() &&
+            module_.arguments[expression.first_argument] < module_.expressions.size()) {
+            const auto& argument = module_.expressions[module_.arguments[expression.first_argument]];
+            if (argument.kind == kExpressionLiteral) {
+                auto text = std::string{string(argument.name_id)};
+                char* end = nullptr;
+                const auto literal_value = std::strtof(text.c_str(), &end);
+                if (end != text.c_str() && literal_value < 0.0f) {
+                    auto* dispatch = xir_module_.create_dispatch_id();
+                    auto* lane = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+                    auto* dynamic_lane = builder_.static_cast_if_necessary(Type::of<float>(), lane);
+                    auto* zero = xir_module_.create_constant_zero(Type::of<float>());
+                    auto* dynamic_zero = builder_.call(Type::of<float>(), ArithmeticOp::BINARY_MUL,
+                                                       {dynamic_lane, zero});
+                    values.front() = builder_.call(Type::of<float>(), ArithmeticOp::BINARY_ADD,
+                                                   {values.front(), dynamic_zero});
+                }
+            }
+        }
         if ((*op == ArithmeticOp::MIN || *op == ArithmeticOp::MAX || *op == ArithmeticOp::CLAMP) && result_type->is_vector()) {
             for (size_t i = 1; i < values.size(); ++i)
                 if (values[i]->type()->is_scalar()) {

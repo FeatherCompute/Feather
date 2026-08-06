@@ -164,6 +164,14 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
               std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
 
+bool ReduceAdGradient(uint64_t context_key, std::string_view runtime_directory,
+                      std::string_view backend_name, uint32_t device_index,
+                      std::span<const unsigned char> gradient, uint32_t element_count,
+                      uint32_t component_count, uint64_t destination_key,
+                      std::vector<unsigned char>* destination, uint64_t destination_offset,
+                      uint64_t destination_size, bool upload_destination,
+                      std::string* error = nullptr);
+
 bool PrepareGraphicsFragment(const TypedIR::Module& module,
                              const TypedIR::LoweringInputs& lowering,
                              std::span<HostBufferBinding> buffers,

@@ -1,6 +1,3 @@
-[submodule "EasyGPU"]
-	path = EasyGPU
-	url = https://github.com/EasyGPU/EasyGPU
 [submodule "LuisaCompute"]
 	path = LuisaCompute
 	url = https://github.com/LuisaGroup/LuisaCompute.git

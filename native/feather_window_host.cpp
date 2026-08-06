@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <queue>
 #include <stdexcept>
 #include <variant>
@@ -31,8 +32,8 @@ void trace_window_event(const char* event) {
     }
 }
 
-GPU::Window::ModifierFlags convert_modifiers(int modifiers) noexcept {
-    using GPU::Window::ModifierFlags;
+Window::ModifierFlags convert_modifiers(int modifiers) noexcept {
+    using Window::ModifierFlags;
     auto result = ModifierFlags::None;
     if ((modifiers & GLFW_MOD_SHIFT) != 0)
         result = result | ModifierFlags::Shift;
@@ -49,10 +50,28 @@ GPU::Window::ModifierFlags convert_modifiers(int modifiers) noexcept {
     return result;
 }
 
-class GlfwNativeWindow {
+std::mutex glfw_mutex;
+size_t glfw_users = 0u;
+
+void acquire_glfw() {
+    std::lock_guard lock{glfw_mutex};
+    if (glfw_users == 0u && glfwInit() != GLFW_TRUE) {
+        throw std::runtime_error("Failed to initialize GLFW for Luisa presentation");
+    }
+    ++glfw_users;
+}
+
+void release_glfw() noexcept {
+    std::lock_guard lock{glfw_mutex};
+    if (glfw_users != 0u && --glfw_users == 0u) {
+        glfwTerminate();
+    }
+}
+
+class GlfwWindow {
   private:
     GLFWwindow* window_ = nullptr;
-    std::queue<GPU::Window::WindowEvent> events_;
+    std::queue<Window::Event> events_;
     uint32_t width_ = 0u;
     uint32_t height_ = 0u;
     int32_t mouse_x_ = 0;
@@ -63,24 +82,23 @@ class GlfwNativeWindow {
     bool vsync_ = true;
 
   public:
-    explicit GlfwNativeWindow(const GPU::Window::WindowConfig& config)
+    explicit GlfwWindow(const Window::Config& config)
         : width_{config.width}, height_{config.height}, vsync_{config.vsync} {
-        if (glfwInit() != GLFW_TRUE) {
-            throw std::runtime_error("Failed to initialize GLFW for Luisa presentation");
-        }
+        acquire_glfw();
         glfwDefaultWindowHints();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
         glfwWindowHint(GLFW_VISIBLE, config.visible ? GLFW_TRUE : GLFW_FALSE);
 #if defined(__APPLE__)
-        glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, config.highDPI ? GLFW_TRUE : GLFW_FALSE);
+        glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, config.high_dpi ? GLFW_TRUE : GLFW_FALSE);
 #endif
         window_ = glfwCreateWindow(static_cast<int>(config.width), static_cast<int>(config.height),
                                    config.title.c_str(), nullptr, nullptr);
         if (window_ == nullptr) {
+            release_glfw();
             throw std::runtime_error("Failed to create GLFW window for Luisa presentation");
         }
-        if (config.centerOnCreate) {
+        if (config.center_on_create) {
             if (auto* monitor = glfwGetPrimaryMonitor(); monitor != nullptr) {
                 if (const auto* mode = glfwGetVideoMode(monitor); mode != nullptr) {
                     glfwSetWindowPos(window_, std::max(0, (mode->width - static_cast<int>(config.width)) / 2),
@@ -90,54 +108,54 @@ class GlfwNativeWindow {
         }
         glfwSetWindowUserPointer(window_, this);
         glfwSetWindowSizeCallback(window_, [](GLFWwindow* window, int width, int height) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
             self->width_ = static_cast<uint32_t>(std::max(width, 0));
             self->height_ = static_cast<uint32_t>(std::max(height, 0));
-            self->events_.emplace(GPU::Window::WindowResizeEvent{self->width_, self->height_});
+            self->events_.emplace(Window::ResizeEvent{self->width_, self->height_});
         });
         glfwSetWindowCloseCallback(window_, [](GLFWwindow* window) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
             trace_window_event("native close callback");
             self->open_ = false;
-            self->events_.emplace(GPU::Window::WindowCloseEvent{});
+            self->events_.emplace(Window::CloseEvent{});
         });
         glfwSetWindowFocusCallback(window_, [](GLFWwindow* window, int focused) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
-            self->events_.emplace(GPU::Window::WindowFocusEvent{focused == GLFW_TRUE});
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+            self->events_.emplace(Window::FocusEvent{focused == GLFW_TRUE});
         });
         glfwSetKeyCallback(window_, [](GLFWwindow* window, int key, int, int action, int modifiers) {
             if (action == GLFW_REPEAT)
                 return;
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
-            self->events_.emplace(GPU::Window::KeyEvent{static_cast<GPU::Window::Key>(key), action == GLFW_PRESS,
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+            self->events_.emplace(Window::KeyEvent{static_cast<Window::Key>(key), action == GLFW_PRESS,
                                                         convert_modifiers(modifiers)});
         });
         glfwSetCharCallback(window_, [](GLFWwindow* window, unsigned int codepoint) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
-            self->events_.emplace(GPU::Window::CharInputEvent{codepoint});
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+            self->events_.emplace(Window::CharInputEvent{codepoint});
         });
         glfwSetMouseButtonCallback(window_, [](GLFWwindow* window, int button, int action, int modifiers) {
             if (action == GLFW_REPEAT)
                 return;
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
-            self->events_.emplace(GPU::Window::MouseButtonEvent{static_cast<GPU::Window::MouseButton>(button),
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+            self->events_.emplace(Window::MouseButtonEvent{static_cast<Window::MouseButton>(button),
                                                                 action == GLFW_PRESS, self->mouse_x_, self->mouse_y_,
                                                                 convert_modifiers(modifiers)});
         });
         glfwSetCursorPosCallback(window_, [](GLFWwindow* window, double x, double y) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
             const auto next_x = static_cast<int32_t>(std::lround(x));
             const auto next_y = static_cast<int32_t>(std::lround(y));
             self->events_.emplace(
-                GPU::Window::MouseMoveEvent{next_x, next_y, next_x - self->mouse_x_, next_y - self->mouse_y_});
+                Window::MouseMoveEvent{next_x, next_y, next_x - self->mouse_x_, next_y - self->mouse_y_});
             self->mouse_x_ = next_x;
             self->mouse_y_ = next_y;
         });
         glfwSetScrollCallback(window_, [](GLFWwindow* window, double x, double y) {
-            auto* self = static_cast<GlfwNativeWindow*>(glfwGetWindowUserPointer(window));
+            auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
             self->scroll_x_ = static_cast<float>(x);
             self->scroll_y_ = static_cast<float>(y);
-            self->events_.emplace(GPU::Window::MouseScrollEvent{self->scroll_x_, self->scroll_y_});
+            self->events_.emplace(Window::MouseScrollEvent{self->scroll_x_, self->scroll_y_});
         });
         double mouse_x = 0.0;
         double mouse_y = 0.0;
@@ -147,9 +165,11 @@ class GlfwNativeWindow {
         open_ = true;
     }
 
-    ~GlfwNativeWindow() {
-        if (window_ != nullptr)
+    ~GlfwWindow() {
+        if (window_ != nullptr) {
             glfwDestroyWindow(window_);
+            release_glfw();
+        }
     }
 
     [[nodiscard]] bool is_open() const noexcept {
@@ -189,18 +209,18 @@ class GlfwNativeWindow {
         if (glfwWindowShouldClose(window_) == GLFW_TRUE)
             open_ = false;
     }
-    bool poll_event(GPU::Window::WindowEvent& event) {
+    bool poll_event(Window::Event& event) {
         if (events_.empty())
             return false;
         event = events_.front();
         events_.pop();
         return true;
     }
-    [[nodiscard]] bool is_key_down(GPU::Window::Key key) const {
+    [[nodiscard]] bool is_key_down(Window::Key key) const {
         return window_ != nullptr && static_cast<int32_t>(key) >= 0 &&
                glfwGetKey(window_, static_cast<int>(key)) == GLFW_PRESS;
     }
-    [[nodiscard]] bool is_mouse_down(GPU::Window::MouseButton button) const {
+    [[nodiscard]] bool is_mouse_down(Window::MouseButton button) const {
         return window_ != nullptr && glfwGetMouseButton(window_, static_cast<int>(button)) == GLFW_PRESS;
     }
     [[nodiscard]] std::pair<int32_t, int32_t> mouse_position() const noexcept {
@@ -231,96 +251,61 @@ class GlfwNativeWindow {
 
 class WindowHost::Impl {
   public:
-    explicit Impl(const GPU::Window::WindowConfig& config, bool native_presentation) : config{config} {
-        if (native_presentation) {
-            native = std::make_unique<GlfwNativeWindow>(config);
-        } else {
-            easy_gpu = std::make_unique<GPU::Window::AppWindow>(config);
-        }
-    }
-
-    GPU::Window::WindowConfig config;
-    std::unique_ptr<GPU::Window::AppWindow> easy_gpu;
-    std::unique_ptr<GlfwNativeWindow> native;
+    explicit Impl(const Window::Config& config) : config{config}, window{std::make_unique<GlfwWindow>(config)} {}
+    Window::Config config;
+    std::unique_ptr<GlfwWindow> window;
 };
 
-WindowHost::WindowHost(const GPU::Window::WindowConfig& config, bool native_presentation)
-    : impl_{std::make_unique<Impl>(config, native_presentation)} {}
+WindowHost::WindowHost(const Window::Config& config) : impl_{std::make_unique<Impl>(config)} {}
 WindowHost::~WindowHost() = default;
 bool WindowHost::IsOpen() const noexcept {
-    return impl_->native ? impl_->native->is_open() : impl_->easy_gpu->IsOpen();
+    return impl_->window->is_open();
 }
 void WindowHost::Close() {
-    if (impl_->native)
-        impl_->native->close();
-    else
-        impl_->easy_gpu->Close();
+    impl_->window->close();
 }
 uint32_t WindowHost::Width() const noexcept {
-    return impl_->native ? impl_->native->width() : impl_->easy_gpu->Width();
+    return impl_->window->width();
 }
 uint32_t WindowHost::Height() const noexcept {
-    return impl_->native ? impl_->native->height() : impl_->easy_gpu->Height();
+    return impl_->window->height();
 }
 void WindowHost::SetTitle(const std::string& title) {
-    if (impl_->native)
-        impl_->native->set_title(title);
-    else
-        impl_->easy_gpu->SetTitle(title);
+    impl_->window->set_title(title);
 }
 void WindowHost::SetVSync(bool enabled) {
     impl_->config.vsync = enabled;
-    if (impl_->native)
-        impl_->native->set_vsync(enabled);
-    else
-        impl_->easy_gpu->SetVSync(enabled);
+    impl_->window->set_vsync(enabled);
 }
 void WindowHost::PollEvents() {
-    if (impl_->native)
-        impl_->native->poll_events();
-    else
-        impl_->easy_gpu->PollEvents();
+    impl_->window->poll_events();
 }
 void WindowHost::WaitEvents() {
-    if (impl_->native)
-        impl_->native->wait_events();
-    else
-        impl_->easy_gpu->WaitEvents();
+    impl_->window->wait_events();
 }
-bool WindowHost::PollEvent(GPU::Window::WindowEvent& event) {
-    return impl_->native ? impl_->native->poll_event(event) : impl_->easy_gpu->PollEvent(event);
+bool WindowHost::PollEvent(Window::Event& event) {
+    return impl_->window->poll_event(event);
 }
-bool WindowHost::IsKeyDown(GPU::Window::Key key) const {
-    return impl_->native ? impl_->native->is_key_down(key) : impl_->easy_gpu->IsKeyDown(key);
+bool WindowHost::IsKeyDown(Window::Key key) const {
+    return impl_->window->is_key_down(key);
 }
-bool WindowHost::IsMouseDown(GPU::Window::MouseButton button) const {
-    return impl_->native ? impl_->native->is_mouse_down(button) : impl_->easy_gpu->IsMouseDown(button);
+bool WindowHost::IsMouseDown(Window::MouseButton button) const {
+    return impl_->window->is_mouse_down(button);
 }
 std::pair<int32_t, int32_t> WindowHost::MousePosition() const noexcept {
-    return impl_->native ? impl_->native->mouse_position() : impl_->easy_gpu->MousePosition();
+    return impl_->window->mouse_position();
 }
 std::pair<float, float> WindowHost::MouseScroll() const noexcept {
-    return impl_->native ? impl_->native->mouse_scroll() : impl_->easy_gpu->MouseScroll();
-}
-void WindowHost::Present(const uint32_t* pixels, uint32_t width, uint32_t height) {
-    if (impl_->native)
-        throw std::runtime_error("Host pixel presentation is unavailable on a Luisa-native window");
-    impl_->easy_gpu->Present(pixels, width, height);
-}
-bool WindowHost::SupportsNativePresentation() const noexcept {
-    return impl_->native != nullptr;
+    return impl_->window->mouse_scroll();
 }
 uint64_t WindowHost::NativeDisplay() const noexcept {
-    return impl_->native ? impl_->native->native_display() : 0u;
+    return impl_->window->native_display();
 }
 uint64_t WindowHost::NativeWindow() const noexcept {
-    return impl_->native ? impl_->native->native_window() : 0u;
+    return impl_->window->native_window();
 }
 bool WindowHost::VSync() const noexcept {
-    return impl_->native ? impl_->native->vsync() : impl_->config.vsync;
-}
-GPU::Window::AppWindow* WindowHost::EasyGpuWindow() noexcept {
-    return impl_->easy_gpu.get();
+    return impl_->window->vsync();
 }
 
 } // namespace Feather

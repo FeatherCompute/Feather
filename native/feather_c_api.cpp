@@ -2,9 +2,7 @@
 #include "feather_typed_ir.h"
 #include "feather_typed_ir_lowerer.h"
 
-#if FEATHER_HAS_LUISA
 #include "feather_luisa_backend.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -33,36 +31,19 @@
 #include <type_traits>
 #include <vector>
 
-#include <AD/ADKernel.h>
-#include <AD/AdjointGenerator.h>
-#include <AD/GradientTape.h>
-#include <Backend/Backend.h>
-#include <IR/Module.h>
-#include <Kernel/KernelBuildContext.h>
-#include <Runtime/Context.h>
-#include <Runtime/Texture.h>
-
 #if FEATHER_BUILD_WINDOW
 #include "feather_window_host.h"
-#include <Window/AppWindow.h>
-#include <Window/Input.h>
-#include <Window/TexturePresenter.h>
-#include <Window/WindowConfig.h>
-#include <Window/WindowEvents.h>
 #endif
 
 namespace {
 
-void trace_graphics_step(const char* step);
+void trace_graphics_step(const char* step) {
+    if (std::getenv("FEATHER_GRAPHICS_TRACE") != nullptr)
+        std::cerr << "[feather graphics] " << step << '\n';
+}
 
-#ifndef FEATHER_SHADER_OPTIMIZATION_LEVEL
-#define FEATHER_SHADER_OPTIMIZATION_LEVEL GPU::Backend::ShaderOptimizationLevel::Ultra
-#endif
-
-constexpr GPU::Backend::ShaderOptimizationLevel kShaderOptimizationLevel = FEATHER_SHADER_OPTIMIZATION_LEVEL;
-constexpr bool kEnableFusedMultiplyAdd = kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Ultra ||
-                                         kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Extreme;
 constexpr FeContextHandle kDefaultContext = 1;
+constexpr uint32_t kMaximumColorAttachments = 8u;
 constexpr uint8_t kIrOpcodeIf = 4;
 constexpr uint8_t kIrOpcodeBeginBlock = 13;
 constexpr uint8_t kIrOpcodeElse = 14;
@@ -186,9 +167,7 @@ struct BufferState {
     std::vector<unsigned char> bytes;
     uint32_t mode = 0;
     uint32_t stride = 0;
-    GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
     bool host_dirty = false;
-    bool device_dirty = false;
     bool luisa_uploaded = false;
     uint64_t content_revision = 1u;
 };
@@ -206,9 +185,7 @@ struct TextureState {
     uint32_t pixel_format = 0;
     uint32_t access = 0;
     std::vector<unsigned char> bytes;
-    GPU::Backend::TextureHandle backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
     bool host_dirty = false;
-    bool device_dirty = false;
     bool mipmaps_requested = false;
     bool mipmaps_dirty = false;
     bool luisa_dirty = false;
@@ -234,9 +211,6 @@ struct GraphicsResourceBindingEntry {
     uint8_t kind = 0;
     uint8_t access = 0;
     uint32_t sampler_binding = UINT32_MAX;
-    // Which stages read this resource, as a mask of GPU::Backend::ResourceStage* bits. A descriptor
-    // set layout that omits the stage doing the reading is invalid Vulkan; drivers that route
-    // descriptors through argument buffers tolerate it, but a conformant one need not.
     uint32_t stage_flags = 0;
 };
 
@@ -244,26 +218,17 @@ struct GraphicsResourceLayout {
     std::vector<GraphicsResourceBindingEntry> entries;
 };
 
-struct GraphicsPipelineCacheEntry {
-    std::string key;
-    GPU::Backend::ShaderHandle vertex_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-    GPU::Backend::ShaderHandle fragment_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-    GPU::Backend::PipelineHandle pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
-    uint32_t push_constant_size = 0;
-};
-
 struct ADGradientState {
     std::string name;
     std::string resource_name;
     std::string element_type;
-    std::string easygpu_name;
+    std::string native_name;
     uint32_t source_binding = 0;
     uint32_t gradient_binding = 0;
     uint32_t element_count = 0;
     uint32_t element_stride = 0;
     uint32_t component_count = 0;
     size_t byte_size = 0;
-    GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
     std::vector<unsigned char> host_bytes;
 };
 
@@ -283,14 +248,8 @@ struct KernelState {
     std::vector<unsigned char> backward_ir;
     std::string last_ad_backward_glsl;
     std::vector<ADGradientState> ad_gradients;
-    GPU::Backend::BufferHandle ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-    size_t ad_adj_pool_size = 0;
-    FeExecutionBackend execution_backend = FE_EXECUTION_BACKEND_EASYGPU;
+    FeExecutionBackend execution_backend = FE_EXECUTION_BACKEND_LUISA;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
-};
-
-struct ComputeKernelCache {
-    std::unique_ptr<GPU::Kernel::KernelBuildContext> context;
 };
 
 struct IrResource {
@@ -524,7 +483,7 @@ struct GraphicsPipelineState {
     uint32_t blend_alpha_op = 0;
     uint32_t blend_write_mask = 15;
     uint32_t color_blend_attachment_count = 0;
-    std::array<FeGraphicsColorBlendAttachmentDesc, GPU::Backend::MAX_COLOR_ATTACHMENTS> color_blend_attachments{};
+    std::array<FeGraphicsColorBlendAttachmentDesc, kMaximumColorAttachments> color_blend_attachments{};
     uint32_t cull_mode = 0;
     uint32_t front_face = 0;
     uint32_t polygon_mode = 0;
@@ -534,12 +493,7 @@ struct GraphicsPipelineState {
     std::unordered_map<uint32_t, FeSamplerHandle> samplers;
     std::string debug_name;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
-    bool graphics_lowered = false;
-    std::string vertex_shader_source;
-    std::string fragment_shader_source;
-    GraphicsResourceLayout resource_layout;
     std::vector<GraphicsPushConstantLayoutEntry> push_constant_layout;
-    std::vector<GraphicsPipelineCacheEntry> backend_cache;
     uint64_t compute_raster_index_cache_key = 0u;
     uint32_t compute_raster_maximum_vertex = 0u;
     std::vector<uint32_t> compute_raster_indices;
@@ -574,7 +528,6 @@ struct WindowState {
 
 struct TexturePresenterState {
     FeWindowHandle window_handle = 0;
-    std::unique_ptr<GPU::Window::TexturePresenter> presenter;
     std::unordered_map<FeTextureHandle, std::shared_ptr<AsyncTexturePresentation>> async_textures;
     std::unordered_set<FeContextHandle> native_contexts;
 };
@@ -615,7 +568,6 @@ std::unordered_map<FeBufferHandle, BufferState> g_buffers;
 std::unordered_map<FeTextureHandle, TextureState> g_textures;
 std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
 std::unordered_map<FeKernelHandle, KernelState> g_kernels;
-std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
 std::unordered_map<FeContextHandle, ContextDeviceState> g_contexts;
 std::unordered_map<FeStreamHandle, StreamState> g_streams;
@@ -634,209 +586,20 @@ bool context_exists_locked(FeContextHandle context) {
     return context == kDefaultContext || g_contexts.find(context) != g_contexts.end();
 }
 
-class EasyGpuShaderGuard {
-  public:
-    EasyGpuShaderGuard(GPU::Backend::Backend& backend, GPU::Backend::ShaderHandle shader)
-        : backend_(backend), shader_(shader) {
-    }
-
-    ~EasyGpuShaderGuard() {
-        if (shader_ != GPU::Backend::INVALID_SHADER_HANDLE) {
-            backend_.DestroyShader(shader_);
-        }
-    }
-
-    EasyGpuShaderGuard(const EasyGpuShaderGuard&) = delete;
-    EasyGpuShaderGuard& operator=(const EasyGpuShaderGuard&) = delete;
-
-  private:
-    GPU::Backend::Backend& backend_;
-    GPU::Backend::ShaderHandle shader_;
-};
-
-class EasyGpuPipelineGuard {
-  public:
-    EasyGpuPipelineGuard(GPU::Backend::Backend& backend, GPU::Backend::PipelineHandle pipeline)
-        : backend_(backend), pipeline_(pipeline) {
-    }
-
-    ~EasyGpuPipelineGuard() {
-        if (pipeline_ != GPU::Backend::INVALID_PIPELINE_HANDLE) {
-            backend_.DestroyPipeline(pipeline_);
-        }
-    }
-
-    EasyGpuPipelineGuard(const EasyGpuPipelineGuard&) = delete;
-    EasyGpuPipelineGuard& operator=(const EasyGpuPipelineGuard&) = delete;
-
-  private:
-    GPU::Backend::Backend& backend_;
-    GPU::Backend::PipelineHandle pipeline_;
-};
-
-class EasyGpuBufferGuard {
-  public:
-    EasyGpuBufferGuard(GPU::Backend::Backend& backend, GPU::Backend::BufferHandle buffer)
-        : backend_(backend), buffer_(buffer) {
-    }
-
-    ~EasyGpuBufferGuard() {
-        if (buffer_ != GPU::Backend::INVALID_BUFFER_HANDLE) {
-            backend_.DestroyBuffer(buffer_);
-        }
-    }
-
-    EasyGpuBufferGuard(const EasyGpuBufferGuard&) = delete;
-    EasyGpuBufferGuard& operator=(const EasyGpuBufferGuard&) = delete;
-
-    GPU::Backend::BufferHandle get() const {
-        return buffer_;
-    }
-
-  private:
-    GPU::Backend::Backend& backend_;
-    GPU::Backend::BufferHandle buffer_;
-};
-
-void reset_compute_kernel_cache(ComputeKernelCache& cache, bool abandon_backend_resources) {
-    if (abandon_backend_resources && cache.context != nullptr) {
-        cache.context->SetCachedPipeline(GPU::Backend::INVALID_PIPELINE_HANDLE);
-    }
-
-    cache.context.reset();
-}
-
-void erase_compute_kernel_cache(FeKernelHandle kernel, bool abandon_backend_resources = false) {
-    auto it = g_compute_kernel_caches.find(kernel);
-    if (it == g_compute_kernel_caches.end()) {
-        return;
-    }
-
-    reset_compute_kernel_cache(it->second, abandon_backend_resources);
-    g_compute_kernel_caches.erase(it);
-}
-
-void clear_compute_kernel_caches(bool abandon_backend_resources = false) {
-    for (auto& [handle, cache] : g_compute_kernel_caches) {
-        (void)handle;
-        reset_compute_kernel_cache(cache, abandon_backend_resources);
-    }
-
-    g_compute_kernel_caches.clear();
-}
-
-void destroy_graphics_pipeline_cache(GraphicsPipelineState& pipeline) {
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        pipeline.backend_cache.clear();
-        return;
-    }
-
-    for (auto& entry : pipeline.backend_cache) {
-        if (entry.pipeline != GPU::Backend::INVALID_PIPELINE_HANDLE) {
-            backend->DestroyPipeline(entry.pipeline);
-            entry.pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
-        }
-        if (entry.vertex_shader != GPU::Backend::INVALID_SHADER_HANDLE) {
-            backend->DestroyShader(entry.vertex_shader);
-            entry.vertex_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-        }
-        if (entry.fragment_shader != GPU::Backend::INVALID_SHADER_HANDLE) {
-            backend->DestroyShader(entry.fragment_shader);
-            entry.fragment_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-        }
-    }
-    pipeline.backend_cache.clear();
-}
-
-void release_ad_gradient_buffers_with_backend(KernelState& kernel, GPU::Backend::Backend* backend) {
-    if (backend != nullptr) {
-        std::unordered_set<GPU::Backend::BufferHandle> released;
-        for (auto& gradient : kernel.ad_gradients) {
-            if (gradient.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE &&
-                released.insert(gradient.backend_buffer).second) {
-                backend->DestroyBuffer(gradient.backend_buffer);
-            }
-            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-        }
-
-        if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE) {
-            backend->DestroyBuffer(kernel.ad_adj_pool);
-            kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-        }
-    } else {
-        for (auto& gradient : kernel.ad_gradients) {
-            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-        }
-        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-    }
-
+void release_ad_gradient_buffers(KernelState& kernel) {
     kernel.ad_gradients.clear();
-    kernel.ad_adj_pool_size = 0;
 }
 
 void destroy_backend_resources_for_shutdown() {
-#if FEATHER_HAS_LUISA
     Feather::Luisa::Shutdown();
-#endif
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend != nullptr) {
-        try {
-            backend->Finish();
-        } catch (...) {
-        }
-    }
 
 #if FEATHER_BUILD_WINDOW
     g_texture_presenters.clear();
     g_windows.clear();
 #endif
 
-    clear_compute_kernel_caches();
-
-    for (auto& [handle, pipeline] : g_pipelines) {
-        (void)handle;
-        try {
-            destroy_graphics_pipeline_cache(pipeline);
-        } catch (...) {
-            pipeline.backend_cache.clear();
-        }
-    }
     g_pipelines.clear();
-
-    for (auto& [handle, kernel] : g_kernels) {
-        (void)handle;
-        try {
-            release_ad_gradient_buffers_with_backend(kernel, backend);
-        } catch (...) {
-            release_ad_gradient_buffers_with_backend(kernel, nullptr);
-        }
-    }
     g_kernels.clear();
-
-    if (backend != nullptr) {
-        for (auto& [handle, texture] : g_textures) {
-            (void)handle;
-            if (texture.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
-                try {
-                    backend->DestroyTexture(texture.backend_texture);
-                } catch (...) {
-                }
-                texture.backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
-            }
-        }
-
-        for (auto& [handle, buffer] : g_buffers) {
-            (void)handle;
-            if (buffer.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
-                try {
-                    backend->DestroyBuffer(buffer.backend_buffer);
-                } catch (...) {
-                }
-                buffer.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-            }
-        }
-    }
 
     g_textures.clear();
     g_buffers.clear();
@@ -846,22 +609,11 @@ void destroy_backend_resources_for_shutdown() {
     g_contexts.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
-
-    try {
-        GPU::Runtime::Context::GetInstance().ShutdownBackend();
-    } catch (...) {
-    }
 }
 
 void abandon_native_resources_for_process_exit() {
-#if FEATHER_HAS_LUISA
     Feather::Luisa::Abandon();
-#endif
 #if FEATHER_BUILD_WINDOW
-    for (auto& [handle, presenter] : g_texture_presenters) {
-        (void)handle;
-        (void)presenter.presenter.release();
-    }
     g_texture_presenters.clear();
 
     for (auto& [handle, window] : g_windows) {
@@ -871,40 +623,9 @@ void abandon_native_resources_for_process_exit() {
     g_windows.clear();
 #endif
 
-    clear_compute_kernel_caches(/*abandon_backend_resources*/ true);
-
-    for (auto& [handle, pipeline] : g_pipelines) {
-        (void)handle;
-        for (auto& entry : pipeline.backend_cache) {
-            entry.pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
-            entry.vertex_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-            entry.fragment_shader = GPU::Backend::INVALID_SHADER_HANDLE;
-        }
-        pipeline.backend_cache.clear();
-    }
     g_pipelines.clear();
-
-    for (auto& [handle, kernel] : g_kernels) {
-        (void)handle;
-        for (auto& gradient : kernel.ad_gradients) {
-            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-        }
-        kernel.ad_gradients.clear();
-        kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
-        kernel.ad_adj_pool_size = 0;
-    }
     g_kernels.clear();
-
-    for (auto& [handle, texture] : g_textures) {
-        (void)handle;
-        texture.backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
-    }
     g_textures.clear();
-
-    for (auto& [handle, buffer] : g_buffers) {
-        (void)handle;
-        buffer.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-    }
     g_buffers.clear();
 
     g_samplers.clear();
@@ -913,8 +634,6 @@ void abandon_native_resources_for_process_exit() {
     g_contexts.clear();
     g_profiler_records.clear();
     g_profiler_stats.clear();
-
-    GPU::Runtime::Context::GetInstance().AbandonBackendForProcessExit();
 }
 
 uint64_t next_handle() {
@@ -937,75 +656,6 @@ FeResult ok() {
     g_last_result = FE_OK;
     g_last_error.clear();
     return FE_OK;
-}
-
-std::string glsl_excerpt(const std::string& source, size_t first_line, size_t last_line) {
-    std::ostringstream output;
-    std::istringstream input(source);
-    std::string line;
-    size_t line_number = 1;
-    while (std::getline(input, line)) {
-        if (line_number >= first_line && line_number <= last_line) {
-            output << std::setw(4) << line_number << ": " << line << '\n';
-        }
-        if (line_number > last_line) {
-            break;
-        }
-        line_number++;
-    }
-
-    return output.str();
-}
-
-size_t glsl_error_line(const std::string& message) {
-    const std::string prefix = "ERROR: 0:";
-    const auto start = message.find(prefix);
-    if (start == std::string::npos) {
-        return 0;
-    }
-
-    const auto number_start = start + prefix.size();
-    const auto number_end = message.find(':', number_start);
-    if (number_end == std::string::npos || number_end <= number_start) {
-        return 0;
-    }
-
-    try {
-        return static_cast<size_t>(std::stoull(message.substr(number_start, number_end - number_start)));
-    } catch (...) {
-        return 0;
-    }
-}
-
-std::string glsl_error_excerpt(const std::string& source, const std::string& message) {
-    const auto line = glsl_error_line(message);
-    if (line == 0) {
-        return glsl_excerpt(source, 1, 120);
-    }
-
-    const auto first = line > 35 ? line - 35 : 1;
-    return glsl_excerpt(source, first, line + 35);
-}
-
-uint32_t map_backend_type(GPU::Backend::BackendType type) {
-    switch (type) {
-    case GPU::Backend::BackendType::OpenGL:
-        return 1;
-    case GPU::Backend::BackendType::Vulkan:
-        return 2;
-    default:
-        return 0;
-    }
-}
-
-GPU::Backend::Backend* require_backend() {
-    GPU::Runtime::AutoInitContext();
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        throw std::runtime_error("EasyGPU backend is unavailable.");
-    }
-
-    return backend;
 }
 
 std::string copy_debug_name(const char* debug_name, const char* fallback) {
@@ -1164,64 +814,20 @@ const char* pixel_format_name(uint32_t format) {
     }
 }
 
-bool easygpu_runtime_pixel_format(uint32_t format, GPU::Runtime::PixelFormat* out_format) {
-    if (out_format == nullptr) {
-        return false;
-    }
-
+bool luisa_pixel_format(uint32_t format) {
     switch (format) {
-    case 1:
-        *out_format = GPU::Runtime::PixelFormat::R8;
-        return true;
-    case 2:
-        *out_format = GPU::Runtime::PixelFormat::RG8;
-        return true;
-    case 3:
-        *out_format = GPU::Runtime::PixelFormat::RGBA8;
-        return true;
-    case 5:
-        *out_format = GPU::Runtime::PixelFormat::R16F;
-        return true;
-    case 6:
-        *out_format = GPU::Runtime::PixelFormat::RG16F;
-        return true;
-    case 7:
-        *out_format = GPU::Runtime::PixelFormat::RGBA16F;
-        return true;
-    case 8:
-        *out_format = GPU::Runtime::PixelFormat::R32F;
-        return true;
-    case 9:
-        *out_format = GPU::Runtime::PixelFormat::RG32F;
-        return true;
-    case 10:
-        *out_format = GPU::Runtime::PixelFormat::RGBA32F;
+    case 1u:
+    case 2u:
+    case 3u:
+    case 5u:
+    case 6u:
+    case 7u:
+    case 8u:
+    case 9u:
+    case 10u:
         return true;
     default:
         return false;
-    }
-}
-
-bool easygpu_backend_pixel_format(uint32_t format, GPU::Backend::PixelFormat* out_format) {
-    if (out_format == nullptr) {
-        return false;
-    }
-
-    switch (format) {
-    case 100:
-        *out_format = GPU::Backend::PixelFormat::D24S8;
-        return true;
-    case 101:
-        *out_format = GPU::Backend::PixelFormat::D32F;
-        return true;
-    default: {
-        GPU::Runtime::PixelFormat runtime_format = GPU::Runtime::PixelFormat::RGBA8;
-        if (!easygpu_runtime_pixel_format(format, &runtime_format)) {
-            return false;
-        }
-        *out_format = GPU::Runtime::ToBackendPixelFormat(runtime_format);
-        return true;
-    }
     }
 }
 
@@ -1292,7 +898,7 @@ bool parse_feather_ir(const std::vector<unsigned char>& ir, ParsedIr* parsed) {
 
     // IR minor version 1 uses the reserved header slot at byte 10 as a section count.
     // Legacy compatibility payloads can still carry ASSIGN1 data, but section validation
-    // keeps the typed Roslyn-to-EasyGPU bridge contract explicit.
+    // keeps the typed Roslyn-to-native bridge contract explicit.
     const auto section_count = read_u16(ir.data() + 10);
     parsed->shader_kind = ir[9];
     parsed->group_x = read_i32(ir.data() + 12);
@@ -2442,8 +2048,7 @@ bool is_int_type(const ParsedIr& ir, uint32_t type_string_id) {
     return type != nullptr && (*type == "System.Int32" || *type == "int");
 }
 
-size_t float_vector_buffer_stride(size_t component_count) {
-    // Mirrors EasyGPU/include/Utility/Meta/Std430Layout.h::GetStd430SizeHelper for Vec2/Vec3/Vec4 arrays.
+size_t vector_buffer_stride(size_t component_count) {
     switch (component_count) {
     case 2:
         return 8;
@@ -2455,44 +2060,7 @@ size_t float_vector_buffer_stride(size_t component_count) {
     }
 }
 
-size_t easygpu_buffer_element_stride(const ParsedIr& ir, const IrResource& resource) {
-    if (is_float_resource(ir, resource) || is_int_resource(ir, resource) || is_uint_resource(ir, resource)) {
-        return 4;
-    }
-
-    for (const auto component_count : {size_t{2}, size_t{3}, size_t{4}}) {
-        if (is_float_vector_resource(ir, resource, component_count) ||
-            is_int_vector_resource(ir, resource, component_count) ||
-            is_uint_vector_resource(ir, resource, component_count)) {
-            return float_vector_buffer_stride(component_count);
-        }
-    }
-
-    const auto* type = get_string(ir, resource.element_type_string_id);
-    if (type != nullptr && ir.has_section7) {
-        for (const auto& structure : ir.typed_module.structs) {
-            const auto* simple = structure.name_id < ir.typed_module.strings.size()
-                                     ? &ir.typed_module.strings[structure.name_id]
-                                     : nullptr;
-            const auto* qualified = structure.fully_qualified_name_id < ir.typed_module.strings.size()
-                                        ? &ir.typed_module.strings[structure.fully_qualified_name_id]
-                                        : nullptr;
-            const auto normalized_type = type->rfind("global::", 0) == 0 ? type->substr(8) : *type;
-            const auto normalized_qualified = qualified != nullptr && qualified->rfind("global::", 0) == 0
-                                                  ? qualified->substr(8)
-                                                  : (qualified == nullptr ? std::string{} : *qualified);
-            if ((simple != nullptr && *simple == *type) ||
-                (qualified != nullptr && *qualified == *type) ||
-                (!normalized_qualified.empty() && normalized_qualified == normalized_type)) {
-                return structure.size_in_bytes;
-            }
-        }
-    }
-
-    return 0;
-}
-
-std::string easygpu_buffer_name(const IrResource& resource) {
+std::string native_buffer_name(const IrResource& resource) {
     return "fe_" + std::to_string(resource.binding);
 }
 
@@ -2511,7 +2079,6 @@ void copy_fixed_c_string(char* destination, size_t destination_size, const std::
     destination[count] = '\0';
 }
 
-#if FEATHER_HAS_LUISA
 std::string configured_luisa_runtime_directory() {
     const auto* configured = std::getenv("FEATHER_LUISA_RUNTIME_DIR");
     return configured != nullptr && configured[0] != '\0'
@@ -2571,308 +2138,13 @@ bool configured_luisa_presentation_backend_locked() {
     return dispatch.backend_name == "metal" || dispatch.backend_name == "vk" ||
            dispatch.backend_name == "dx";
 }
-#endif
-
-std::string easygpu_push_constant_name(const IrResource& resource) {
-    return "pc_" + std::to_string(resource.binding);
-}
-
-GPU::IR::Type easygpu_module_type(const std::string& type_name) {
-    if (type_name == "System.Single" || type_name == "float") {
-        return GPU::IR::Type::Float();
-    }
-
-    // A bool uniform is 32 bits wide on the GPU, which is what push_constant_type_size and
-    // push_constant_type_alignment already report for it and what the managed layout packs into.
-    // Without this mapping the dispatch gate rejected the binding outright, even though GLSL
-    // accepts a bool member of a push constant block and lowers it to a 32-bit integer.
-    if (type_name == "System.Boolean" || type_name == "bool") {
-        return GPU::IR::Type::Bool();
-    }
-
-    if (type_name == "System.Int32" || type_name == "int") {
-        return GPU::IR::Type::Int();
-    }
-
-    if (type_name == "System.UInt32" || type_name == "uint") {
-        return GPU::IR::Type::UInt();
-    }
-
-    // The bool vectors are mapped for the same reason as the scalar: their sizes and alignments are
-    // already known here, so leaving them out only made the dispatch gate refuse them.
-    if (type_name == "Feather.Math.bool2" || type_name == "global::Feather.Math.bool2" ||
-        type_name == "bool2") {
-        return GPU::IR::Type::Bool2();
-    }
-
-    if (type_name == "Feather.Math.bool3" || type_name == "global::Feather.Math.bool3" ||
-        type_name == "bool3") {
-        return GPU::IR::Type::Bool3();
-    }
-
-    if (type_name == "Feather.Math.bool4" || type_name == "global::Feather.Math.bool4" ||
-        type_name == "bool4") {
-        return GPU::IR::Type::Bool4();
-    }
-
-    if (type_name == "Feather.Math.int2" || type_name == "global::Feather.Math.int2" || type_name == "int2") {
-        return GPU::IR::Type::Int2();
-    }
-
-    if (type_name == "Feather.Math.int3" || type_name == "global::Feather.Math.int3" || type_name == "int3") {
-        return GPU::IR::Type::Int3();
-    }
-
-    if (type_name == "Feather.Math.int4" || type_name == "global::Feather.Math.int4" || type_name == "int4") {
-        return GPU::IR::Type::Int4();
-    }
-
-    if (type_name == "Feather.Math.uint2" || type_name == "global::Feather.Math.uint2" || type_name == "uint2") {
-        return GPU::IR::Type::UInt2();
-    }
-
-    if (type_name == "Feather.Math.uint3" || type_name == "global::Feather.Math.uint3" || type_name == "uint3") {
-        return GPU::IR::Type::UInt3();
-    }
-
-    if (type_name == "Feather.Math.uint4" || type_name == "global::Feather.Math.uint4" || type_name == "uint4") {
-        return GPU::IR::Type::UInt4();
-    }
-
-    // Byte-sized GpuStruct fields map to float in GLSL (no byte type).
-    if (type_name == "System.Byte" || type_name == "byte") {
-        return GPU::IR::Type::Float();
-    }
-
-    if (type_name == "Feather.Math.float2" || type_name == "global::Feather.Math.float2" || type_name == "float2") {
-        return GPU::IR::Type::Float2();
-    }
-
-    if (type_name == "Feather.Math.float3" || type_name == "global::Feather.Math.float3" || type_name == "float3") {
-        return GPU::IR::Type::Float3();
-    }
-
-    if (type_name == "Feather.Math.float4" || type_name == "global::Feather.Math.float4" || type_name == "float4") {
-        return GPU::IR::Type::Float4();
-    }
-
-    if (type_name == "Feather.Math.float2x2" || type_name == "global::Feather.Math.float2x2" ||
-        type_name == "float2x2") {
-        return GPU::IR::Type::Float2x2();
-    }
-
-    if (type_name == "Feather.Math.float3x3" || type_name == "global::Feather.Math.float3x3" ||
-        type_name == "float3x3") {
-        return GPU::IR::Type::Float3x3();
-    }
-
-    if (type_name == "Feather.Math.float4x4" || type_name == "global::Feather.Math.float4x4" ||
-        type_name == "float4x4") {
-        return GPU::IR::Type::Float4x4();
-    }
-
-    // GpuStruct types with 4 byte fields (Rgba32 etc.) → vec4 in GLSL.
-    if (type_name.find("Rgba32") != std::string::npos ||
-        type_name.find("Rgba") != std::string::npos) {
-        return GPU::IR::Type::Float4();
-    }
-
-    return {};
-}
-
-GPU::IR::ResourceAccess easygpu_resource_access(uint8_t access) {
-    switch (access) {
-    case 1:
-        return GPU::IR::ResourceAccess::Read;
-    case 2:
-        return GPU::IR::ResourceAccess::Write;
-    case 4: // Sampled texture
-        return GPU::IR::ResourceAccess::Read;
-    default:
-        return GPU::IR::ResourceAccess::ReadWrite;
-    }
-}
-
-bool easygpu_expression_binary_op(uint8_t operation, GPU::IR::BinaryOp* op) {
-    if (op == nullptr) {
-        return false;
-    }
-
-    switch (operation) {
-    case 1:
-        *op = GPU::IR::BinaryOp::Add;
-        return true;
-    case 2:
-        *op = GPU::IR::BinaryOp::Sub;
-        return true;
-    case 3:
-        *op = GPU::IR::BinaryOp::Mul;
-        return true;
-    case 4:
-        *op = GPU::IR::BinaryOp::Div;
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool easygpu_structured_binary_op(uint8_t operation, GPU::IR::BinaryOp* op) {
-    if (op == nullptr) {
-        return false;
-    }
-
-    switch (operation) {
-    case 2:
-        *op = GPU::IR::BinaryOp::Add;
-        return true;
-    case 3:
-        *op = GPU::IR::BinaryOp::Sub;
-        return true;
-    case 4:
-        *op = GPU::IR::BinaryOp::Mul;
-        return true;
-    case 5:
-        *op = GPU::IR::BinaryOp::Div;
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool easygpu_compare_op(uint8_t operation, GPU::IR::CompareOp* op) {
-    if (op == nullptr) return false;
-    switch (operation) {
-    case 5: *op = GPU::IR::CompareOp::Equal; return true;
-    case 6: *op = GPU::IR::CompareOp::NotEqual; return true;
-    case 7: *op = GPU::IR::CompareOp::Greater; return true;
-    case 8: *op = GPU::IR::CompareOp::Less; return true;
-    case 9: *op = GPU::IR::CompareOp::GreaterEqual; return true;
-    case 10: *op = GPU::IR::CompareOp::LessEqual; return true;
-    default: return false;
-    }
-}
-
-std::string easygpu_intrinsic_name_for_type(const std::string& type_name) {
-    if (type_name == "Feather.Math.float2" || type_name == "float2") return "vec2";
-    if (type_name == "Feather.Math.float3" || type_name == "float3") return "vec3";
-    if (type_name == "Feather.Math.float4" || type_name == "float4") return "vec4";
-    if (type_name == "Feather.Math.int2" || type_name == "int2") return "ivec2";
-    if (type_name == "Feather.Math.int3" || type_name == "int3") return "ivec3";
-    if (type_name == "Feather.Math.int4" || type_name == "int4") return "ivec4";
-    return {};
-}
-
-std::string easygpu_ad_glsl_type_name(const std::string& type_name) {
-    if (type_name == "System.Single" || type_name == "float") return "float";
-    if (type_name == "Feather.Math.float2" || type_name == "global::Feather.Math.float2" || type_name == "float2") return "vec2";
-    if (type_name == "Feather.Math.float3" || type_name == "global::Feather.Math.float3" || type_name == "float3") return "vec3";
-    if (type_name == "Feather.Math.float4" || type_name == "global::Feather.Math.float4" || type_name == "float4") return "vec4";
-    return {};
-}
 
 uint32_t ad_component_count_for_type(const std::string& type_name) {
-    const auto glsl_type = easygpu_ad_glsl_type_name(type_name);
-    if (glsl_type == "float") return 1;
-    if (glsl_type == "vec2") return 2;
-    if (glsl_type == "vec3") return 3;
-    if (glsl_type == "vec4") return 4;
+    if (type_name == "System.Single" || type_name == "float") return 1u;
+    if (type_name == "Feather.Math.float2" || type_name == "global::Feather.Math.float2" || type_name == "float2") return 2u;
+    if (type_name == "Feather.Math.float3" || type_name == "global::Feather.Math.float3" || type_name == "float3") return 3u;
+    if (type_name == "Feather.Math.float4" || type_name == "global::Feather.Math.float4" || type_name == "float4") return 4u;
     return 0;
-}
-
-size_t ad_scalar_slot_count_for_type(const std::string& type_name) {
-    const auto components = ad_component_count_for_type(type_name);
-    return components == 0 ? 0 : static_cast<size_t>(components);
-}
-
-void release_ad_gradient_buffers(KernelState& kernel) {
-    if (kernel.context != kDefaultContext) {
-        release_ad_gradient_buffers_with_backend(kernel, nullptr);
-        return;
-    }
-    GPU::Runtime::AutoInitContext();
-    release_ad_gradient_buffers_with_backend(kernel, GPU::Runtime::Context::GetBackend());
-}
-
-void release_pending_ad_gradient_buffers(std::vector<ADGradientState>& gradients) {
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        for (auto& gradient : gradients) {
-            gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-        }
-        return;
-    }
-
-    std::unordered_set<GPU::Backend::BufferHandle> released;
-    for (auto& gradient : gradients) {
-        if (gradient.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE &&
-            released.insert(gradient.backend_buffer).second) {
-            backend->DestroyBuffer(gradient.backend_buffer);
-        }
-        gradient.backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-    }
-}
-
-std::string easygpu_intrinsic_name(const std::string& symbol) {
-    if (symbol == "global::Feather.Math.ShaderMath.Sin" || symbol == "global::Feather.Math.Hlsl.Sin") {
-        return "sin";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Cos" || symbol == "global::Feather.Math.Hlsl.Cos") {
-        return "cos";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Tan" || symbol == "global::Feather.Math.Hlsl.Tan") {
-        return "tan";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Exp" || symbol == "global::Feather.Math.Hlsl.Exp") {
-        return "exp";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Log" || symbol == "global::Feather.Math.Hlsl.Log") {
-        return "log";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Sqrt" || symbol == "global::Feather.Math.Hlsl.Sqrt") {
-        return "sqrt";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Abs" || symbol == "global::Feather.Math.Hlsl.Abs") {
-        return "abs";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Floor" || symbol == "global::Feather.Math.Hlsl.Floor") {
-        return "floor";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Ceil" || symbol == "global::Feather.Math.Hlsl.Ceil") {
-        return "ceil";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Round") {
-        return "round";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Pow" || symbol == "global::Feather.Math.Hlsl.Pow") {
-        return "pow";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Min") {
-        return "min";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Max") {
-        return "max";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Clamp" || symbol == "global::Feather.Math.Hlsl.Clamp") {
-        return "clamp";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Lerp" || symbol == "global::Feather.Math.Hlsl.Lerp" ||
-        symbol == "global::Feather.Math.ShaderMath.Mix" || symbol == "global::Feather.Math.Hlsl.Mix") {
-        return "mix";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Smoothstep") {
-        return "smoothstep";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Dot" || symbol == "global::Feather.Math.Hlsl.Dot") {
-        return "dot";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Cross" || symbol == "global::Feather.Math.Hlsl.Cross") {
-        return "cross";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Reflect" || symbol == "global::Feather.Math.Hlsl.Reflect") {
-        return "reflect";
-    }
-
-    return {};
 }
 
 size_t push_constant_type_size(const ParsedIr& ir, const IrResource& resource) {
@@ -2917,7 +2189,7 @@ size_t push_constant_type_size(const ParsedIr& ir, const IrResource& resource) {
 
     // The integer vectors, which the managed layout has always packed the same way as their float
     // counterparts (GpuValueLayout pairs int2 with float2, int3 with float3, int4 with float4).
-    // Omitting them here meant push_constant_type_size returned zero, is_easygpu_push_constant_resource
+    // Omitting them here meant push_constant_type_size returned zero, and push-constant resource
     // rejected the binding, and a kernel taking a Uniform<int3> failed the dispatch gate with
     // "does not support push constant binding" -- despite the generator, the shader model validator
     // and the GLSL lowering all accepting it. A grid size is the natural int3 uniform, so this was
@@ -3012,7 +2284,7 @@ bool find_push_constant_offset(const ParsedIr& ir, uint32_t binding, size_t* off
             return false;
         }
 
-        // Matches EasyGPU/source/Kernel/KernelBuildContext.cpp::RegisterUniform.
+        // Keep uniform offsets aligned to their declared native layout.
         current_offset = align_offset(current_offset, resource_alignment);
         if (resource.binding == binding) {
             *offset = current_offset;
@@ -3876,19 +3148,19 @@ FeResult execute_expression_assignment(const KernelState& kernel, const ParsedIr
                                                             copied_elements);
     }
 
-    if (element_stride == float_vector_buffer_stride(2) && is_float_vector_resource(ir, *destination, 2) &&
+    if (element_stride == vector_buffer_stride(2) && is_float_vector_resource(ir, *destination, 2) &&
         (is_float_vector_type(ir, root->type_string_id, 2) || root->type_string_id == UINT32_MAX)) {
         return execute_float_vector_expression_assignment<2>(kernel, ir, assignment, destination_buffer->second,
                                                              copied_elements);
     }
 
-    if (element_stride == float_vector_buffer_stride(3) && is_float_vector_resource(ir, *destination, 3) &&
+    if (element_stride == vector_buffer_stride(3) && is_float_vector_resource(ir, *destination, 3) &&
         (is_float_vector_type(ir, root->type_string_id, 3) || root->type_string_id == UINT32_MAX)) {
         return execute_float_vector_expression_assignment<3>(kernel, ir, assignment, destination_buffer->second,
                                                              copied_elements);
     }
 
-    if (element_stride == float_vector_buffer_stride(4) && is_float_vector_resource(ir, *destination, 4) &&
+    if (element_stride == vector_buffer_stride(4) && is_float_vector_resource(ir, *destination, 4) &&
         (is_float_vector_type(ir, root->type_string_id, 4) || root->type_string_id == UINT32_MAX)) {
         return execute_float_vector_expression_assignment<4>(kernel, ir, assignment, destination_buffer->second,
                                                              copied_elements);
@@ -3898,511 +3170,10 @@ FeResult execute_expression_assignment(const KernelState& kernel, const ParsedIr
                 "Kernel expression fallback currently supports int, float, float2, float3, and float4 buffer elements.");
 }
 
-using ModuleResourceMap = std::unordered_map<uint32_t, GPU::IR::ResourceId>;
-
-// Map Feather IR shader builtin kind to the corresponding ModuleBuilder thread/group/local ID value.
-GPU::IR::ValueId build_shader_builtin(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder, uint8_t builtin_kind) {
-    switch (builtin_kind) {
-    case 1: return builder.ThreadIndexX();  // ThreadIds.X
-    case 2: return builder.ThreadIndexY();  // ThreadIds.Y
-    case 3: return builder.ThreadIndexZ();  // ThreadIds.Z
-    default: return GPU::IR::InvalidValueId;
-    }
-}
-
-GPU::IR::ValueId build_easygpu_module_index(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                            uint32_t index_string_id) {
-    const auto* index = get_string(ir, index_string_id);
-    if (index == nullptr || index->empty()) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    // Feather IR stores the semantic C# index symbol; the EasyGPU module records the lowered thread index.
-    // Default: map to the compute thread index.
-    // Local variables declared with ThreadIds as initializer act as thread ID aliases.
-    // Future: distinguish local loop counters from thread ID proxies.
-    return builder.ThreadIndexX();
-}
-
-GPU::IR::ValueId build_easygpu_module_resource_access(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                      const ModuleResourceMap& resources, uint32_t resource_binding,
-                                                      uint32_t index_string_id) {
-    const auto* resource = find_resource_by_binding(ir, resource_binding);
-    if (resource == nullptr || resource->kind != kIrResourceKindBuffer) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    const auto mapped = resources.find(resource_binding);
-    if (mapped == resources.end()) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    const auto index = build_easygpu_module_index(ir, builder, index_string_id);
-    if (index == GPU::IR::InvalidValueId) {
-        return GPU::IR::InvalidValueId;
-    }
-    return builder.ResourceElement(mapped->second, index);
-}
-
-GPU::IR::ValueId build_easygpu_module_push_constant_access(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                           const ModuleResourceMap& resources,
-                                                           uint32_t resource_binding) {
-    const auto* resource = find_resource_by_binding(ir, resource_binding);
-    if (resource == nullptr || resource->kind != kIrResourceKindPushConstant) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    const auto mapped = resources.find(resource_binding);
-    if (mapped == resources.end()) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    return builder.PushConstant(mapped->second);
-}
-
-std::string module_value_to_glsl(const GPU::IR::Module& module, GPU::IR::ValueId id,
-                                 const std::unordered_map<uint32_t, std::string>& resource_names);
-
-GPU::IR::ValueId build_easygpu_module_expression(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                 const ModuleResourceMap& resources, uint32_t node_index) {
-    if (node_index >= ir.expression_nodes.size()) {
-        return GPU::IR::InvalidValueId;
-    }
-
-    const auto& node = ir.expression_nodes[node_index];
-    switch (node.kind) {
-    case 1:
-        return build_easygpu_module_resource_access(ir, builder, resources, node.resource_binding, node.index_string_id);
-    case 2: {
-        const auto* literal = get_string(ir, node.literal_string_id);
-        const auto* type = get_string(ir, node.type_string_id);
-        const auto module_type = type == nullptr ? GPU::IR::Type::Float() : easygpu_module_type(*type);
-        if (literal == nullptr || !module_type.IsValid()) {
-            return GPU::IR::InvalidValueId;
-        }
-
-        return builder.Literal(module_type, *literal);
-    }
-    case 3: {
-        auto left = build_easygpu_module_expression(ir, builder, resources, node.left_node_index);
-        auto right = build_easygpu_module_expression(ir, builder, resources, node.right_node_index);
-        GPU::IR::BinaryOp op{};
-        if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId ||
-            !easygpu_expression_binary_op(node.operation, &op)) {
-            return GPU::IR::InvalidValueId;
-        }
-
-        return builder.Binary(op, left, right);
-    }
-    case 4: {
-        const auto* symbol = get_string(ir, node.symbol_string_id);
-        if (symbol == nullptr || node.first_argument_index == UINT32_MAX ||
-            node.first_argument_index > ir.expression_argument_indices.size() ||
-            node.argument_count > ir.expression_argument_indices.size() - node.first_argument_index) {
-            return GPU::IR::InvalidValueId;
-        }
-
-        auto intrinsic = easygpu_intrinsic_name(*symbol);
-        if (intrinsic.empty()) {
-            return GPU::IR::InvalidValueId;
-        }
-
-        const auto* type = get_string(ir, node.type_string_id);
-        const auto result_type = type == nullptr ? GPU::IR::Type::Float() : easygpu_module_type(*type);
-        if (!result_type.IsValid()) {
-            return GPU::IR::InvalidValueId;
-        }
-
-        std::vector<GPU::IR::ValueId> arguments;
-        arguments.reserve(node.argument_count);
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            auto argument = build_easygpu_module_expression(
-                ir, builder, resources, ir.expression_argument_indices[node.first_argument_index + i]);
-            if (argument == GPU::IR::InvalidValueId) {
-                return GPU::IR::InvalidValueId;
-            }
-
-            arguments.push_back(argument);
-        }
-        return builder.Intrinsic(std::move(intrinsic), result_type, arguments);
-    }
-    case kIrExpressionNodeKindComparison: {
-        auto left = build_easygpu_module_expression(ir, builder, resources, node.left_node_index);
-        auto right = build_easygpu_module_expression(ir, builder, resources, node.right_node_index);
-        GPU::IR::CompareOp op{};
-        if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId ||
-            !easygpu_compare_op(node.operation, &op)) {
-            return GPU::IR::InvalidValueId;
-        }
-        return builder.Compare(op, left, right);
-    }
-    case kIrExpressionNodeKindLocalVariable: {
-        const auto* name = get_string(ir, node.symbol_string_id);
-        if (name == nullptr || name->empty()) return GPU::IR::InvalidValueId;
-        const auto* type_str = get_string(ir, node.type_string_id);
-        const auto var_type = type_str != nullptr ? easygpu_module_type(*type_str) : GPU::IR::Type::Int();
-        return var_type.IsValid() ? builder.LocalVariable(var_type, *name)
-                                  : builder.LocalVariable(GPU::IR::Type::Int(), *name);
-    }
-    case kIrExpressionNodeKindPushConstant:
-        return build_easygpu_module_push_constant_access(ir, builder, resources, node.resource_binding);
-    case kIrExpressionNodeKindShaderBuiltin:
-        return build_shader_builtin(ir, builder, node.operation);
-    case kIrExpressionNodeKindConstructor: {
-        const auto* type_name = get_string(ir, node.type_string_id);
-        if (type_name == nullptr) return GPU::IR::InvalidValueId;
-        auto glsl_ctor = easygpu_intrinsic_name_for_type(*type_name);
-        if (glsl_ctor.empty()) return GPU::IR::InvalidValueId;
-        auto result_type = easygpu_module_type(*type_name);
-        if (!result_type.IsValid()) return GPU::IR::InvalidValueId;
-        if (node.first_argument_index == UINT32_MAX || node.argument_count == 0) return GPU::IR::InvalidValueId;
-        std::vector<GPU::IR::ValueId> args;
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            auto arg = build_easygpu_module_expression(ir, builder, resources,
-                ir.expression_argument_indices[node.first_argument_index + i]);
-            if (arg == GPU::IR::InvalidValueId) return GPU::IR::InvalidValueId;
-            args.push_back(arg);
-        }
-        return builder.Intrinsic(std::move(glsl_ctor), result_type, args);
-    }
-    case kIrExpressionNodeKindTernary: {
-        auto cond = build_easygpu_module_expression(ir, builder, resources, node.left_node_index);
-        auto tv = build_easygpu_module_expression(ir, builder, resources, node.right_node_index);
-        if (node.first_argument_index == UINT32_MAX || node.argument_count < 1)
-            return GPU::IR::InvalidValueId;
-        auto fv = build_easygpu_module_expression(ir, builder, resources,
-            ir.expression_argument_indices[node.first_argument_index]);
-        if (cond == GPU::IR::InvalidValueId || tv == GPU::IR::InvalidValueId || fv == GPU::IR::InvalidValueId)
-            return GPU::IR::InvalidValueId;
-        return builder.Ternary(cond, tv, fv);
-    }
-    case kIrExpressionNodeKindCallableCall: {
-        // Section 1-6 compatibility expression trees do not carry callable function
-        // tables. Canonical callable calls are lowered from section 7 by the typed IR
-        // lowerer, so reject this path instead of proving callables through legacy data.
-        return GPU::IR::InvalidValueId;
-    }
-    case kIrExpressionNodeKindTextureSample:
-    case kIrExpressionNodeKindTextureSampleLevel: {
-        // Texture sample / sampleLevel: use the texture resource's GLSL name.
-        const auto* type_name = get_string(ir, node.type_string_id);
-        auto result_type = type_name != nullptr ? easygpu_module_type(*type_name) : GPU::IR::Type::Float4();
-        if (!result_type.IsValid()) return GPU::IR::InvalidValueId;
-
-        if (node.first_argument_index == UINT32_MAX || node.argument_count == 0)
-            return GPU::IR::InvalidValueId;
-
-        // Use the texture resource binding (not sampler) for the GLSL sampler2D name.
-        auto tex_it = resources.find(node.resource_binding);
-        if (tex_it == resources.end()) return GPU::IR::InvalidValueId;
-
-        auto uv = build_easygpu_module_expression(ir, builder, resources,
-            ir.expression_argument_indices[node.first_argument_index]);
-        if (uv == GPU::IR::InvalidValueId) return GPU::IR::InvalidValueId;
-
-        auto& mod = builder.GetModule();
-        std::string tex_glsl;
-        for (const auto& r : mod.resources) {
-            if (r.id == tex_it->second) { tex_glsl = r.name; break; }
-        }
-        if (tex_glsl.empty()) return GPU::IR::InvalidValueId;
-
-        std::string uv_glsl = module_value_to_glsl(mod, uv, {});
-        if (node.kind == kIrExpressionNodeKindTextureSample) {
-            return builder.Literal(result_type, "texture(" + tex_glsl + ", " + uv_glsl + ")");
-        } else {
-            if (node.argument_count < 2) return GPU::IR::InvalidValueId;
-            auto lod = build_easygpu_module_expression(ir, builder, resources,
-                ir.expression_argument_indices[node.first_argument_index + 1]);
-            if (lod == GPU::IR::InvalidValueId) return GPU::IR::InvalidValueId;
-            std::string lod_glsl = module_value_to_glsl(mod, lod, {});
-            return builder.Literal(result_type, "textureLod(" + tex_glsl + ", " + uv_glsl + ", " + lod_glsl + ")");
-        }
-    }
-    case kIrExpressionNodeKindGpuStructField: {
-        // Emit GLSL swizzle: .x, .y, .z, .w based on field index.
-        if (node.argument_count < 1 || node.first_argument_index == UINT32_MAX)
-            return GPU::IR::InvalidValueId;
-        auto inst = build_easygpu_module_expression(ir, builder, resources,
-            ir.expression_argument_indices[node.first_argument_index]);
-        if (inst == GPU::IR::InvalidValueId) return GPU::IR::InvalidValueId;
-        auto& mod = builder.GetModule();
-        std::string inst_glsl = module_value_to_glsl(mod, inst, {});
-        static const char* swiz[] = {".x", ".y", ".z", ".w"};
-        int idx = static_cast<int>(node.operation);
-        if (idx < 0 || idx > 3) return GPU::IR::InvalidValueId;
-        const auto* type_name = get_string(ir, node.type_string_id);
-        auto result_type = type_name != nullptr ? easygpu_module_type(*type_name) : GPU::IR::Type::Float();
-        return builder.Literal(result_type, inst_glsl + swiz[idx]);
-    }
-    default:
-        return GPU::IR::InvalidValueId;
-    }
-}
-
-// Build an expression node from the control flow expression pool instead of the assignment pool.
-GPU::IR::ValueId build_easygpu_module_cf_expression(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                    const ModuleResourceMap& resources, uint32_t node_index) {
-    if (node_index >= ir.control_flow_nodes.size()) return GPU::IR::InvalidValueId;
-
-    const auto& node = ir.control_flow_nodes[node_index];
-    switch (node.kind) {
-    case 1:
-        return build_easygpu_module_resource_access(ir, builder, resources, node.resource_binding, node.index_string_id);
-    case 2: {
-        const auto* literal = get_string(ir, node.literal_string_id);
-        const auto* type = get_string(ir, node.type_string_id);
-        const auto module_type = type == nullptr ? GPU::IR::Type::Float() : easygpu_module_type(*type);
-        if (literal == nullptr || !module_type.IsValid()) return GPU::IR::InvalidValueId;
-        return builder.Literal(module_type, *literal);
-    }
-    case 3: {
-        auto left = build_easygpu_module_cf_expression(ir, builder, resources, node.left_node_index);
-        auto right = build_easygpu_module_cf_expression(ir, builder, resources, node.right_node_index);
-        GPU::IR::BinaryOp op{};
-        if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId ||
-            !easygpu_expression_binary_op(node.operation, &op)) return GPU::IR::InvalidValueId;
-        return builder.Binary(op, left, right);
-    }
-    case kIrExpressionNodeKindComparison: {
-        auto left = build_easygpu_module_cf_expression(ir, builder, resources, node.left_node_index);
-        auto right = build_easygpu_module_cf_expression(ir, builder, resources, node.right_node_index);
-        GPU::IR::CompareOp op{};
-        if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId ||
-            !easygpu_compare_op(node.operation, &op)) return GPU::IR::InvalidValueId;
-        return builder.Compare(op, left, right);
-    }
-    case 4: {
-        const auto* symbol = get_string(ir, node.symbol_string_id);
-        if (symbol == nullptr || node.first_argument_index == UINT32_MAX ||
-            node.first_argument_index > ir.control_flow_argument_indices.size() ||
-            node.argument_count > ir.control_flow_argument_indices.size() - node.first_argument_index)
-            return GPU::IR::InvalidValueId;
-        auto intrinsic = easygpu_intrinsic_name(*symbol);
-        if (intrinsic.empty()) return GPU::IR::InvalidValueId;
-        const auto* type = get_string(ir, node.type_string_id);
-        const auto result_type = type == nullptr ? GPU::IR::Type::Float() : easygpu_module_type(*type);
-        if (!result_type.IsValid()) return GPU::IR::InvalidValueId;
-        std::vector<GPU::IR::ValueId> arguments;
-        arguments.reserve(node.argument_count);
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            auto argument = build_easygpu_module_cf_expression(
-                ir, builder, resources, ir.control_flow_argument_indices[node.first_argument_index + i]);
-            if (argument == GPU::IR::InvalidValueId) return GPU::IR::InvalidValueId;
-            arguments.push_back(argument);
-        }
-        return builder.Intrinsic(std::move(intrinsic), result_type, arguments);
-    }
-    case kIrExpressionNodeKindLocalVariable: {
-        const auto* name = get_string(ir, node.symbol_string_id);
-        if (name == nullptr || name->empty()) return GPU::IR::InvalidValueId;
-        const auto* type_str = get_string(ir, node.type_string_id);
-        const auto var_type = type_str != nullptr ? easygpu_module_type(*type_str) : GPU::IR::Type::Int();
-        return var_type.IsValid() ? builder.LocalVariable(var_type, *name)
-                                  : builder.LocalVariable(GPU::IR::Type::Int(), *name);
-    }
-    case kIrExpressionNodeKindPushConstant:
-        return build_easygpu_module_push_constant_access(ir, builder, resources, node.resource_binding);
-    default:
-        return GPU::IR::InvalidValueId;
-    }
-}
-
-// Build an expression from the compound assignment expression pool.
-GPU::IR::ValueId build_compound_expression(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                            const ModuleResourceMap& resources, uint32_t node_index) {
-    if (node_index >= ir.compound_assignment_nodes.size()) return GPU::IR::InvalidValueId;
-    const auto& node = ir.compound_assignment_nodes[node_index];
-    switch (node.kind) {
-    case 1: return build_easygpu_module_resource_access(ir, builder, resources, node.resource_binding, node.index_string_id);
-    case 2: {
-        const auto* lit = get_string(ir, node.literal_string_id);
-        const auto* type = get_string(ir, node.type_string_id);
-        const auto mod_type = type == nullptr ? GPU::IR::Type::Float() : easygpu_module_type(*type);
-        return (lit != nullptr && mod_type.IsValid()) ? builder.Literal(mod_type, *lit) : GPU::IR::InvalidValueId;
-    }
-    case 3: {
-        auto left = build_compound_expression(ir, builder, resources, node.left_node_index);
-        auto right = build_compound_expression(ir, builder, resources, node.right_node_index);
-        GPU::IR::BinaryOp op{};
-        return (left != GPU::IR::InvalidValueId && right != GPU::IR::InvalidValueId && easygpu_expression_binary_op(node.operation, &op))
-                   ? builder.Binary(op, left, right) : GPU::IR::InvalidValueId;
-    }
-    case 5: return build_easygpu_module_push_constant_access(ir, builder, resources, node.resource_binding);
-    case 7: {
-        const auto* name = get_string(ir, node.symbol_string_id);
-        return (name != nullptr && !name->empty()) ? builder.LocalVariable(GPU::IR::Type::Float(), *name) : GPU::IR::InvalidValueId;
-    }
-    default: return GPU::IR::InvalidValueId;
-    }
-}
-
-// Convert a ModuleBuilder ValueId to a GLSL expression string by walking the value record tree.
-// Used to build proper conditions for if/for/while instead of hardcoded "true".
-std::string module_value_to_glsl(const GPU::IR::Module& module, GPU::IR::ValueId id,
-                                  const std::unordered_map<uint32_t, std::string>& resource_names) {
-    if (id >= module.values.size()) return "true";
-    const auto& v = module.values[id];
-    switch (v.kind) {
-    case GPU::IR::ValueRecord::Kind::ThreadIndexX: return "int(gl_GlobalInvocationID.x)";
-    case GPU::IR::ValueRecord::Kind::ThreadIndexY: return "int(gl_GlobalInvocationID.y)";
-    case GPU::IR::ValueRecord::Kind::ThreadIndexZ: return "int(gl_GlobalInvocationID.z)";
-    case GPU::IR::ValueRecord::Kind::Literal: return v.literal;
-    case GPU::IR::ValueRecord::Kind::LocalVar: return v.localName;
-    case GPU::IR::ValueRecord::Kind::Binary: {
-        auto left = module_value_to_glsl(module, v.left, resource_names);
-        auto right = module_value_to_glsl(module, v.right, resource_names);
-        const char* op = v.binaryOp == GPU::IR::BinaryOp::Add ? "+" :
-                         v.binaryOp == GPU::IR::BinaryOp::Sub ? "-" :
-                         v.binaryOp == GPU::IR::BinaryOp::Mul ? "*" : "/";
-        return "(" + left + " " + op + " " + right + ")";
-    }
-    case GPU::IR::ValueRecord::Kind::Compare: {
-        auto left = module_value_to_glsl(module, v.left, resource_names);
-        auto right = module_value_to_glsl(module, v.right, resource_names);
-        const char* op = v.compareOp == GPU::IR::CompareOp::Equal      ? "=="
-                       : v.compareOp == GPU::IR::CompareOp::NotEqual    ? "!="
-                       : v.compareOp == GPU::IR::CompareOp::Less        ? "<"
-                       : v.compareOp == GPU::IR::CompareOp::LessEqual   ? "<="
-                       : v.compareOp == GPU::IR::CompareOp::Greater     ? ">"
-                       : v.compareOp == GPU::IR::CompareOp::GreaterEqual ? ">=" : "==";
-        return "(" + left + " " + op + " " + right + ")";
-    }
-    case GPU::IR::ValueRecord::Kind::Intrinsic: {
-        std::string args;
-        for (size_t i = 0; i < v.arguments.size(); ++i) {
-            if (i > 0) args += ", ";
-            args += module_value_to_glsl(module, v.arguments[i], resource_names);
-        }
-        return v.intrinsic + "(" + args + ")";
-    }
-    case GPU::IR::ValueRecord::Kind::ResourceElement: {
-        auto it = resource_names.find(v.resource);
-        auto buf_name = it != resource_names.end() ? it->second : "unknown";
-        auto idx = module_value_to_glsl(module, v.index, resource_names);
-        return buf_name + "[" + idx + "]";
-    }
-    case GPU::IR::ValueRecord::Kind::PushConstant: {
-        auto it = resource_names.find(v.resource);
-        return it != resource_names.end() ? it->second : "unknown_pc";
-    }
-    default: return "true";
-    }
-}
-
-// Lookup the root node index for a control flow condition expression.
-uint32_t find_cf_condition_node(const ParsedIr& ir, uint32_t instruction_index, uint8_t role) {
-    for (const auto& cf : ir.control_flow_expressions) {
-        if (cf.instruction_index == instruction_index && cf.role == role) return cf.root_node_index;
-    }
-    return UINT32_MAX;
-}
-
-// Build a boolean condition value for ModuleBuilder control flow statements.
-// Returns InvalidValueId if no expression is available for this instruction.
-GPU::IR::ValueId build_easygpu_module_condition(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                 const ModuleResourceMap& resources, uint32_t instruction_index,
-                                                 uint8_t role) {
-    const auto root = find_cf_condition_node(ir, instruction_index, role);
-    if (root == UINT32_MAX) return GPU::IR::InvalidValueId;
-    return build_easygpu_module_cf_expression(ir, builder, resources, root);
-}
-
-bool register_easygpu_module_resources(const ParsedIr& ir, const KernelState& kernel,
-                                       GPU::IR::ModuleBuilder& builder, ModuleResourceMap* resources) {
-    if (resources == nullptr) {
-        return false;
-    }
-
-    for (const auto& resource : ir.resources) {
-        const auto* type = get_string(ir, resource.element_type_string_id);
-        if (type == nullptr) {
-            return false;
-        }
-
-        GPU::IR::ResourceId id = GPU::IR::InvalidResourceId;
-        if (resource.kind == kIrResourceKindBuffer) {
-            const auto module_type = easygpu_module_type(*type);
-            if (!module_type.IsValid()) {
-                return false;
-            }
-            id = builder.AddBuffer(
-                resource.binding, module_type, easygpu_resource_access(resource.access), easygpu_buffer_name(resource));
-        } else if (resource.kind == kIrResourceKindPushConstant) {
-            const auto module_type = easygpu_module_type(*type);
-            if (!module_type.IsValid()) {
-                return false;
-            }
-
-            size_t offset = 0;
-            size_t size = 0;
-            if (!find_push_constant_offset(ir, resource.binding, &offset, &size)) {
-                return false;
-            }
-
-            const auto alignment = push_constant_type_alignment(ir, resource);
-            auto* data = offset + size <= kernel.push_constants.size()
-                             ? const_cast<unsigned char*>(kernel.push_constants.data() + offset)
-                             : nullptr;
-            id = builder.AddPushConstant(
-                resource.binding, module_type, easygpu_push_constant_name(resource), data, size, alignment);
-        } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
-            const auto is_texture3d = resource.kind == kIrResourceKindTexture3D;
-            // Texture imageLoad/imageStore always return/accept vec4 for normalized formats.
-            // Use Float4 as the shader element type regardless of the C# pixel type.
-            const auto tex_module_type = GPU::IR::Type::Float4();
-
-            // Look up the bound texture for format and dimensions, or use safe defaults for shader inspection.
-            uint32_t tex_width = 1;
-            uint32_t tex_height = 1;
-            uint32_t tex_depth = 1;
-            uint32_t tex_format = 3; // RGBA8
-            bool tex_sampled = (resource.access == 4); // SampledTexture2D
-
-            const auto bound = kernel.textures.find(resource.binding);
-            if (bound != kernel.textures.end()) {
-                const auto texture = g_textures.find(bound->second);
-                if (texture != g_textures.end()) {
-                    tex_width = texture->second.width;
-                    tex_height = texture->second.height;
-                    tex_depth = texture->second.depth;
-                    tex_format = texture->second.pixel_format;
-                }
-            }
-
-            GPU::Runtime::PixelFormat runtime_format = GPU::Runtime::PixelFormat::RGBA8;
-            easygpu_runtime_pixel_format(tex_format, &runtime_format);
-
-            if (is_texture3d) {
-                id = builder.AddTexture3D(resource.binding, tex_module_type, easygpu_resource_access(resource.access),
-                                          "te_" + std::to_string(resource.binding), runtime_format, tex_width,
-                                          tex_height, tex_depth, tex_sampled);
-            } else {
-                id = builder.AddTexture2D(resource.binding, tex_module_type, easygpu_resource_access(resource.access),
-                                          "te_" + std::to_string(resource.binding), runtime_format, tex_width,
-                                          tex_height, tex_sampled);
-            }
-        } else if (resource.kind == 3 /* kIrResourceKindSampler */) {
-            // Sampler resources: register as a placeholder; actual sampling uses
-            // the sampled texture's combined sampler2D name in GLSL.
-            id = static_cast<GPU::IR::ResourceId>(resource.binding + 1000);
-        } else {
-            return false;
-        }
-
-        resources->emplace(resource.binding, id);
-    }
-
-    return true;
-}
-
 bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kernel,
                                     Feather::TypedIR::LoweringInputs* inputs,
                                     bool allow_unbound_samplers = false) {
-    if (inputs == nullptr) {
-        return false;
-    }
-
+    if (inputs == nullptr) return false;
     inputs->shader_kind = ir.shader_kind;
     inputs->group_x = ir.group_x;
     inputs->group_y = ir.group_y;
@@ -4420,9 +3191,7 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     for (const auto& resource : ir.resources) {
         const auto* name = get_string(ir, resource.name_string_id);
         const auto* element_type = get_string(ir, resource.element_type_string_id);
-        if (name == nullptr || element_type == nullptr) {
-            return false;
-        }
+        if (name == nullptr || element_type == nullptr) return false;
 
         Feather::TypedIR::ResourceInfo resource_info;
         resource_info.binding = resource.binding;
@@ -4432,20 +3201,25 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         resource_info.element_type = *element_type;
 
         if (resource.kind == kIrResourceKindPushConstant) {
-            size_t offset = 0;
-            size_t size = 0;
-            if (!find_push_constant_offset(ir, resource.binding, &offset, &size)) {
-                return false;
-            }
-
-            Feather::TypedIR::PushConstantInfo push_constant;
-            push_constant.binding = resource.binding;
-            push_constant.size = size;
-            push_constant.alignment = push_constant_type_alignment(ir, resource);
-            push_constant.data = offset + size <= kernel.push_constants.size()
-                                     ? const_cast<unsigned char*>(kernel.push_constants.data() + offset)
-                                     : nullptr;
-            inputs->push_constants.push_back(push_constant);
+            size_t offset = 0u;
+            size_t size = 0u;
+            if (!find_push_constant_offset(ir, resource.binding, &offset, &size)) return false;
+            inputs->push_constants.push_back(Feather::TypedIR::PushConstantInfo{
+                resource.binding,
+                offset + size <= kernel.push_constants.size()
+                    ? const_cast<unsigned char*>(kernel.push_constants.data() + offset)
+                    : nullptr,
+                size,
+                push_constant_type_alignment(ir, resource)});
+        } else if (resource.kind == kIrResourceKindBuffer) {
+            const auto bound = kernel.buffers.find(resource.binding);
+            if (bound == kernel.buffers.end()) return false;
+            const auto buffer = g_buffers.find(bound->second);
+            if (buffer == g_buffers.end() || buffer->second.stride == 0u ||
+                buffer->second.bytes.size() % buffer->second.stride != 0u ||
+                buffer->second.bytes.size() / buffer->second.stride > UINT32_MAX) return false;
+            resource_info.element_count =
+                static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
         } else if (resource.kind == kIrResourceKindSampler) {
             const auto bound = kernel.samplers.find(resource.binding);
             if (bound == kernel.samplers.end()) {
@@ -4463,12 +3237,7 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                 resource_info.sampler_anisotropy = desc.anisotropy_enable != 0u;
             }
         } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
-            resource_info.sampled = resource.access == 4;
-            resource_info.width = 1;
-            resource_info.height = 1;
-            resource_info.depth = 1;
-            resource_info.texture_format = GPU::Runtime::PixelFormat::RGBA8;
-
+            resource_info.sampled = resource.access == 4u;
             const auto bound = kernel.textures.find(resource.binding);
             if (bound != kernel.textures.end()) {
                 const auto texture = g_textures.find(bound->second);
@@ -4476,1112 +3245,12 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                     resource_info.width = texture->second.width;
                     resource_info.height = texture->second.height;
                     resource_info.depth = texture->second.depth;
-                    if (!easygpu_runtime_pixel_format(texture->second.pixel_format, &resource_info.texture_format)) {
-                        return false;
-                    }
+                    resource_info.texture_format = texture->second.pixel_format;
                 }
             }
         }
-
         inputs->resources.push_back(std::move(resource_info));
     }
-
-    return true;
-}
-
-bool has_typed_section7_semantics(const KernelState& kernel) {
-    ParsedIr ir;
-    return parse_feather_ir(kernel.ir, &ir) && ir.has_section7;
-}
-
-std::unique_ptr<GPU::IR::Module> try_build_typed_easygpu_module(const KernelState& kernel,
-                                                                bool enable_fused_multiply_add,
-                                                                bool allow_unbound_samplers,
-                                                                std::string* error = nullptr) {
-    if (error != nullptr) {
-        error->clear();
-    }
-
-    ParsedIr ir;
-    if (!parse_feather_ir(kernel.ir, &ir) || !ir.has_section7) {
-        if (error != nullptr) {
-            *error = "Kernel IR does not contain a valid section 7 typed IR payload.";
-        }
-
-        return nullptr;
-    }
-
-    Feather::TypedIR::LoweringInputs inputs;
-    if (!build_typed_ir_lowering_inputs(ir, kernel, &inputs, allow_unbound_samplers)) {
-        if (error != nullptr) {
-            *error = "Section 7 typed IR resources could not be matched to bound native resources.";
-        }
-
-        return nullptr;
-    }
-    inputs.enable_fused_multiply_add = enable_fused_multiply_add;
-
-    auto module = Feather::TypedIR::TryLowerToEasyGpuModule(ir.typed_module, inputs, error);
-    if (module == nullptr && error != nullptr && error->empty()) {
-        *error = "Section 7 typed IR lowerer rejected the module before EasyGPU dispatch.";
-    }
-
-    return module;
-}
-
-bool build_easygpu_module_texture_element_access(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                 const ModuleResourceMap& resources, uint32_t resource_binding) {
-    const auto mapped = resources.find(resource_binding);
-    if (mapped == resources.end()) {
-        return false;
-    }
-
-    // Texture copy uses the current thread index: x = ThreadIds.X, y = ThreadIds.Y
-    const auto x = builder.ThreadIndexX();
-    const auto y = builder.ThreadIndexY();
-    if (x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId) {
-        return false;
-    }
-
-    // Create the texture element access value.
-    const auto element = builder.TextureElement(mapped->second, x, y);
-    return element != GPU::IR::InvalidValueId;
-}
-
-bool build_easygpu_module_expression_assignment(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                const ModuleResourceMap& resources,
-                                                const IrExpressionAssignment& assignment) {
-    const auto* destination = find_resource_by_binding(ir, assignment.destination_binding);
-    if (destination == nullptr) {
-        return false;
-    }
-
-    // Texture-to-texture copy through imageLoad/imageStore.
-    if (destination->kind == kIrResourceKindTexture2D) {
-        if (assignment.root_node_index >= ir.expression_nodes.size()) {
-            return false;
-        }
-        const auto& root = ir.expression_nodes[assignment.root_node_index];
-        if (root.kind != 1) {
-            return false;
-        }
-
-        const auto dst_mapped = resources.find(assignment.destination_binding);
-        const auto src_mapped = resources.find(root.resource_binding);
-        if (dst_mapped == resources.end() || src_mapped == resources.end()) {
-            return false;
-        }
-
-        const auto x = builder.ThreadIndexX();
-        const auto y = builder.ThreadIndexY();
-        if (x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId) {
-            return false;
-        }
-
-        const auto dst = builder.TextureElement(dst_mapped->second, x, y);
-        const auto src = builder.TextureElement(src_mapped->second, x, y);
-        if (dst == GPU::IR::InvalidValueId || src == GPU::IR::InvalidValueId) {
-            return false;
-        }
-
-        builder.Store(dst, src);
-        return true;
-    }
-
-    if (destination->kind != kIrResourceKindBuffer) {
-        return false;
-    }
-
-    auto left = build_easygpu_module_resource_access(
-        ir, builder, resources, assignment.destination_binding, assignment.index_string_id);
-    auto right = build_easygpu_module_expression(ir, builder, resources, assignment.root_node_index);
-    if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId) {
-        return false;
-    }
-
-    builder.Store(left, right);
-    return true;
-}
-
-bool build_easygpu_module_structured_assignment(const ParsedIr& ir, GPU::IR::ModuleBuilder& builder,
-                                                const ModuleResourceMap& resources,
-                                                const IrElementwiseAssignment& assignment) {
-    const auto* destination = find_resource_by_binding(ir, assignment.destination_binding);
-    const auto* left_resource = find_resource_by_binding(ir, assignment.left_binding);
-    if (destination == nullptr || left_resource == nullptr) {
-        return false;
-    }
-
-    // Texture-to-texture copy (operation 1) through imageLoad/imageStore.
-    if (destination->kind == kIrResourceKindTexture2D && left_resource->kind == kIrResourceKindTexture2D &&
-        assignment.operation == 1) {
-        const auto dst_mapped = resources.find(assignment.destination_binding);
-        const auto src_mapped = resources.find(assignment.left_binding);
-        if (dst_mapped == resources.end() || src_mapped == resources.end()) {
-            return false;
-        }
-
-        const auto x = builder.ThreadIndexX();
-        const auto y = builder.ThreadIndexY();
-        if (x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId) {
-            return false;
-        }
-
-        const auto dst = builder.TextureElement(dst_mapped->second, x, y);
-        const auto src = builder.TextureElement(src_mapped->second, x, y);
-        if (dst == GPU::IR::InvalidValueId || src == GPU::IR::InvalidValueId) {
-            return false;
-        }
-
-        builder.Store(dst, src);
-        return true;
-    }
-
-    if (destination->kind != kIrResourceKindBuffer || left_resource->kind != kIrResourceKindBuffer) {
-        return false;
-    }
-
-    auto destination_node = build_easygpu_module_resource_access(
-        ir, builder, resources, assignment.destination_binding, assignment.index_string_id);
-    auto source_node = build_easygpu_module_resource_access(
-        ir, builder, resources, assignment.left_binding, assignment.index_string_id);
-    if (destination_node == GPU::IR::InvalidValueId || source_node == GPU::IR::InvalidValueId) {
-        return false;
-    }
-
-    auto right = source_node;
-    if (assignment.operation != 1) {
-        GPU::IR::ValueId rhs = GPU::IR::InvalidValueId;
-        if (assignment.right_operand_kind == 1) {
-            rhs = build_easygpu_module_resource_access(ir, builder, resources, assignment.right_binding,
-                                                       assignment.index_string_id);
-        } else if (assignment.right_operand_kind == 2) {
-            const auto* literal = get_string(ir, assignment.right_literal_string_id);
-            const auto* type = get_string(ir, left_resource->element_type_string_id);
-            const auto module_type = type == nullptr ? GPU::IR::Type{} : easygpu_module_type(*type);
-            rhs = literal == nullptr || !module_type.IsValid()
-                      ? GPU::IR::InvalidValueId
-                      : builder.Literal(module_type, *literal);
-        } else {
-            return false;
-        }
-
-        GPU::IR::BinaryOp op{};
-        if (rhs == GPU::IR::InvalidValueId || !easygpu_structured_binary_op(assignment.operation, &op)) {
-            return false;
-        }
-
-        right = builder.Binary(op, right, rhs);
-        if (right == GPU::IR::InvalidValueId) {
-            return false;
-        }
-    }
-
-    builder.Store(destination_node, right);
-    return true;
-}
-
-std::unique_ptr<GPU::IR::Module> try_build_easygpu_module(const KernelState& kernel,
-                                                          GPU::AD::GradientTape* gradientTape = nullptr,
-                                                          bool allow_unbound_samplers = false) {
-    std::string typed_error;
-    const bool enable_fused_multiply_add = kEnableFusedMultiplyAdd && !kernel.auto_diff && gradientTape == nullptr;
-    if (auto typed_module = try_build_typed_easygpu_module(
-            kernel, enable_fused_multiply_add, allow_unbound_samplers, &typed_error)) {
-        return typed_module;
-    }
-
-    ParsedIr ir;
-    if (!parse_feather_ir(kernel.ir, &ir) || ir.shader_kind < 1 || ir.shader_kind > 3 || ir.group_x <= 0 || ir.group_y <= 0 ||
-        ir.group_z <= 0) {
-        return nullptr;
-    }
-
-    if (ir.has_section7) {
-        if (!typed_error.empty()) {
-            fail(FE_ERROR_UNSUPPORTED, "Section 7 typed IR could not be lowered to an EasyGPU module: " + typed_error);
-        }
-
-        return nullptr;
-    }
-
-    GPU::IR::ModuleBuilder builder;
-    // If a GradientTape is provided, set it on the Builder for AD recording.
-    // The tape is activated before module building and extracted after.
-    if (gradientTape != nullptr) {
-        // The tape will be activated in the ModuleLowerer during ScopedBind.
-        // We store it here for the ModuleLowerer to use.
-    }
-
-    builder.BeginComputeKernel(static_cast<uint32_t>(ir.group_x), static_cast<uint32_t>(ir.group_y),
-                               static_cast<uint32_t>(ir.group_z), static_cast<uint32_t>(ir.shader_kind) + 1);
-
-	    ModuleResourceMap resources;
-	    if (!register_easygpu_module_resources(ir, kernel, builder, &resources)) {
-	        return nullptr;
-	    }
-
-    // Process FEIR instructions in order, building assignments and control flow.
-    // Uses a two-pass approach: first determine control flow block structure,
-    // then emit ModuleBuilder calls in the correct order.
-
-    // Step 1: Build a mapping of instruction index -> block membership.
-    // Block nesting stack: each entry tracks the current control flow type.
-    struct BlockInfo {
-        uint32_t id = 0;
-        bool isIfBlock = false;
-        bool isElse = false;
-    };
-    std::vector<BlockInfo> blockStack;
-    std::vector<uint32_t> instrToBlock; // For each instruction, which block it belongs to (0 = main)
-
-    // Track block assignment containers: for each block, which instruction indices it contains.
-    std::vector<std::vector<uint32_t>> blockAssignments; // block index -> instruction indices
-    blockAssignments.push_back({}); // Block 0 = main (no control flow)
-
-    // Step 2: Scan instructions to build block hierarchy.
-    for (uint32_t idx = 0; idx < static_cast<uint32_t>(ir.instructions.size()); idx++) {
-        const auto& inst = ir.instructions[idx];
-
-        if (inst.opcode == kIrOpcodeBeginBlock) {
-            // Start collecting into a new block
-            BlockInfo info;
-            info.id = static_cast<uint32_t>(blockAssignments.size());
-            blockAssignments.push_back({});
-            blockStack.push_back(info);
-            continue;
-        }
-
-        if (inst.opcode == kIrOpcodeEndBlock) {
-            if (!blockStack.empty()) {
-                blockStack.pop_back();
-            }
-            continue;
-        }
-
-        if (inst.opcode == kIrOpcodeIf || inst.opcode == kIrOpcodeFor ||
-            inst.opcode == kIrOpcodeWhile || inst.opcode == kIrOpcodeDo ||
-            inst.opcode == kIrOpcodeElse || inst.opcode == kIrOpcodeBreak ||
-            inst.opcode == kIrOpcodeContinue || inst.opcode == kIrOpcodeReturn ||
-            inst.opcode == kIrOpcodeInvocation || inst.opcode == kIrOpcodeResourceAccess ||
-            inst.opcode == kIrOpcodeExpression || inst.opcode == kIrOpcodeLocalDeclaration) {
-            continue;
-        }
-
-        if (inst.opcode == kIrOpcodeAssignment) {
-            // Assign this instruction to the current block (or main block 0)
-            uint32_t blockId = blockStack.empty() ? 0 : blockStack.back().id;
-            if (blockId >= blockAssignments.size()) {
-                blockAssignments.resize(blockId + 1);
-            }
-            blockAssignments[blockId].push_back(idx);
-            continue;
-        }
-
-        // Barrier and shared memory instructions
-        if (inst.opcode == kIrOpcodeWorkgroupBarrier || inst.opcode == kIrOpcodeMemoryBarrier ||
-            inst.opcode == kIrOpcodeFullBarrier || inst.opcode == kIrOpcodeSharedMemoryDeclaration) {
-            continue;
-        }
-    }
-
-    // Build a resource-id → GLSL name map for condition expression lowering.
-    std::unordered_map<uint32_t, std::string> resource_glsl_names;
-    for (const auto& binding : builder.GetModule().resources) {
-        resource_glsl_names[binding.id] = binding.name;
-    }
-
-    // Process instructions in order, emitting assignments and control flow.
-    // Control flow structure uses RawGLSL but conditions are built through the typed
-    // expression system (Section 3/5) instead of raw C# source text.
-    struct CfFrame { uint8_t opcode; bool expect_else; };
-    std::vector<CfFrame> cf_stack;
-
-    for (uint32_t idx = 0; idx < static_cast<uint32_t>(ir.instructions.size()); idx++) {
-        const auto& inst = ir.instructions[idx];
-
-        switch (inst.opcode) {
-        case kIrOpcodeAssignment: {
-            // Check for compound assignment first (Section 6)
-            bool had_compound = false;
-            for (const auto& ca : ir.compound_assignments) {
-                if (ca.instruction_index != idx) continue;
-                auto dest = build_easygpu_module_resource_access(ir, builder, resources,
-                    ca.destination_binding, ca.index_string_id);
-                auto value = build_compound_expression(ir, builder, resources, ca.root_node_index);
-                GPU::IR::BinaryOp op{};
-                if (dest != GPU::IR::InvalidValueId && value != GPU::IR::InvalidValueId &&
-                    easygpu_structured_binary_op(ca.operation, &op)) {
-                    auto result = builder.Binary(op, dest, value);
-                    if (result != GPU::IR::InvalidValueId)
-                        builder.Store(dest, result);
-                }
-                had_compound = true;
-                break;
-            }
-            if (had_compound) break;
-
-            bool had_expression = false;
-            for (const auto& assn : ir.expression_assignments) {
-                if (assn.instruction_index == idx) {
-                    build_easygpu_module_expression_assignment(ir, builder, resources, assn);
-                    had_expression = true;
-                }
-            }
-            if (!had_expression) {
-                for (const auto& assn : ir.elementwise_assignments) {
-                    if (assn.instruction_index == idx)
-                        build_easygpu_module_structured_assignment(ir, builder, resources, assn);
-                }
-            }
-            break;
-        }
-        case kIrOpcodeWorkgroupBarrier:
-            builder.Barrier(GPU::IR::BarrierKind::Workgroup);
-            break;
-        case kIrOpcodeMemoryBarrier:
-            builder.Barrier(GPU::IR::BarrierKind::Memory);
-            break;
-        case kIrOpcodeFullBarrier:
-            builder.Barrier(GPU::IR::BarrierKind::Full);
-            break;
-        case kIrOpcodeSharedMemoryDeclaration:
-            return nullptr;
-        case kIrOpcodeLocalDeclaration:
-            for (const auto& decl : ir.local_variable_decls) {
-                if (decl.instruction_index != idx) continue;
-                const auto* glsl_text = get_string(ir, decl.glsl_text_string_id);
-                if (glsl_text == nullptr) break;
-                builder.RawGLSL(*glsl_text + "\n");
-                break;
-            }
-            break;
-        case kIrOpcodeIf: {
-            cf_stack.push_back({kIrOpcodeIf, true});
-            auto cond = build_easygpu_module_condition(ir, builder, resources, idx, kCfRoleIfCondition);
-            std::string cond_str = "true";
-            if (cond != GPU::IR::InvalidValueId)
-                cond_str = module_value_to_glsl(builder.GetModule(), cond, resource_glsl_names);
-            builder.RawGLSL("if (" + cond_str + ") {\n");
-            break;
-        }
-        case kIrOpcodeElse:
-            if (!cf_stack.empty() && cf_stack.back().opcode == kIrOpcodeIf)
-                cf_stack.back().expect_else = false;
-            builder.RawGLSL("} else {\n");
-            break;
-        case kIrOpcodeEndBlock:
-            if (!cf_stack.empty() && cf_stack.back().expect_else && cf_stack.back().opcode == kIrOpcodeIf) {
-                // Then-body end: don't close — else is coming
-                cf_stack.back().expect_else = false;
-            } else if (!cf_stack.empty()) {
-                cf_stack.pop_back();
-                builder.RawGLSL("}\n");
-            }
-            break;
-        case kIrOpcodeFor: {
-            cf_stack.push_back({kIrOpcodeFor, false});
-            auto cond = build_easygpu_module_condition(ir, builder, resources, idx, kCfRoleForCondition);
-            std::string cond_str = module_value_to_glsl(builder.GetModule(),
-                cond != GPU::IR::InvalidValueId ? cond : builder.Literal(GPU::IR::Type::Bool(), "true"),
-                resource_glsl_names);
-            // Look for for-step expression
-            auto step_val = build_easygpu_module_condition(ir, builder, resources, idx, kCfRoleForStep);
-            std::string step_str;
-            if (step_val != GPU::IR::InvalidValueId)
-                step_str = module_value_to_glsl(builder.GetModule(), step_val, resource_glsl_names);
-            builder.RawGLSL("for (; " + cond_str + "; " + step_str + ") {\n");
-            break;
-        }
-        case kIrOpcodeWhile: {
-            cf_stack.push_back({kIrOpcodeWhile, false});
-            auto cond = build_easygpu_module_condition(ir, builder, resources, idx, kCfRoleWhileCondition);
-            std::string cond_str = "true";
-            if (cond != GPU::IR::InvalidValueId)
-                cond_str = module_value_to_glsl(builder.GetModule(), cond, resource_glsl_names);
-            builder.RawGLSL("while (" + cond_str + ") {\n");
-            break;
-        }
-        case kIrOpcodeDo:
-            cf_stack.push_back({kIrOpcodeDo, false});
-            builder.RawGLSL("do {\n");
-            break;
-        case kIrOpcodeBreak:
-            builder.Break();
-            break;
-        case kIrOpcodeContinue:
-            builder.Continue();
-            break;
-        case kIrOpcodeReturn:
-            builder.Return();
-            break;
-        case kIrOpcodeBeginBlock:
-        case kIrOpcodeInvocation:
-        case kIrOpcodeTextureSample:
-        case kIrOpcodeResourceAccess:
-        case kIrOpcodeExpression:
-        default:
-            break;
-        }
-    }
-
-    return std::make_unique<GPU::IR::Module>(builder.GetModule());
-}
-
-std::unique_ptr<GPU::Kernel::KernelBuildContext> try_build_easygpu_kernel_context(const KernelState& kernel, GPU::AD::GradientTape* gradientTape = nullptr) {
-    auto module = try_build_easygpu_module(kernel, gradientTape);
-    if (module == nullptr) {
-        return nullptr;
-    }
-
-    auto context = GPU::IR::BuildKernelBuildContext(*module);
-    if (context != nullptr) {
-        context->SetOptimizationLevel(kShaderOptimizationLevel);
-    }
-    return context;
-}
-
-GPU::Backend::BufferMode easygpu_buffer_storage_mode(uint32_t mode) {
-    switch (mode) {
-    case 1:
-        return GPU::Backend::BufferMode::Read;
-    case 2:
-        return GPU::Backend::BufferMode::Write;
-    default:
-        return GPU::Backend::BufferMode::ReadWrite;
-    }
-}
-
-uint32_t easygpu_texture_usage_flags(const TextureState& texture) {
-    using namespace GPU::Backend;
-
-    uint32_t usage = TextureUsageTransferSrc | TextureUsageTransferDst;
-    switch (texture.access) {
-    case 1: // ReadOnlyTexture2D
-        usage |= TextureUsageStorage | TextureUsageSampled;
-        break;
-    case 2: // WriteOnlyTexture2D
-    case 3: // ReadWriteTexture2D
-        usage |= TextureUsageStorage | TextureUsageSampled;
-        break;
-    case 4: // SampledTexture2D
-        usage |= TextureUsageSampled;
-        break;
-    case 5: // RenderTarget
-        usage |= TextureUsageColorAttachment | TextureUsageSampled | TextureUsageStorage;
-        break;
-    case 6: // DepthStencil
-        usage |= TextureUsageDepthStencilAttachment;
-        break;
-    default:
-        usage |= TextureUsageStorage | TextureUsageSampled;
-        if (texture.depth == 1) {
-            usage |= TextureUsageColorAttachment;
-        }
-        break;
-    }
-
-    return usage;
-}
-
-GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend) {
-    if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-        GPU::Backend::BufferDesc desc;
-        desc.sizeInBytes = buffer.bytes.size();
-        desc.mode = easygpu_buffer_storage_mode(buffer.mode);
-        desc.initialData = buffer.bytes.empty() ? nullptr : buffer.bytes.data();
-        buffer.backend_buffer = backend.CreateBuffer(desc);
-        if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-            throw std::runtime_error("EasyGPU backend failed to create buffer.");
-        }
-
-        buffer.host_dirty = false;
-        buffer.device_dirty = false;
-        return buffer.backend_buffer;
-    }
-
-    if (buffer.host_dirty && !buffer.bytes.empty()) {
-        backend.UploadBuffer(buffer.backend_buffer, 0, buffer.bytes.size(), buffer.bytes.data());
-        buffer.host_dirty = false;
-        buffer.device_dirty = false;
-    }
-
-    return buffer.backend_buffer;
-}
-
-void download_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend) {
-    if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE || !buffer.device_dirty || buffer.bytes.empty()) {
-        return;
-    }
-
-    backend.DownloadBuffer(buffer.backend_buffer, 0, buffer.bytes.size(), buffer.bytes.data());
-    buffer.device_dirty = false;
-    buffer.luisa_uploaded = false;
-}
-
-GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::Backend::Backend& backend) {
-    if (texture.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
-        if (texture.host_dirty && !texture.bytes.empty()) {
-            if (texture.pixel_format == 100) {
-                throw std::runtime_error("Depth24Stencil8 textures cannot be uploaded from host memory on this backend.");
-            }
-            if (texture.depth > 1) {
-                backend.UploadTexture3D(texture.backend_texture, 0, 0, 0, texture.width, texture.height,
-                                        texture.depth, texture.bytes.data());
-            } else {
-                backend.UploadTexture(texture.backend_texture, 0, 0, texture.width, texture.height,
-                                      texture.bytes.data());
-            }
-            texture.host_dirty = false;
-            texture.device_dirty = false;
-            texture.mipmaps_dirty = texture.mipmaps_requested && texture.mip_levels > 1;
-        }
-        if (texture.mipmaps_dirty && texture.mipmaps_requested && texture.mip_levels > 1) {
-            if (texture.depth > 1) {
-                throw std::runtime_error("EasyGPU mipmap generation currently supports 2D textures only.");
-            }
-            if (texture.pixel_format == 100 || texture.pixel_format == 101) {
-                throw std::runtime_error("Depth textures do not support mipmap generation.");
-            }
-            backend.GenerateMipmaps(texture.backend_texture);
-            texture.mipmaps_dirty = false;
-        }
-        return texture.backend_texture;
-    }
-
-    if (texture.bytes.empty()) {
-        return GPU::Backend::INVALID_TEXTURE_HANDLE;
-    }
-
-    GPU::Backend::PixelFormat backend_format = GPU::Backend::PixelFormat::RGBA8;
-    if (!easygpu_backend_pixel_format(texture.pixel_format, &backend_format)) {
-        throw std::runtime_error("EasyGPU texture format is not supported.");
-    }
-
-    GPU::Backend::TextureDesc desc;
-    desc.width = texture.width;
-    desc.height = texture.height;
-    desc.depth = texture.depth;
-    desc.format = backend_format;
-    desc.initialData = texture.pixel_format == 100 ? nullptr : texture.bytes.data();
-    desc.mipLevels = texture.mip_levels;
-    desc.usage = easygpu_texture_usage_flags(texture);
-
-    texture.backend_texture = backend.CreateTexture(desc);
-    if (texture.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
-        throw std::runtime_error("EasyGPU backend failed to create texture.");
-    }
-
-    texture.host_dirty = false;
-    texture.device_dirty = false;
-    if (texture.mipmaps_requested && texture.mip_levels > 1) {
-        if (texture.depth > 1) {
-            throw std::runtime_error("EasyGPU mipmap generation currently supports 2D textures only.");
-        }
-        if (texture.pixel_format == 100 || texture.pixel_format == 101) {
-            throw std::runtime_error("Depth textures do not support mipmap generation.");
-        }
-        backend.GenerateMipmaps(texture.backend_texture);
-        texture.mipmaps_dirty = false;
-    }
-    return texture.backend_texture;
-}
-
-void download_easygpu_texture(TextureState& texture, GPU::Backend::Backend& backend) {
-    if (texture.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE || !texture.device_dirty || texture.bytes.empty()) {
-        return;
-    }
-
-    if (texture.depth > 1) {
-        trace_graphics_step("download texture3d");
-        backend.DownloadTexture3D(texture.backend_texture, 0, 0, 0, texture.width, texture.height, texture.depth,
-                                  texture.bytes.data());
-    } else if (texture.pixel_format == 100) {
-        throw std::runtime_error("Depth24Stencil8 textures cannot be downloaded to host memory on this backend.");
-    } else {
-        trace_graphics_step("download texture2d");
-        backend.DownloadTexture(texture.backend_texture, 0, 0, texture.width, texture.height, texture.bytes.data());
-    }
-    texture.device_dirty = false;
-}
-
-bool map_sampler_desc(const FeSamplerDesc& source, GPU::Backend::SamplerDesc* out);
-
-void bind_easygpu_runtime_buffers(const KernelState& kernel, GPU::Kernel::KernelBuildContext& context,
-                                  GPU::Backend::Backend& backend) {
-    for (const auto& [binding, feather_buffer] : kernel.buffers) {
-        auto buffer = g_buffers.find(feather_buffer);
-        if (buffer == g_buffers.end()) {
-            throw std::runtime_error("Kernel references an invalid Feather buffer.");
-        }
-
-        context.BindRuntimeBuffer(binding, ensure_easygpu_buffer(buffer->second, backend));
-    }
-}
-
-void mark_easygpu_writable_buffers_dirty(const KernelState& kernel, const GPU::Kernel::KernelBuildContext& context) {
-    for (const auto& info : context.GetBufferInfos()) {
-        if (info.mode == GPU::Backend::BUFFER_MODE_READ_ONLY) {
-            continue;
-        }
-
-        const auto binding = kernel.buffers.find(info.binding);
-        if (binding == kernel.buffers.end()) {
-            continue;
-        }
-
-        auto buffer = g_buffers.find(binding->second);
-        if (buffer != g_buffers.end()) {
-            buffer->second.device_dirty = true;
-            buffer->second.host_dirty = false;
-            buffer->second.luisa_uploaded = false;
-            ++buffer->second.content_revision;
-        }
-    }
-}
-
-void bind_easygpu_runtime_textures(const KernelState& kernel, GPU::Kernel::KernelBuildContext& context,
-                                   GPU::Backend::Backend& backend) {
-    for (const auto& [binding, feather_texture] : kernel.textures) {
-        auto texture = g_textures.find(feather_texture);
-        if (texture == g_textures.end()) {
-            throw std::runtime_error("Kernel references an invalid Feather texture.");
-        }
-
-        context.BindRuntimeTexture(binding, ensure_easygpu_texture(texture->second, backend));
-        if (kernel.samplers.size() == 1) {
-            const auto sampler = g_samplers.find(kernel.samplers.begin()->second);
-            GPU::Backend::SamplerDesc mapped;
-            if (sampler != g_samplers.end() && map_sampler_desc(sampler->second.desc, &mapped)) {
-                context.BindRuntimeTextureSampler(binding, mapped);
-            }
-        }
-    }
-}
-
-void mark_easygpu_writable_textures_dirty(const KernelState& kernel, const GPU::Kernel::KernelBuildContext& context) {
-    for (const auto& info : context.GetTextureInfos()) {
-        if (info.sampled) {
-            continue;
-        }
-
-        const auto binding = kernel.textures.find(info.binding);
-        if (binding == kernel.textures.end()) {
-            continue;
-        }
-
-        auto texture = g_textures.find(binding->second);
-        if (texture != g_textures.end()) {
-            texture->second.device_dirty = true;
-            texture->second.host_dirty = false;
-            texture->second.mipmaps_dirty = texture->second.mipmaps_requested && texture->second.mip_levels > 1;
-        }
-    }
-}
-
-bool is_easygpu_texture_resource(const ParsedIr& ir, uint32_t binding) {
-    const auto* resource = find_resource_by_binding(ir, binding);
-    if (resource == nullptr || resource->kind != kIrResourceKindTexture2D) {
-        return false;
-    }
-
-    // Texture resources are valid if they have a name and element type string.
-    const auto* type = get_string(ir, resource->element_type_string_id);
-    return type != nullptr && !type->empty();
-}
-
-bool is_easygpu_buffer_resource(const ParsedIr& ir, uint32_t binding) {
-    const auto* resource = find_resource_by_binding(ir, binding);
-    if (resource == nullptr || resource->kind != kIrResourceKindBuffer) {
-        return false;
-    }
-
-    return easygpu_buffer_element_stride(ir, *resource) != 0;
-}
-
-bool is_easygpu_push_constant_resource(const ParsedIr& ir, uint32_t binding) {
-    const auto* resource = find_resource_by_binding(ir, binding);
-    if (resource == nullptr || resource->kind != kIrResourceKindPushConstant) {
-        return false;
-    }
-
-    const auto* type = get_string(ir, resource->element_type_string_id);
-    return type != nullptr && easygpu_module_type(*type).IsValid() &&
-           push_constant_type_size(ir, *resource) != 0 &&
-           push_constant_type_alignment(ir, *resource) != 0;
-}
-
-bool is_easygpu_expression_tree(const ParsedIr& ir, uint32_t node_index) {
-    if (node_index >= ir.expression_nodes.size()) {
-        return false;
-    }
-
-    const auto& node = ir.expression_nodes[node_index];
-    switch (node.kind) {
-    case 1:
-        return is_easygpu_buffer_resource(ir, node.resource_binding) ||
-
-               is_easygpu_texture_resource(ir, node.resource_binding);
-    case 2:
-        return true;
-    case 3:
-        return is_easygpu_expression_tree(ir, node.left_node_index) &&
-               is_easygpu_expression_tree(ir, node.right_node_index);
-    case 4: {
-        const auto* symbol = get_string(ir, node.symbol_string_id);
-        if (symbol == nullptr || easygpu_intrinsic_name(*symbol).empty() ||
-            node.first_argument_index == UINT32_MAX ||
-            node.first_argument_index > ir.expression_argument_indices.size() ||
-            node.argument_count > ir.expression_argument_indices.size() - node.first_argument_index) {
-            return false;
-        }
-
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            if (!is_easygpu_expression_tree(ir, ir.expression_argument_indices[node.first_argument_index + i])) {
-                return false;
-            }
-        }
-        return true;
-    }
-    case 5:
-        return is_easygpu_expression_tree(ir, node.left_node_index) &&
-               is_easygpu_expression_tree(ir, node.right_node_index);
-    case 6:
-        return is_easygpu_push_constant_resource(ir, node.resource_binding);
-    case kIrExpressionNodeKindLocalVariable:
-        return true;
-    case kIrExpressionNodeKindShaderBuiltin:
-        return true;
-    case kIrExpressionNodeKindConstructor: {
-        const auto* type_name = get_string(ir, node.type_string_id);
-        if (type_name == nullptr) return false;
-        if (easygpu_intrinsic_name_for_type(*type_name).empty()) return false;
-        if (!easygpu_module_type(*type_name).IsValid()) return false;
-        if (node.first_argument_index == UINT32_MAX || node.argument_count == 0) return false;
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            if (!is_easygpu_expression_tree(ir, ir.expression_argument_indices[node.first_argument_index + i])) {
-                return false;
-            }
-        }
-        return true;
-    }
-    case kIrExpressionNodeKindCallableCall: {
-        // Section 1-6 compatibility expression trees do not carry callable function
-        // tables. Generated section 7 kernels are handled by the typed EasyGPU path and
-        // are not allowed to fall back here.
-        return false;
-    }
-    case kIrExpressionNodeKindTextureSample:
-    case kIrExpressionNodeKindGpuStructField: {
-        if (node.argument_count < 1 || node.first_argument_index == UINT32_MAX) return false;
-        return is_easygpu_expression_tree(ir, ir.expression_argument_indices[node.first_argument_index]);
-    }
-    case kIrExpressionNodeKindTextureSampleLevel: {
-        // Verify texture and sampler resources exist and arguments are valid.
-        const auto* r = find_resource_by_binding(ir, node.resource_binding);
-        if (r == nullptr || r->kind != kIrResourceKindTexture2D) return false;
-        const auto* sampler_name = get_string(ir, node.symbol_string_id);
-        if (sampler_name == nullptr) return false;
-        const auto* sr = find_resource_by_name(ir, *sampler_name);
-        if (sr == nullptr) return false;
-        if (node.first_argument_index == UINT32_MAX || node.argument_count == 0) return false;
-        for (uint32_t i = 0; i < node.argument_count; ++i) {
-            if (!is_easygpu_expression_tree(ir, ir.expression_argument_indices[node.first_argument_index + i]))
-                return false;
-        }
-        return true;
-    }
-    case kIrExpressionNodeKindTernary:
-        // Ternary in legacy expression-assignment sections remains compatibility-only.
-        // Generated section 7 ternaries lower through the typed EasyGPU path.
-        return false;
-    default:
-        return false;
-    }
-}
-
-bool can_dispatch_easygpu_buffer_kernel(const KernelState& kernel) {
-    ParsedIr ir;
-    if (!parse_feather_ir(kernel.ir, &ir) || ir.group_x <= 0 || ir.group_y <= 0 ||
-        ir.group_z <= 0) {
-        return false;
-    }
-
-    if (ir.shader_kind < 1 || ir.shader_kind > 3) {
-        return false;
-    }
-
-    bool has_texture = false;
-    for (const auto& resource : ir.resources) {
-        if (resource.kind == kIrResourceKindTexture2D) {
-            has_texture = true;
-            break;
-        }
-    }
-
-    // Legacy 2D/3D buffer-only kernels historically use CPU fallback because
-    // old assignment sections do not encode full dimensional indexing. When the
-    // test harness strips those sections away, section 7 owns the semantics and
-    // can prove a real typed EasyGPU path instead.
-    if (ir.shader_kind != 1 && !has_texture && !ir.has_section7) {
-        return false;
-    }
-
-    for (const auto& resource : ir.resources) {
-        if (resource.kind == kIrResourceKindBuffer) {
-            const auto expected_stride = easygpu_buffer_element_stride(ir, resource);
-            if (expected_stride == 0) {
-                return false;
-            }
-
-            const auto bound = kernel.buffers.find(resource.binding);
-            if (bound == kernel.buffers.end()) {
-                return false;
-            }
-
-            const auto buffer = g_buffers.find(bound->second);
-            if (buffer == g_buffers.end()) {
-                return false;
-            }
-
-            if (buffer->second.stride != expected_stride) {
-                return false;
-            }
-
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindPushConstant) {
-            size_t offset = 0;
-            size_t size = 0;
-            const auto* type = get_string(ir, resource.element_type_string_id);
-            if (!is_easygpu_push_constant_resource(ir, resource.binding)) {
-                fail(FE_ERROR_UNSUPPORTED,
-                     "EasyGPU typed dispatch does not support push constant binding " +
-                         std::to_string(resource.binding) + " of type '" +
-                         (type == nullptr ? std::string("<unknown>") : *type) + "'.");
-                return false;
-            }
-
-            if (!find_push_constant_offset(ir, resource.binding, &offset, &size)) {
-                fail(FE_ERROR_UNSUPPORTED,
-                     "EasyGPU typed dispatch could not compute a push constant range for binding " +
-                         std::to_string(resource.binding) + " of type '" +
-                         (type == nullptr ? std::string("<unknown>") : *type) + "'.");
-                return false;
-            }
-
-            if (offset + size > kernel.push_constants.size()) {
-                fail(FE_ERROR_UNSUPPORTED,
-                     "EasyGPU typed dispatch push constant binding " + std::to_string(resource.binding) +
-                         " requires bytes [" + std::to_string(offset) + ", " +
-                         std::to_string(offset + size) + ") but only " +
-                         std::to_string(kernel.push_constants.size()) + " bytes were uploaded.");
-                return false;
-            }
-
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
-            const auto bound = kernel.textures.find(resource.binding);
-            if (bound == kernel.textures.end()) {
-                return false;
-            }
-
-            const auto texture = g_textures.find(bound->second);
-            if (texture == g_textures.end()) {
-                return false;
-            }
-
-            if (texture->second.width == 0 || texture->second.height == 0 ||
-                (resource.kind == kIrResourceKindTexture2D ? texture->second.depth != 1 : texture->second.depth == 0)) {
-                return false;
-            }
-
-            GPU::Runtime::PixelFormat format;
-            if (!easygpu_runtime_pixel_format(texture->second.pixel_format, &format)) {
-                fail(FE_ERROR_UNSUPPORTED,
-                     std::string("EasyGPU texture format ") + pixel_format_name(texture->second.pixel_format) +
-                         " is not supported by the typed texture bridge.");
-                return false;
-            }
-
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindSampler) {
-            const auto bound = kernel.samplers.find(resource.binding);
-            if (bound == kernel.samplers.end()) {
-                return false;
-            }
-
-            if (bound->second != 0 && g_samplers.find(bound->second) == g_samplers.end()) {
-                return false;
-            }
-
-            continue;
-        }
-
-        return false;
-    }
-
-    if (ir.has_section7) {
-        return true;
-    }
-
-    for (const auto& assignment : ir.elementwise_assignments) {
-	        if (is_easygpu_texture_resource(ir, assignment.destination_binding) &&
-	            is_easygpu_texture_resource(ir, assignment.left_binding)) {
-	            if (assignment.operation != 1 || assignment.right_operand_kind != 0) {
-	                return false;
-	            }
-	            continue;
-	        }
-
-	        if (!is_easygpu_buffer_resource(ir, assignment.destination_binding) ||
-	            !is_easygpu_buffer_resource(ir, assignment.left_binding) ||
-	            (assignment.right_operand_kind == 1 &&
-	             !is_easygpu_buffer_resource(ir, assignment.right_binding))) {
-	            return false;
-	        }
-	    }
-
-
-    for (const auto& assignment : ir.expression_assignments) {
-        if (is_easygpu_texture_resource(ir, assignment.destination_binding)) {
-            if (assignment.root_node_index >= ir.expression_nodes.size()) {
-                return false;
-            }
-            const auto& root = ir.expression_nodes[assignment.root_node_index];
-            if (root.kind != 1 || !is_easygpu_texture_resource(ir, root.resource_binding)) {
-                return false;
-            }
-            continue;
-        }
-
-        if (!is_easygpu_buffer_resource(ir, assignment.destination_binding) ||
-            !is_easygpu_expression_tree(ir, assignment.root_node_index)) {
-            return false;
-        }
-    }
-
-    return true; // Accept kernels with or without assignments
-}
-
-GPU::Backend::PipelineHandle create_easygpu_compute_pipeline(GPU::Kernel::KernelBuildContext& context,
-                                                             GPU::Backend::Backend& backend) {
-    const auto shader_source = context.GetCompleteCode();
-    GPU::Backend::ShaderDesc shader_desc;
-    shader_desc.type = GPU::Backend::ShaderType::Compute;
-    shader_desc.sourceCode = shader_source;
-    shader_desc.entryPoint = "main";
-    shader_desc.optimizationLevel = context.GetOptimizationLevel();
-
-    const auto shader = backend.CreateShader(shader_desc);
-    if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
-        throw std::runtime_error("EasyGPU backend failed to create compute shader.");
-    }
-
-    EasyGpuShaderGuard shader_guard(backend, shader);
-    GPU::Backend::PipelineDesc pipeline_desc;
-    pipeline_desc.computeShader = shader;
-    pipeline_desc.workGroupSizeX = static_cast<uint32_t>(context.WorkSizeX);
-    pipeline_desc.workGroupSizeY = static_cast<uint32_t>(context.WorkSizeY);
-    pipeline_desc.workGroupSizeZ = static_cast<uint32_t>(context.WorkSizeZ);
-    pipeline_desc.pushConstantSize = context.GetPushConstantSize();
-
-    for (const auto& buffer_info : context.GetBufferInfos()) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = buffer_info.binding;
-        entry.type = GPU::Backend::BindingType::Buffer;
-        entry.readOnly = buffer_info.mode == GPU::Backend::BUFFER_MODE_READ_ONLY;
-        pipeline_desc.resources.push_back(entry);
-    }
-
-    for (const auto& texture_info : context.GetTextureInfos()) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = texture_info.binding;
-        entry.type = texture_info.sampled ? GPU::Backend::BindingType::Sampler : GPU::Backend::BindingType::Texture;
-        entry.format = GPU::Runtime::ToBackendPixelFormat(texture_info.format);
-        entry.readOnly = texture_info.sampled;
-        pipeline_desc.resources.push_back(entry);
-    }
-
-    const auto pipeline = backend.CreatePipeline(pipeline_desc);
-    if (pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
-        throw std::runtime_error("EasyGPU backend failed to create compute pipeline.");
-    }
-
-    return pipeline;
-}
-
-bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x,
-                                        uint32_t group_y, uint32_t group_z, bool wait) {
-    if (!can_dispatch_easygpu_buffer_kernel(kernel)) {
-        return false;
-    }
-
-    GPU::Runtime::AutoInitContext();
-    GPU::Runtime::Context::GetInstance().MakeCurrent();
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        return false;
-    }
-
-    GPU::Kernel::KernelBuildContext* context = nullptr;
-    auto cache_it = g_compute_kernel_caches.find(kernel_handle);
-    if (cache_it != g_compute_kernel_caches.end() &&
-        cache_it->second.context != nullptr &&
-        cache_it->second.context->HasCachedPipeline()) {
-        context = cache_it->second.context.get();
-    }
-
-    std::unique_ptr<GPU::Kernel::KernelBuildContext> local_context;
-    if (context == nullptr) {
-        local_context = try_build_easygpu_kernel_context(kernel);
-        if (local_context == nullptr) {
-            return false;
-        }
-
-        context = local_context.get();
-    }
-
-    bind_easygpu_runtime_buffers(kernel, *context, *backend);
-    bind_easygpu_runtime_textures(kernel, *context, *backend);
-
-    if (!context->HasCachedPipeline()) {
-        const auto pipeline = create_easygpu_compute_pipeline(*context, *backend);
-        context->SetCachedPipeline(pipeline);
-    }
-
-    if (local_context != nullptr) {
-        auto& cache = g_compute_kernel_caches[kernel_handle];
-        cache.context = std::move(local_context);
-        context = cache.context.get();
-    }
-
-    const auto pipeline = context->GetCachedPipeline();
-    backend->BindPipeline(pipeline);
-    context->UploadUniformValues(pipeline);
-
-    const auto& bindings = context->GetCachedBindings();
-    if (!bindings.empty()) {
-        backend->BindResources(bindings.data(), static_cast<uint32_t>(bindings.size()));
-    }
-
-    backend->Dispatch(group_x, group_y, group_z);
-    const auto barrier = context->GetRequiredBarrierType();
-    if (barrier != GPU::Backend::BarrierType::None) {
-        backend->MemoryBarrier(barrier);
-    }
-
-    if (wait) {
-        backend->Finish();
-    }
-
-    mark_easygpu_writable_buffers_dirty(kernel, *context);
-    mark_easygpu_writable_textures_dirty(kernel, *context);
     return true;
 }
 
@@ -5615,6 +3284,12 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         return fail(FE_ERROR_INVALID_ARGUMENT,
                     "Section 7 typed IR resources could not be matched to bound native resources.");
     }
+    // Compute kernels share their compiled LC shader across dispatches. Uniform
+    // values are command data, not shader identity, so expose them as dynamic
+    // push-constant buffers; otherwise the first dispatch's values would be
+    // folded into the cached shader and later NN/parameterized dispatches would
+    // silently reuse stale constants.
+    lowering.dynamic_push_constants = true;
 
     std::optional<Feather::Luisa::AdInputs> ad_inputs;
     std::vector<ADGradientState> next_gradients;
@@ -5657,7 +3332,7 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
             gradient.resource_name = string_or_empty(ir, parameter.resource_name_string_id);
             if (gradient.resource_name.empty()) gradient.resource_name = string_or_empty(ir, resource->name_string_id);
             gradient.element_type = element_type;
-            gradient.easygpu_name = easygpu_buffer_name(*resource);
+            gradient.native_name = native_buffer_name(*resource);
             gradient.source_binding = parameter.binding;
             gradient.element_count = element_count;
             gradient.element_stride = static_cast<uint32_t>(buffer->second.stride);
@@ -5672,7 +3347,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     bindings.reserve(lowering.resources.size());
     std::vector<Feather::Luisa::HostTextureBinding> texture_bindings;
     texture_bindings.reserve(lowering.resources.size());
-    GPU::Backend::Backend* easygpu_backend = nullptr;
     for (const auto& resource : lowering.resources) {
         if (resource.kind == kIrResourceKindPushConstant) {
             continue;
@@ -5687,16 +3361,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
             auto texture = g_textures.find(bound->second);
             if (texture == g_textures.end())
                 return fail(FE_ERROR_INVALID_HANDLE, "Luisa dispatch references an invalid Feather texture.");
-            if (texture->second.device_dirty) {
-                if (easygpu_backend == nullptr) {
-                    GPU::Runtime::AutoInitContext();
-                    GPU::Runtime::Context::GetInstance().MakeCurrent();
-                    easygpu_backend = GPU::Runtime::Context::GetBackend();
-                }
-                if (easygpu_backend == nullptr)
-                    return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU is unavailable to stage a device-dirty texture for Luisa.");
-                download_easygpu_texture(texture->second, *easygpu_backend);
-            }
             texture_bindings.push_back(Feather::Luisa::HostTextureBinding{.binding = resource.binding,
                                                                           .kind = resource.kind,
                                                                           .access = resource.access,
@@ -5720,18 +3384,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         auto buffer = g_buffers.find(bound->second);
         if (buffer == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Luisa dispatch references an invalid Feather buffer.");
-        }
-        if (buffer->second.device_dirty) {
-            if (easygpu_backend == nullptr) {
-                GPU::Runtime::AutoInitContext();
-                GPU::Runtime::Context::GetInstance().MakeCurrent();
-                easygpu_backend = GPU::Runtime::Context::GetBackend();
-            }
-            if (easygpu_backend == nullptr) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
-                            "EasyGPU is unavailable to stage a device-dirty buffer for Luisa.");
-            }
-            download_easygpu_buffer(buffer->second, *easygpu_backend);
         }
         bindings.push_back(Feather::Luisa::HostBufferBinding{.binding = resource.binding,
                                                              .access = resource.access,
@@ -5863,7 +3515,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         const auto bound = kernel.buffers.find(resource.binding);
         auto buffer = g_buffers.find(bound->second);
         buffer->second.host_dirty = true;
-        buffer->second.device_dirty = false;
         buffer->second.luisa_uploaded = true;
         ++buffer->second.content_revision;
     }
@@ -5873,783 +3524,10 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         const auto bound = kernel.textures.find(resource.binding);
         auto texture = g_textures.find(bound->second);
         texture->second.host_dirty = true;
-        texture->second.device_dirty = false;
         texture->second.luisa_uploaded = true;
     }
     return ok();
 #endif
-}
-
-bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
-                                     bool wait) {
-    ParsedIr ir;
-    if (!parse_feather_ir(kernel.ir, &ir)) {
-        fail(FE_ERROR_INVALID_ARGUMENT, "AD kernel IR could not be parsed.");
-        return false;
-    }
-    if (ir.shader_kind != 1 || ir.group_y != 1 || ir.group_z != 1 || group_y != 1 || group_z != 1) {
-        fail(FE_ERROR_UNSUPPORTED, "Feather AD currently supports 1D compute kernels only.");
-        return false;
-    }
-    if (!can_dispatch_easygpu_buffer_kernel(kernel)) {
-        if (g_last_error.empty()) {
-            fail(FE_ERROR_UNSUPPORTED, "AD kernel is not supported by the EasyGPU typed dispatch path.");
-        }
-        return false;
-    }
-    std::string unsupported_control_flow;
-    if (ir.has_section7 && typed_ir_contains_unsupported_ad_control_flow(ir.typed_module, &unsupported_control_flow)) {
-        fail(FE_ERROR_UNSUPPORTED, "Feather AD " + unsupported_control_flow + ".");
-        return false;
-    }
-
-    std::vector<IrAdAnnotation> parameters;
-    std::vector<IrAdAnnotation> losses;
-    for (const auto& annotation : ir.ad_annotations) {
-        if (annotation.role == kIrAdRoleParameter) {
-            parameters.push_back(annotation);
-        } else if (annotation.role == kIrAdRoleLoss) {
-            losses.push_back(annotation);
-        }
-    }
-    if (parameters.empty()) {
-        fail(FE_ERROR_UNSUPPORTED, "AD kernel does not contain any differentiable parameter annotations.");
-        return false;
-    }
-    if (losses.size() != 1) {
-        fail(FE_ERROR_UNSUPPORTED, "AD kernel must contain exactly one scalar loss annotation.");
-        return false;
-    }
-
-    GPU::Runtime::AutoInitContext();
-    GPU::Runtime::Context::GetInstance().MakeCurrent();
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD dispatch.");
-        return false;
-    }
-
-    GPU::AD::GradientTape gradientTape;
-    std::vector<ADGradientState> next_gradients;
-    next_gradients.reserve(parameters.size());
-    std::unordered_set<uint32_t> requested_gradient_bindings;
-
-    for (const auto& parameter : parameters) {
-        if (parameter.binding == kIrNoBinding || parameter.source_kind != kIrAdSourceKindBufferElement) {
-            fail(FE_ERROR_UNSUPPORTED, "AD.Parameter must reference a differentiable buffer element.");
-            return false;
-        }
-        const auto* resource = find_resource_by_binding(ir, parameter.binding);
-        if (resource == nullptr || resource->kind != kIrResourceKindBuffer) {
-            fail(FE_ERROR_UNSUPPORTED, "AD parameter annotation does not refer to a buffer resource.");
-            return false;
-        }
-        const auto bound = kernel.buffers.find(resource->binding);
-        if (bound == kernel.buffers.end()) {
-            fail(FE_ERROR_INVALID_ARGUMENT, "AD parameter buffer is not bound.");
-            return false;
-        }
-        const auto buffer = g_buffers.find(bound->second);
-        if (buffer == g_buffers.end()) {
-            fail(FE_ERROR_INVALID_HANDLE, "AD parameter buffer handle is invalid.");
-            return false;
-        }
-        const auto resource_stride = easygpu_buffer_element_stride(ir, *resource);
-        if (resource_stride == 0 || buffer->second.stride != resource_stride || buffer->second.bytes.empty()) {
-            fail(FE_ERROR_UNSUPPORTED, "AD parameter buffer has an unsupported element stride.");
-            return false;
-        }
-        const auto element_count = static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
-        if (element_count == 0) {
-            fail(FE_ERROR_INVALID_ARGUMENT, "AD parameter buffer must contain at least one element.");
-            return false;
-        }
-
-        auto element_type = string_or_empty(ir, parameter.type_name_string_id);
-        if (element_type.empty()) {
-            element_type = string_or_empty(ir, resource->element_type_string_id);
-        }
-        const auto glsl_type = easygpu_ad_glsl_type_name(element_type);
-        if (glsl_type.empty()) {
-            fail(FE_ERROR_UNSUPPORTED, "AD parameter type is not supported by the native EasyGPU AD bridge.");
-            return false;
-        }
-        const auto component_count = ad_component_count_for_type(element_type);
-        if (component_count == 0) {
-            fail(FE_ERROR_UNSUPPORTED, "AD parameter component count could not be determined.");
-            return false;
-        }
-
-        const auto easygpu_name = easygpu_buffer_name(*resource);
-        gradientTape.RegisterBufferParameter(easygpu_name, glsl_type, element_count);
-        if (!requested_gradient_bindings.insert(resource->binding).second) {
-            continue;
-        }
-
-        ADGradientState gradient;
-        gradient.name = string_or_empty(ir, parameter.name_string_id);
-        if (gradient.name.empty()) {
-            gradient.name = string_or_empty(ir, resource->name_string_id);
-        }
-        if (gradient.name.empty()) {
-            gradient.name = easygpu_name;
-        }
-        gradient.resource_name = string_or_empty(ir, parameter.resource_name_string_id);
-        if (gradient.resource_name.empty()) {
-            gradient.resource_name = string_or_empty(ir, resource->name_string_id);
-        }
-        gradient.element_type = element_type;
-        gradient.easygpu_name = easygpu_name;
-        gradient.source_binding = resource->binding;
-        gradient.element_count = element_count;
-        gradient.element_stride = static_cast<uint32_t>(resource_stride);
-        gradient.component_count = component_count;
-        next_gradients.push_back(std::move(gradient));
-    }
-
-    std::unordered_set<uint32_t> parameter_bindings;
-    parameter_bindings.reserve(next_gradients.size());
-    for (const auto& gradient : next_gradients) {
-        parameter_bindings.insert(gradient.source_binding);
-    }
-
-    const auto buffer_usage = collect_ad_buffer_usage(ir);
-    for (const auto& resource : ir.resources) {
-        if (resource.kind != kIrResourceKindBuffer ||
-            resource.access != 3 ||
-            parameter_bindings.count(resource.binding) != 0 ||
-            buffer_usage.reads.count(resource.binding) == 0 ||
-            buffer_usage.writes.count(resource.binding) == 0) {
-            continue;
-        }
-        const auto bound = kernel.buffers.find(resource.binding);
-        if (bound == kernel.buffers.end()) {
-            continue;
-        }
-        const auto buffer = g_buffers.find(bound->second);
-        if (buffer == g_buffers.end() || buffer->second.stride == 0 || buffer->second.bytes.empty()) {
-            continue;
-        }
-        auto element_type = string_or_empty(ir, resource.element_type_string_id);
-        const auto glsl_type = easygpu_ad_glsl_type_name(element_type);
-        if (glsl_type.empty()) {
-            continue;
-        }
-        const auto component_count = ad_component_count_for_type(element_type);
-        if (component_count == 0) {
-            continue;
-        }
-        const auto element_count = static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
-        if (element_count == 0) {
-            continue;
-        }
-
-        gradientTape.RegisterBufferAdjointStorage(
-            easygpu_buffer_name(resource),
-            glsl_type,
-            static_cast<size_t>(element_count) * static_cast<size_t>(component_count));
-    }
-
-    const auto& loss = losses.front();
-    auto loss_name = string_or_empty(ir, loss.name_string_id);
-    auto loss_type = string_or_empty(ir, loss.type_name_string_id);
-    if (loss_name.empty() || (loss.source_kind != kIrAdSourceKindLocal && loss.source_kind != 0)) {
-        fail(FE_ERROR_UNSUPPORTED, "AD loss annotation must identify a scalar local value.");
-        return false;
-    }
-    if (easygpu_ad_glsl_type_name(loss_type) != "float") {
-        fail(FE_ERROR_UNSUPPORTED, "AD loss annotation must have scalar float type.");
-        return false;
-    }
-    gradientTape.MarkLoss(loss_name, "float");
-
-    auto forwardModule = try_build_easygpu_module(kernel, &gradientTape);
-    if (forwardModule == nullptr) {
-        if (g_last_error.empty()) {
-            fail(FE_ERROR_UNSUPPORTED, "AD forward module could not be built for EasyGPU.");
-        }
-        return false;
-    }
-
-    auto forwardContext = GPU::IR::BuildKernelBuildContext(*forwardModule, &gradientTape);
-    if (forwardContext == nullptr) {
-        fail(FE_ERROR_UNSUPPORTED, "AD forward build context could not be lowered with an active GradientTape.");
-        return false;
-    }
-    forwardContext->SetOptimizationLevel(kShaderOptimizationLevel);
-    if (gradientTape.Size() == 0) {
-        fail(FE_ERROR_UNSUPPORTED, "AD forward lowering did not record any differentiable operations.");
-        return false;
-    }
-
-    const auto forward_glsl = forwardContext->GetCompleteCode();
-    GPU::AD::AdjointGenerator adjointGen;
-    auto body = adjointGen.GenerateBody(gradientTape, true);
-    if (body.lines.empty() && body.writebacks.empty() && body.bufferWritebacks.empty()) {
-        fail(FE_ERROR_UNSUPPORTED, "EasyGPU AD did not generate a backward body for this kernel.");
-        return false;
-    }
-
-    auto next_binding = static_cast<int>(forwardContext->GetNextBinding());
-    for (const auto& buffer_info : forwardContext->GetBufferInfos()) {
-        next_binding = std::max(next_binding, static_cast<int>(buffer_info.binding) + 1);
-    }
-    for (const auto& texture_info : forwardContext->GetTextureInfos()) {
-        next_binding = std::max(next_binding, static_cast<int>(texture_info.binding) + 1);
-    }
-    std::vector<GPU::AD::GradBufGroup> grad_groups;
-    grad_groups.reserve(next_gradients.size());
-    std::unordered_set<std::string> parameter_adjoint_arrays;
-    auto adj_base_name = [](const std::string& name) {
-        const auto bracket = name.find('[');
-        return bracket == std::string::npos ? name : name.substr(0, bracket);
-    };
-    for (const auto& writeback : body.writebacks) {
-        parameter_adjoint_arrays.insert(adj_base_name(writeback.second));
-    }
-    for (const auto& writeback : body.bufferWritebacks) {
-        parameter_adjoint_arrays.insert(adj_base_name(writeback.adjName));
-    }
-    const auto work_size_x = std::max(1, forwardContext->WorkSizeX);
-    const auto dispatched_threads = static_cast<size_t>(group_x) * static_cast<size_t>(work_size_x);
-    for (auto& gradient : next_gradients) {
-        if (next_binding >= static_cast<int>(GPU::Backend::MAX_BUFFER_BINDINGS)) {
-            fail(FE_ERROR_UNSUPPORTED, "AD gradient buffers exceed backend buffer binding limits.");
-            return false;
-        }
-        gradient.gradient_binding = static_cast<uint32_t>(next_binding++);
-        const auto scalar_slots = static_cast<size_t>(gradient.element_count) *
-                                  static_cast<size_t>(std::max<uint32_t>(gradient.component_count, 1));
-        if (scalar_slots == 0 || dispatched_threads == 0 ||
-            scalar_slots > (SIZE_MAX / sizeof(float)) ||
-            dispatched_threads > (SIZE_MAX / scalar_slots / sizeof(float))) {
-            fail(FE_ERROR_OUT_OF_MEMORY, "AD gradient buffer size overflowed.");
-            return false;
-        }
-        gradient.byte_size = dispatched_threads * scalar_slots * sizeof(float);
-
-        GPU::AD::GradBufGroup group;
-        group.baseName = gradient.easygpu_name;
-        group.binding = static_cast<int>(gradient.gradient_binding);
-        group.stride = static_cast<int>(scalar_slots);
-        grad_groups.push_back(std::move(group));
-    }
-
-    int adj_pool_binding = -1;
-    if (!body.declarations.empty()) {
-        for (const auto& declaration : body.declarations) {
-            if (declaration.second.find('[') != std::string::npos &&
-                parameter_adjoint_arrays.find(adj_base_name(declaration.first)) == parameter_adjoint_arrays.end()) {
-                adj_pool_binding = next_binding++;
-                break;
-            }
-        }
-    }
-    if (adj_pool_binding >= static_cast<int>(GPU::Backend::MAX_BUFFER_BINDINGS)) {
-        fail(FE_ERROR_UNSUPPORTED, "AD adjoint pool exceeds backend buffer binding limits.");
-        return false;
-    }
-
-    std::string combined_glsl;
-    try {
-        combined_glsl = GPU::AD::MergeForwardBackward(
-            forward_glsl,
-            body,
-            forwardContext->WorkSizeX,
-            forwardContext->WorkSizeY,
-            forwardContext->WorkSizeZ,
-            grad_groups,
-            adj_pool_binding);
-    } catch (const std::exception& ex) {
-        fail(FE_ERROR_UNSUPPORTED, std::string("EasyGPU AD merge failed: ") + ex.what());
-        return false;
-    }
-
-    // Match EasyGPU::ADKernel1D: Feather dispatches ceil(logical/threadgroup) workgroups, so
-    // padded lanes must not execute user code or write per-thread gradient slots.
-    {
-        const auto main_pos = combined_glsl.find("void main()");
-        if (main_pos != std::string::npos) {
-            const auto brace_pos = combined_glsl.find("{", main_pos);
-            if (brace_pos != std::string::npos) {
-                const auto logical_x = static_cast<uint32_t>(kernel.logical_x);
-                combined_glsl.insert(
-                    brace_pos + 1,
-                    "\n    if (gl_GlobalInvocationID.x >= " + std::to_string(logical_x) + "u) return;\n");
-            }
-        }
-    }
-
-    release_ad_gradient_buffers(kernel);
-    kernel.last_ad_backward_glsl = combined_glsl;
-
-    std::vector<unsigned char> zero_bytes;
-    for (auto& gradient : next_gradients) {
-        GPU::Backend::BufferDesc desc;
-        desc.sizeInBytes = gradient.byte_size;
-        desc.mode = GPU::Backend::BufferMode::ReadWrite;
-        zero_bytes.assign(gradient.byte_size, 0);
-        desc.initialData = zero_bytes.empty() ? nullptr : zero_bytes.data();
-        gradient.backend_buffer = backend->CreateBuffer(desc);
-        if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-            release_pending_ad_gradient_buffers(next_gradients);
-            fail(FE_ERROR_OUT_OF_MEMORY, "EasyGPU backend failed to allocate AD gradient buffer.");
-            return false;
-        }
-    }
-
-    size_t adj_pool_float_count = 0;
-    for (const auto& declaration : body.declarations) {
-        if (parameter_adjoint_arrays.find(adj_base_name(declaration.first)) != parameter_adjoint_arrays.end()) {
-            continue;
-        }
-        const auto bracket = declaration.second.find('[');
-        if (bracket == std::string::npos) {
-            continue;
-        }
-        const auto close = declaration.second.find(']', bracket);
-        if (close == std::string::npos || close <= bracket + 1) {
-            continue;
-        }
-        try {
-            adj_pool_float_count += static_cast<size_t>(
-                std::stoull(declaration.second.substr(bracket + 1, close - bracket - 1)));
-        } catch (...) {
-            adj_pool_float_count += dispatched_threads;
-        }
-    }
-    if (adj_pool_binding >= 0 && adj_pool_float_count > 0) {
-        GPU::Backend::BufferDesc desc;
-        desc.sizeInBytes = adj_pool_float_count * sizeof(float);
-        desc.mode = GPU::Backend::BufferMode::ReadWrite;
-        std::vector<unsigned char> zeros(desc.sizeInBytes, 0);
-        desc.initialData = zeros.data();
-        kernel.ad_adj_pool = backend->CreateBuffer(desc);
-        kernel.ad_adj_pool_size = desc.sizeInBytes;
-        if (kernel.ad_adj_pool == GPU::Backend::INVALID_BUFFER_HANDLE) {
-            release_pending_ad_gradient_buffers(next_gradients);
-            release_ad_gradient_buffers(kernel);
-            fail(FE_ERROR_OUT_OF_MEMORY, "EasyGPU backend failed to allocate AD adjoint pool.");
-            return false;
-        }
-    }
-
-    GPU::Backend::ShaderDesc shader_desc;
-    shader_desc.type = GPU::Backend::ShaderType::Compute;
-    shader_desc.sourceCode = combined_glsl;
-    shader_desc.entryPoint = "main";
-    shader_desc.optimizationLevel = forwardContext->GetOptimizationLevel();
-
-    GPU::Backend::ShaderHandle shader = GPU::Backend::INVALID_SHADER_HANDLE;
-    try {
-        shader = backend->CreateShader(shader_desc);
-    } catch (const std::exception& ex) {
-        release_pending_ad_gradient_buffers(next_gradients);
-        release_ad_gradient_buffers(kernel);
-        fail(FE_ERROR_SHADER_COMPILE_FAILED,
-             std::string("EasyGPU backend failed to compile merged AD backward shader: ") + ex.what() +
-                 "\nMerged AD GLSL excerpt:\n" + glsl_error_excerpt(combined_glsl, ex.what()));
-        return false;
-    }
-    if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
-        release_pending_ad_gradient_buffers(next_gradients);
-        release_ad_gradient_buffers(kernel);
-        fail(FE_ERROR_SHADER_COMPILE_FAILED,
-             "EasyGPU backend failed to compile merged AD backward shader.\nMerged AD GLSL excerpt:\n" +
-                 glsl_excerpt(combined_glsl, 1, 120));
-        return false;
-    }
-    EasyGpuShaderGuard shader_guard(*backend, shader);
-
-    GPU::Backend::PipelineDesc pipeline_desc;
-    pipeline_desc.computeShader = shader;
-    pipeline_desc.workGroupSizeX = static_cast<uint32_t>(forwardContext->WorkSizeX);
-    pipeline_desc.workGroupSizeY = static_cast<uint32_t>(forwardContext->WorkSizeY);
-    pipeline_desc.workGroupSizeZ = static_cast<uint32_t>(forwardContext->WorkSizeZ);
-    pipeline_desc.pushConstantSize = forwardContext->GetPushConstantSize();
-
-    for (const auto& buffer_info : forwardContext->GetBufferInfos()) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = buffer_info.binding;
-        entry.type = GPU::Backend::BindingType::Buffer;
-        entry.readOnly = buffer_info.mode == GPU::Backend::BUFFER_MODE_READ_ONLY;
-        pipeline_desc.resources.push_back(entry);
-    }
-    for (const auto& texture_info : forwardContext->GetTextureInfos()) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = texture_info.binding;
-        entry.type = texture_info.sampled ? GPU::Backend::BindingType::Sampler : GPU::Backend::BindingType::Texture;
-        entry.format = GPU::Runtime::ToBackendPixelFormat(texture_info.format);
-        entry.readOnly = texture_info.sampled;
-        pipeline_desc.resources.push_back(entry);
-    }
-    for (const auto& gradient : next_gradients) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = gradient.gradient_binding;
-        entry.type = GPU::Backend::BindingType::Buffer;
-        entry.readOnly = false;
-        pipeline_desc.resources.push_back(entry);
-    }
-    if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE && adj_pool_binding >= 0) {
-        GPU::Backend::ResourceLayoutEntry entry;
-        entry.binding = static_cast<uint32_t>(adj_pool_binding);
-        entry.type = GPU::Backend::BindingType::Buffer;
-        entry.readOnly = false;
-        pipeline_desc.resources.push_back(entry);
-    }
-
-    const auto pipeline = backend->CreatePipeline(pipeline_desc);
-    if (pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
-        release_pending_ad_gradient_buffers(next_gradients);
-        release_ad_gradient_buffers(kernel);
-        fail(FE_ERROR_SHADER_COMPILE_FAILED, "EasyGPU backend failed to create merged AD backward pipeline.");
-        return false;
-    }
-
-    bind_easygpu_runtime_buffers(kernel, *forwardContext, *backend);
-    bind_easygpu_runtime_textures(kernel, *forwardContext, *backend);
-    auto bindings = forwardContext->GetCachedBindings();
-    for (const auto& gradient : next_gradients) {
-        GPU::Backend::ResourceBinding binding;
-        binding.binding = gradient.gradient_binding;
-        binding.type = GPU::Backend::BindingType::Buffer;
-        binding.buffer = gradient.backend_buffer;
-        binding.readOnly = false;
-        bindings.push_back(binding);
-    }
-    if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE && adj_pool_binding >= 0) {
-        GPU::Backend::ResourceBinding binding;
-        binding.binding = static_cast<uint32_t>(adj_pool_binding);
-        binding.type = GPU::Backend::BindingType::Buffer;
-        binding.buffer = kernel.ad_adj_pool;
-        binding.readOnly = false;
-        bindings.push_back(binding);
-    }
-
-    backend->BindPipeline(pipeline);
-    forwardContext->UploadUniformValues(pipeline);
-    if (!bindings.empty()) {
-        backend->BindResources(bindings.data(), static_cast<uint32_t>(bindings.size()));
-    }
-
-    backend->Dispatch(group_x, group_y, group_z);
-    backend->MemoryBarrier(GPU::Backend::BarrierType::All);
-    if (wait) {
-        backend->Finish();
-    }
-
-    backend->DestroyPipeline(pipeline);
-    kernel.ad_gradients = std::move(next_gradients);
-    mark_easygpu_writable_buffers_dirty(kernel, *forwardContext);
-    mark_easygpu_writable_textures_dirty(kernel, *forwardContext);
-    return true;
-}
-
-FeResult build_easygpu_kernel_source(const KernelState& kernel, std::string* source) {
-    if (source == nullptr) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Output source pointer must not be null.");
-    }
-
-    auto module = try_build_easygpu_module(kernel, nullptr, true);
-    if (module == nullptr) {
-        ParsedIr parsed;
-        if (parse_feather_ir(kernel.ir, &parsed) && parsed.has_section7) {
-            return g_last_error.empty()
-                       ? fail(FE_ERROR_UNSUPPORTED, "Section 7 typed IR could not be lowered to an EasyGPU module.")
-                       : FE_ERROR_UNSUPPORTED;
-        }
-
-        return fail(FE_ERROR_UNSUPPORTED, "Kernel IR is not yet supported by the EasyGPU IR module bridge.");
-    }
-
-    auto context = GPU::IR::BuildKernelBuildContext(*module);
-    if (context == nullptr) {
-        return fail(FE_ERROR_UNSUPPORTED, "EasyGPU module could not be lowered to a kernel build context.");
-    }
-
-    *source = context->GetCompleteCode();
-    return ok();
-}
-
-bool try_build_easygpu_kernel_source(const KernelState& kernel, std::string* source) {
-    return build_easygpu_kernel_source(kernel, source) == FE_OK;
-}
-
-bool try_build_easygpu_optimized_kernel_source(const KernelState& kernel, std::string* source) {
-    if (source == nullptr) {
-        return false;
-    }
-
-    auto context = try_build_easygpu_kernel_context(kernel);
-    if (context == nullptr) {
-        return false;
-    }
-
-    GPU::Runtime::AutoInitContext();
-    GPU::Runtime::ContextGuard guard(GPU::Runtime::Context::GetInstance());
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        throw std::runtime_error("EasyGPU backend is not available.");
-    }
-
-    GPU::Backend::ShaderDesc shader_desc;
-    shader_desc.type = GPU::Backend::ShaderType::Compute;
-    shader_desc.sourceCode = context->GetCompleteCode();
-    shader_desc.entryPoint = "main";
-    shader_desc.optimizationLevel = context->GetOptimizationLevel();
-    *source = backend->GetOptimizedGLSL(shader_desc);
-    return !source->empty();
-}
-
-bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferState& destination, uint64_t destination_offset,
-                                           uint64_t destination_size, GPU::Backend::Backend& backend,
-                                           std::string* error) {
-    if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-        if (error != nullptr) {
-            *error = "AD gradient buffer is not available.";
-        }
-        return false;
-    }
-
-    const auto component_count = std::max<uint32_t>(gradient.component_count, 1);
-    const auto scalar_slots = static_cast<uint64_t>(gradient.element_count) * static_cast<uint64_t>(component_count);
-    if (scalar_slots == 0 || gradient.byte_size % sizeof(float) != 0) {
-        if (error != nullptr) {
-            *error = "AD gradient has an invalid scalar layout.";
-        }
-        return false;
-    }
-
-    const auto total_scalars = static_cast<uint64_t>(gradient.byte_size / sizeof(float));
-    if (total_scalars % scalar_slots != 0) {
-        if (error != nullptr) {
-            *error = "AD gradient storage cannot be reduced to the requested element layout.";
-        }
-        return false;
-    }
-
-    const auto dispatch_count = total_scalars / scalar_slots;
-    const auto expected_size = scalar_slots * sizeof(float);
-    if (destination_offset % sizeof(float) != 0) {
-        if (error != nullptr) {
-            *error = "Destination buffer offset must be float-aligned.";
-        }
-        return false;
-    }
-
-    if (scalar_slots > UINT32_MAX || dispatch_count > UINT32_MAX) {
-        if (error != nullptr) {
-            *error = "AD gradient reduction exceeds shader loop limits.";
-        }
-        return false;
-    }
-
-    if (destination_size != expected_size) {
-        if (error != nullptr) {
-            *error = "Destination buffer range size does not match the reduced AD gradient size.";
-        }
-        return false;
-    }
-
-    if (destination_offset > destination.bytes.size() || destination_size > destination.bytes.size() - destination_offset) {
-        if (error != nullptr) {
-            *error = "Destination buffer range exceeds buffer size.";
-        }
-        return false;
-    }
-
-    auto destination_buffer = ensure_easygpu_buffer(destination, backend);
-    constexpr uint32_t work_group_size = 64;
-    const auto source_binding = 0u;
-    const auto destination_binding = 1u;
-
-    std::ostringstream glsl;
-    glsl << "#version 450\n";
-    glsl << "layout(local_size_x = " << work_group_size << ", local_size_y = 1, local_size_z = 1) in;\n";
-    glsl << "layout(std430, binding = " << source_binding << ") readonly buffer SourceGradient { float source_data[]; };\n";
-    glsl << "layout(std430, binding = " << destination_binding << ") buffer DestinationGradient { float destination_data[]; };\n";
-    glsl << "void main() {\n";
-    glsl << "  uint slot = gl_GlobalInvocationID.x;\n";
-    glsl << "  if (slot >= " << scalar_slots << "u) { return; }\n";
-    glsl << "  float sum = 0.0;\n";
-    glsl << "  for (uint dispatch_index = 0u; dispatch_index < " << dispatch_count << "u; ++dispatch_index) {\n";
-    glsl << "    sum += source_data[(dispatch_index * " << scalar_slots << "u) + slot];\n";
-    glsl << "  }\n";
-    glsl << "  destination_data[" << (destination_offset / sizeof(float)) << "u + slot] = sum;\n";
-    glsl << "}\n";
-
-    GPU::Backend::ShaderDesc shader_desc;
-    shader_desc.type = GPU::Backend::ShaderType::Compute;
-    shader_desc.sourceCode = glsl.str();
-    shader_desc.entryPoint = "main";
-    shader_desc.optimizationLevel = kShaderOptimizationLevel;
-
-    const auto shader = backend.CreateShader(shader_desc);
-    if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
-        if (error != nullptr) {
-            *error = "EasyGPU backend failed to compile AD gradient reduction shader.";
-        }
-        return false;
-    }
-    EasyGpuShaderGuard shader_guard(backend, shader);
-
-    GPU::Backend::PipelineDesc pipeline_desc;
-    pipeline_desc.computeShader = shader;
-    pipeline_desc.workGroupSizeX = work_group_size;
-    pipeline_desc.workGroupSizeY = 1;
-    pipeline_desc.workGroupSizeZ = 1;
-    pipeline_desc.resources.push_back(GPU::Backend::ResourceLayoutEntry{
-        source_binding,
-        GPU::Backend::BindingType::Buffer,
-        GPU::Backend::PixelFormat::RGBA8,
-        true});
-    pipeline_desc.resources.push_back(GPU::Backend::ResourceLayoutEntry{
-        destination_binding,
-        GPU::Backend::BindingType::Buffer,
-        GPU::Backend::PixelFormat::RGBA8,
-        false});
-
-    const auto pipeline = backend.CreatePipeline(pipeline_desc);
-    if (pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
-        if (error != nullptr) {
-            *error = "EasyGPU backend failed to create AD gradient reduction pipeline.";
-        }
-        return false;
-    }
-
-    GPU::Backend::ResourceBinding bindings[2]{};
-    bindings[0].binding = source_binding;
-    bindings[0].type = GPU::Backend::BindingType::Buffer;
-    bindings[0].buffer = gradient.backend_buffer;
-    bindings[0].readOnly = true;
-    bindings[1].binding = destination_binding;
-    bindings[1].type = GPU::Backend::BindingType::Buffer;
-    bindings[1].buffer = destination_buffer;
-    bindings[1].readOnly = false;
-
-    backend.BindPipeline(pipeline);
-    backend.BindResources(bindings, 2);
-    backend.Dispatch(static_cast<uint32_t>((scalar_slots + work_group_size - 1) / work_group_size), 1, 1);
-    backend.MemoryBarrier(GPU::Backend::BarrierType::All);
-    backend.Finish();
-    backend.DestroyPipeline(pipeline);
-
-    destination.device_dirty = true;
-    destination.host_dirty = false;
-    destination.luisa_uploaded = false;
-    ++destination.content_revision;
-    return true;
-}
-
-FeResult dispatch_simple_buffer_assignment(const KernelState& kernel, uint32_t group_x, uint32_t group_y,
-                                           uint32_t group_z) {
-    ParsedIr ir;
-    if (!parse_feather_ir(kernel.ir, &ir) || ir.shader_kind < 1 || ir.shader_kind > 3 || ir.group_x <= 0 ||
-        ir.group_y <= 0 || ir.group_z <= 0) {
-        return fail(FE_ERROR_UNSUPPORTED, "Kernel dispatch fallback requires valid compute Feather IR.");
-    }
-
-    // Execute the typed section records in source order. Simple copies appear in both section kinds, so
-    // expression records own their instruction index and structured records fill only the remaining gaps.
-    bool executed = false;
-    std::set<uint32_t> expression_instruction_indices;
-    for (const auto& expression : ir.expression_assignments) {
-        expression_instruction_indices.insert(expression.instruction_index);
-    }
-
-    struct PlannedAssignment {
-        uint32_t instruction_index = 0;
-        const IrExpressionAssignment* expression = nullptr;
-        FallbackAssignment structured;
-    };
-
-    std::vector<PlannedAssignment> planned;
-    planned.reserve(ir.expression_assignments.size() + ir.elementwise_assignments.size());
-    for (const auto& expression : ir.expression_assignments) {
-        planned.push_back(PlannedAssignment{expression.instruction_index, &expression, {}});
-    }
-
-    for (const auto& structured : ir.elementwise_assignments) {
-        if (expression_instruction_indices.find(structured.instruction_index) != expression_instruction_indices.end()) {
-            continue;
-        }
-
-        FallbackAssignment assignment;
-        if (convert_structured_assignment(ir, structured, &assignment)) {
-            planned.push_back(PlannedAssignment{structured.instruction_index, nullptr, assignment});
-        }
-    }
-
-    std::sort(planned.begin(), planned.end(), [](const auto& left, const auto& right) {
-        return left.instruction_index < right.instruction_index;
-    });
-
-    for (const auto& assignment : planned) {
-        const auto result = assignment.expression != nullptr
-                                ? execute_expression_assignment(kernel, ir, *assignment.expression, group_x, group_y,
-                                                                group_z)
-                                : execute_fallback_assignment(kernel, ir, assignment.structured, group_x, group_y,
-                                                              group_z);
-        if (result != FE_OK) {
-            return result;
-        }
-
-        executed = true;
-    }
-
-    if (executed) {
-        return ok();
-    }
-
-    for (const auto& instruction : ir.instructions) {
-        if (instruction.opcode != 2 || instruction.operand_kind != kIrOperandKindElementwiseAssignment) {
-            continue;
-        }
-
-        const auto* payload = get_string(ir, instruction.operand_string_id);
-        FallbackAssignment assignment;
-        if (payload != nullptr && parse_elementwise_assignment_payload(ir, *payload, &assignment)) {
-            return execute_fallback_assignment(kernel, ir, assignment, group_x, group_y, group_z);
-        }
-    }
-
-    return fail(FE_ERROR_UNSUPPORTED, "Kernel dispatch fallback did not find a supported assignment.");
-}
-
-FeResult clear_graphics_target(FeGraphicsPipelineHandle pipeline, FeTextureHandle color_target) {
-    if (g_pipelines.find(pipeline) == g_pipelines.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
-    }
-
-    auto target = g_textures.find(color_target);
-    if (target == g_textures.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid color target handle.");
-    }
-
-    // Draw fallback validates the graphics command path and mutates the target deterministically.
-    // Real rasterization remains owned by the EasyGPU graphics backend bridge.
-    std::fill(target->second.bytes.begin(), target->second.bytes.end(), 0);
-    return ok();
-}
-
-struct GraphicsVertex2D {
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-    float w = 1.0f;
-};
-
-struct GraphicsColor {
-    uint8_t r = 255;
-    uint8_t g = 255;
-    uint8_t b = 255;
-    uint8_t a = 255;
-};
-
-float read_f32_unaligned(const unsigned char* data) {
-    float value = 0.0f;
-    std::memcpy(&value, data, sizeof(float));
-    return value;
 }
 
 uint32_t read_u32_unaligned(const unsigned char* data) {
@@ -6664,212 +3542,8 @@ uint16_t read_u16_unaligned(const unsigned char* data) {
     return value;
 }
 
-GraphicsColor graphics_color_from_push_constants(const GraphicsPipelineState& pipeline) {
-    if (pipeline.push_constants.size() >= sizeof(float) * 4) {
-        const auto* data = pipeline.push_constants.data();
-        const auto clamp_to_byte = [](float value) {
-            const auto scaled = std::clamp(value, 0.0f, 1.0f) * 255.0f;
-            return static_cast<uint8_t>(std::lround(scaled));
-        };
-        return GraphicsColor{
-            clamp_to_byte(read_f32_unaligned(data)),
-            clamp_to_byte(read_f32_unaligned(data + 4)),
-            clamp_to_byte(read_f32_unaligned(data + 8)),
-            clamp_to_byte(read_f32_unaligned(data + 12))};
-    }
-
-    return GraphicsColor{64, 180, 255, 255};
-}
-
-GraphicsColor graphics_color_from_sampled_texture(const GraphicsPipelineState& pipeline) {
-    for (const auto& [binding, texture_handle] : pipeline.textures) {
-        (void)binding;
-        const auto texture_it = g_textures.find(texture_handle);
-        if (texture_it == g_textures.end()) {
-            continue;
-        }
-        const auto& texture = texture_it->second;
-        if (texture.depth != 1 || texture.width == 0 || texture.height == 0 || texture.bytes.empty()) {
-            continue;
-        }
-        if (texture.pixel_format == 3 && texture.bytes.size() >= 4) {
-            return GraphicsColor{texture.bytes[0], texture.bytes[1], texture.bytes[2], texture.bytes[3]};
-        }
-        if (texture.pixel_format == 4 && texture.bytes.size() >= 4) {
-            return GraphicsColor{texture.bytes[2], texture.bytes[1], texture.bytes[0], texture.bytes[3]};
-        }
-    }
-
-    return graphics_color_from_push_constants(pipeline);
-}
-
-bool read_graphics_vertex(const BufferState& buffer, uint32_t stride, uint32_t index, GraphicsVertex2D* out_vertex) {
-    if (out_vertex == nullptr || stride < sizeof(float) * 2) {
-        return false;
-    }
-
-    const auto offset = static_cast<size_t>(index) * stride;
-    if (offset + sizeof(float) * 2 > buffer.bytes.size()) {
-        return false;
-    }
-
-    const auto* data = buffer.bytes.data() + offset;
-    out_vertex->x = read_f32_unaligned(data);
-    out_vertex->y = read_f32_unaligned(data + 4);
-    out_vertex->z = offset + 12 <= buffer.bytes.size() ? read_f32_unaligned(data + 8) : 0.0f;
-    out_vertex->w = offset + 16 <= buffer.bytes.size() ? read_f32_unaligned(data + 12) : 1.0f;
-    if (std::abs(out_vertex->w) < 0.000001f) {
-        out_vertex->w = 1.0f;
-    }
-    return true;
-}
-
-float edge_function(float ax, float ay, float bx, float by, float cx, float cy) {
-    return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
-}
-
-void write_graphics_pixel(TextureState& target, uint32_t x, uint32_t y, GraphicsColor color) {
-    const auto pixel = pixel_size(target.pixel_format);
-    const auto offset = (static_cast<size_t>(y) * target.width + x) * pixel;
-    if (offset + pixel > target.bytes.size()) {
-        return;
-    }
-
-    if (target.pixel_format == 3) {
-        target.bytes[offset + 0] = color.r;
-        target.bytes[offset + 1] = color.g;
-        target.bytes[offset + 2] = color.b;
-        target.bytes[offset + 3] = color.a;
-    } else if (target.pixel_format == 4) {
-        target.bytes[offset + 0] = color.b;
-        target.bytes[offset + 1] = color.g;
-        target.bytes[offset + 2] = color.r;
-        target.bytes[offset + 3] = color.a;
-    }
-}
-
-FeResult rasterize_graphics_triangle(TextureState& target, const std::array<GraphicsVertex2D, 3>& vertices,
-                                     GraphicsColor color) {
-    if (target.width == 0 || target.height == 0 || target.depth != 1) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires a valid 2D color target.");
-    }
-    if (target.pixel_format != 3 && target.pixel_format != 4) {
-        return fail(FE_ERROR_UNSUPPORTED, "Graphics rasterization currently supports Rgba8 and Bgra8 color targets.");
-    }
-
-    struct ScreenVertex {
-        float x = 0.0f;
-        float y = 0.0f;
-    };
-
-    std::array<ScreenVertex, 3> screen{};
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        const auto inv_w = 1.0f / vertices[i].w;
-        const auto ndc_x = vertices[i].x * inv_w;
-        const auto ndc_y = vertices[i].y * inv_w;
-        screen[i].x = (ndc_x * 0.5f + 0.5f) * static_cast<float>(target.width - 1);
-        screen[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * static_cast<float>(target.height - 1);
-    }
-
-    const auto min_xf = std::floor(std::min({screen[0].x, screen[1].x, screen[2].x}));
-    const auto max_xf = std::ceil(std::max({screen[0].x, screen[1].x, screen[2].x}));
-    const auto min_yf = std::floor(std::min({screen[0].y, screen[1].y, screen[2].y}));
-    const auto max_yf = std::ceil(std::max({screen[0].y, screen[1].y, screen[2].y}));
-    const auto min_x = static_cast<uint32_t>(std::clamp(min_xf, 0.0f, static_cast<float>(target.width - 1)));
-    const auto max_x = static_cast<uint32_t>(std::clamp(max_xf, 0.0f, static_cast<float>(target.width - 1)));
-    const auto min_y = static_cast<uint32_t>(std::clamp(min_yf, 0.0f, static_cast<float>(target.height - 1)));
-    const auto max_y = static_cast<uint32_t>(std::clamp(max_yf, 0.0f, static_cast<float>(target.height - 1)));
-
-    const auto area = edge_function(screen[0].x, screen[0].y, screen[1].x, screen[1].y, screen[2].x, screen[2].y);
-    if (std::abs(area) < 0.000001f) {
-        const auto cx = target.width / 2;
-        const auto cy = target.height / 2;
-        write_graphics_pixel(target, cx, cy, color);
-        return ok();
-    }
-
-    bool wrote_pixel = false;
-    for (uint32_t y = min_y; y <= max_y; ++y) {
-        for (uint32_t x = min_x; x <= max_x; ++x) {
-            const auto px = static_cast<float>(x) + 0.5f;
-            const auto py = static_cast<float>(y) + 0.5f;
-            const auto w0 = edge_function(screen[1].x, screen[1].y, screen[2].x, screen[2].y, px, py);
-            const auto w1 = edge_function(screen[2].x, screen[2].y, screen[0].x, screen[0].y, px, py);
-            const auto w2 = edge_function(screen[0].x, screen[0].y, screen[1].x, screen[1].y, px, py);
-            const auto has_neg = w0 < 0.0f || w1 < 0.0f || w2 < 0.0f;
-            const auto has_pos = w0 > 0.0f || w1 > 0.0f || w2 > 0.0f;
-            if (has_neg && has_pos) {
-                continue;
-            }
-
-            write_graphics_pixel(target, x, y, color);
-            wrote_pixel = true;
-        }
-    }
-
-    if (!wrote_pixel) {
-        write_graphics_pixel(target, target.width / 2, target.height / 2, color);
-    }
-    return ok();
-}
-
-bool map_graphics_topology(uint32_t topology, GPU::Backend::PrimitiveTopology* out_topology) {
-    if (out_topology == nullptr) {
-        return false;
-    }
-
-    switch (topology) {
-    case 0:
-        *out_topology = GPU::Backend::PrimitiveTopology::TriangleList;
-        return true;
-    case 1:
-        *out_topology = GPU::Backend::PrimitiveTopology::TriangleStrip;
-        return true;
-    case 2:
-        *out_topology = GPU::Backend::PrimitiveTopology::LineList;
-        return true;
-    case 3:
-        *out_topology = GPU::Backend::PrimitiveTopology::LineStrip;
-        return true;
-    case 4:
-        *out_topology = GPU::Backend::PrimitiveTopology::PointList;
-        return true;
-    case 5:
-        *out_topology = GPU::Backend::PrimitiveTopology::TriangleFan;
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool map_graphics_sample_count(uint32_t sample_count, GPU::Backend::SampleCount* out_sample_count) {
-    if (out_sample_count == nullptr) {
-        return false;
-    }
-
-    switch (sample_count == 0 ? 1 : sample_count) {
-    case 1:
-        *out_sample_count = GPU::Backend::SampleCount::X1;
-        return true;
-    case 2:
-        *out_sample_count = GPU::Backend::SampleCount::X2;
-        return true;
-    case 4:
-        *out_sample_count = GPU::Backend::SampleCount::X4;
-        return true;
-    case 8:
-        *out_sample_count = GPU::Backend::SampleCount::X8;
-        return true;
-    case 16:
-        *out_sample_count = GPU::Backend::SampleCount::X16;
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool map_sampler_desc(const FeSamplerDesc& source, GPU::Backend::SamplerDesc* out) {
-    if (out == nullptr || source.min_filter > 1 || source.mag_filter > 1 ||
+bool validate_sampler_desc(const FeSamplerDesc& source) {
+    if (source.min_filter > 1 || source.mag_filter > 1 ||
         source.mipmap_mode > 1 ||
         source.address_u > 3 || source.address_v > 3 || source.address_w > 3 ||
         source.compare_op > 7 || source.border_color > 5 ||
@@ -6879,144 +3553,8 @@ bool map_sampler_desc(const FeSamplerDesc& source, GPU::Backend::SamplerDesc* ou
         source.max_anisotropy < 1.0f) {
         return false;
     }
-
-    out->minFilter = static_cast<GPU::Backend::SamplerFilter>(source.min_filter);
-    out->magFilter = static_cast<GPU::Backend::SamplerFilter>(source.mag_filter);
-    out->mipmapMode = static_cast<GPU::Backend::SamplerMipmapMode>(source.mipmap_mode);
-    out->addressU = static_cast<GPU::Backend::SamplerAddressMode>(source.address_u);
-    out->addressV = static_cast<GPU::Backend::SamplerAddressMode>(source.address_v);
-    out->addressW = static_cast<GPU::Backend::SamplerAddressMode>(source.address_w);
-    out->mipLodBias = source.mip_lod_bias;
-    out->minLod = source.min_lod;
-    out->maxLod = source.max_lod;
-    out->anisotropyEnable = source.anisotropy_enable != 0;
-    out->maxAnisotropy = source.max_anisotropy;
-    out->compareEnable = source.compare_enable != 0;
-    out->compareOp = static_cast<GPU::Backend::CompareOp>(source.compare_op);
-    out->borderColor = static_cast<GPU::Backend::SamplerBorderColor>(source.border_color);
     return true;
 }
-
-bool map_graphics_compare_op(uint32_t value, GPU::Backend::CompareOp* out) {
-    if (out == nullptr || value > 7) {
-        return false;
-    }
-    *out = static_cast<GPU::Backend::CompareOp>(value);
-    return true;
-}
-
-bool map_graphics_stencil_op(uint32_t value, GPU::Backend::StencilOp* out) {
-    if (out == nullptr || value > 7) {
-        return false;
-    }
-    *out = static_cast<GPU::Backend::StencilOp>(value);
-    return true;
-}
-
-bool map_graphics_stencil_face(const FeGraphicsStencilFaceDesc& source, GPU::Backend::StencilFaceState* out) {
-    return out != nullptr &&
-           map_graphics_stencil_op(source.fail_op, &out->failOp) &&
-           map_graphics_stencil_op(source.pass_op, &out->passOp) &&
-           map_graphics_stencil_op(source.depth_fail_op, &out->depthFailOp) &&
-           map_graphics_compare_op(source.compare_op, &out->compareOp);
-}
-
-bool map_graphics_blend_factor(uint32_t value, GPU::Backend::BlendFactor* out) {
-    if (out == nullptr || value > 9) {
-        return false;
-    }
-    *out = static_cast<GPU::Backend::BlendFactor>(value);
-    return true;
-}
-
-bool map_graphics_blend_op(uint32_t value, GPU::Backend::BlendOp* out) {
-    if (out == nullptr || value > 4) {
-        return false;
-    }
-    *out = static_cast<GPU::Backend::BlendOp>(value);
-    return true;
-}
-
-bool map_graphics_color_blend_attachment(const FeGraphicsColorBlendAttachmentDesc& source,
-                                         GPU::Backend::ColorAttachmentBlendState* out) {
-    if (out == nullptr || (source.write_mask & ~15u) != 0) {
-        return false;
-    }
-
-    GPU::Backend::BlendFactor src_color;
-    GPU::Backend::BlendFactor dst_color;
-    GPU::Backend::BlendFactor src_alpha;
-    GPU::Backend::BlendFactor dst_alpha;
-    GPU::Backend::BlendOp color_op;
-    GPU::Backend::BlendOp alpha_op;
-    if (!map_graphics_blend_factor(source.src_color, &src_color) ||
-        !map_graphics_blend_factor(source.dst_color, &dst_color) ||
-        !map_graphics_blend_factor(source.src_alpha, &src_alpha) ||
-        !map_graphics_blend_factor(source.dst_alpha, &dst_alpha) ||
-        !map_graphics_blend_op(source.color_op, &color_op) ||
-        !map_graphics_blend_op(source.alpha_op, &alpha_op)) {
-        return false;
-    }
-
-    out->blendEnable = source.blend_enable != 0;
-    out->srcColorBlendFactor = src_color;
-    out->dstColorBlendFactor = dst_color;
-    out->colorBlendOp = color_op;
-    out->srcAlphaBlendFactor = src_alpha;
-    out->dstAlphaBlendFactor = dst_alpha;
-    out->alphaBlendOp = alpha_op;
-    out->colorWriteMask = source.write_mask;
-    return true;
-}
-
-bool map_graphics_raster_state(const GraphicsPipelineState& pipeline,
-                               GPU::Backend::CullMode* cull_mode,
-                               GPU::Backend::FrontFace* front_face,
-                               GPU::Backend::PolygonMode* polygon_mode) {
-    if (cull_mode == nullptr || front_face == nullptr || polygon_mode == nullptr ||
-        pipeline.cull_mode > 3 || pipeline.front_face > 1 || pipeline.polygon_mode > 2) {
-        return false;
-    }
-
-    *cull_mode = static_cast<GPU::Backend::CullMode>(pipeline.cull_mode);
-    *front_face = static_cast<GPU::Backend::FrontFace>(pipeline.front_face);
-    *polygon_mode = static_cast<GPU::Backend::PolygonMode>(pipeline.polygon_mode);
-    return true;
-}
-
-struct GraphicsVaryingField {
-    std::string name;
-    std::string glsl_type;
-    uint32_t type_id = UINT32_MAX;
-    uint32_t location = UINT32_MAX;
-    bool position = false;
-};
-
-struct GraphicsVaryingLayout {
-    bool is_float4 = false;
-    uint32_t type_id = UINT32_MAX;
-    uint32_t position_field_type_id = UINT32_MAX;
-    std::string position_field_name;
-    std::vector<GraphicsVaryingField> fields;
-};
-
-struct GraphicsFragmentOutputField {
-    std::string name;
-    std::string glsl_type;
-    uint32_t type_id = UINT32_MAX;
-    uint32_t location = UINT32_MAX;
-};
-
-struct GraphicsFragmentOutputLayout {
-    bool is_float4 = false;
-    uint32_t type_id = UINT32_MAX;
-    std::vector<GraphicsFragmentOutputField> fields;
-};
-
-enum class GraphicsStage {
-    Vertex,
-    Fragment
-};
 
 enum class GraphicsDepthLoadOp : uint32_t {
     Default = 0,
@@ -7031,36 +3569,19 @@ enum class GraphicsColorLoadOp : uint32_t {
     DontCare = 3
 };
 
-struct GraphicsLoweringContext {
-    GraphicsStage stage = GraphicsStage::Fragment;
-    const ParsedIr& ir;
-    const Feather::TypedIR::Module& module;
-    const GraphicsPipelineState& pipeline;
-    const std::vector<GraphicsPushConstantLayoutEntry>& push_constants;
-    const GraphicsVaryingLayout& varyings;
-    const GraphicsResourceLayout& resources;
-    std::string parameter_name;
-    std::optional<uint32_t> sampled_texture_binding;
-    std::unordered_map<std::string, uint32_t> locals;
-    std::set<uint32_t> used_buffer_bindings;
-};
-
-struct GraphicsFragmentLoweringContext {
-    const ParsedIr& ir;
-    const Feather::TypedIR::Module& module;
-    const GraphicsPipelineState& pipeline;
-    const std::vector<GraphicsPushConstantLayoutEntry>& push_constants;
-    std::string fragment_parameter_name;
-    std::optional<uint32_t> sampled_texture_binding;
-    std::unordered_map<std::string, uint32_t> locals;
-};
-
 bool same_graphics_resource(const GraphicsPushConstantLayoutEntry& entry, uint32_t binding, const std::string& name) {
     return entry.binding == binding && entry.name == name;
 }
 
 const IrResource* find_graphics_resource_by_binding_and_name(const ParsedIr& ir, uint32_t binding,
-                                                             const std::string& name);
+                                                             const std::string& name) {
+    for (const auto& resource : ir.resources) {
+        if (resource.binding == binding && string_or_empty(ir, resource.name_string_id) == name) {
+            return &resource;
+        }
+    }
+    return nullptr;
+}
 
 bool append_graphics_push_constants(const ParsedIr& ir, std::vector<GraphicsPushConstantLayoutEntry>* entries) {
     if (entries == nullptr) {
@@ -7145,3384 +3666,6 @@ const std::string* typed_ir_string(const Feather::TypedIR::Module& module, uint3
     return id < module.strings.size() ? &module.strings[id] : nullptr;
 }
 
-std::string sanitize_graphics_glsl_identifier(std::string_view value) {
-    std::string result;
-    result.reserve(value.size() + 1);
-    for (const auto ch : value) {
-        const auto uch = static_cast<unsigned char>(ch);
-        result.push_back((std::isalnum(uch) || ch == '_') ? static_cast<char>(ch) : '_');
-    }
-
-    if (result.empty() || std::isdigit(static_cast<unsigned char>(result.front()))) {
-        result.insert(result.begin(), '_');
-    }
-
-    return result;
-}
-
-std::string graphics_glsl_type_name(const Feather::TypedIR::Module& module, uint32_t type_id) {
-    if (type_id >= module.types.size()) {
-        return {};
-    }
-
-    const auto& type = module.types[type_id];
-    switch (type.kind) {
-    case 1: // primitive
-        switch (type.a) {
-        case 0:
-            return "bool";
-        case 1:
-            return "int";
-        case 2:
-            return "uint";
-        case 3:
-            return "float";
-        default:
-            return {};
-        }
-    case 2: { // vector
-        if (type.b < 2 || type.b > 4 || type.a >= module.types.size()) {
-            return {};
-        }
-
-        const auto element = graphics_glsl_type_name(module, type.a);
-        if (element == "float") {
-            return "vec" + std::to_string(type.b);
-        }
-        if (element == "int") {
-            return "ivec" + std::to_string(type.b);
-        }
-        if (element == "uint") {
-            return "uvec" + std::to_string(type.b);
-        }
-        if (element == "bool") {
-            return "bvec" + std::to_string(type.b);
-        }
-        return {};
-    }
-    case 3: { // matrix
-        if (type.a >= module.types.size() || type.b < 2 || type.b > 4 || type.c < 2 || type.c > 4) {
-            return {};
-        }
-
-        const auto element = graphics_glsl_type_name(module, type.a);
-        if (element != "float") {
-            return {};
-        }
-
-        return type.b == type.c
-            ? "mat" + std::to_string(type.b)
-            : "mat" + std::to_string(type.c) + "x" + std::to_string(type.b);
-    }
-    case 4: { // struct
-        if (type.a >= module.structs.size()) {
-            return {};
-        }
-
-        const auto& structure = module.structs[type.a];
-        const auto* name = typed_ir_string(module, structure.name_id);
-        return name == nullptr ? std::string{} : ("fe_" + sanitize_graphics_glsl_identifier(*name));
-    }
-    default:
-        return {};
-    }
-}
-
-std::string graphics_glsl_type_name_from_record(const Feather::TypedIR::Module& module,
-                                                const Feather::TypedIR::Type& type) {
-    for (uint32_t i = 0; i < module.types.size(); ++i) {
-        const auto& candidate = module.types[i];
-        if (candidate.kind == type.kind && candidate.a == type.a && candidate.b == type.b &&
-            candidate.c == type.c && candidate.d == type.d) {
-            return graphics_glsl_type_name(module, i);
-        }
-    }
-
-    return {};
-}
-
-bool graphics_find_struct_field(const Feather::TypedIR::Module& module, uint32_t struct_index,
-                                const std::string& name, Feather::TypedIR::StructField* out_field = nullptr) {
-    if (struct_index >= module.structs.size()) {
-        return false;
-    }
-
-    const auto& structure = module.structs[struct_index];
-    if (structure.field_count == 0) {
-        return false;
-    }
-    if (structure.first_field == UINT32_MAX ||
-        structure.first_field > module.struct_fields.size() ||
-        structure.field_count > module.struct_fields.size() - structure.first_field) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < structure.field_count; ++i) {
-        const auto& field = module.struct_fields[structure.first_field + i];
-        const auto* field_name = typed_ir_string(module, field.name_id);
-        if (field_name != nullptr && *field_name == name) {
-            if (out_field != nullptr) {
-                *out_field = field;
-            }
-            return true;
-        }
-    }
-
-    return false;
-}
-
-std::optional<uint32_t> graphics_struct_index_for_type(const Feather::TypedIR::Module& module, uint32_t type_id) {
-    if (type_id >= module.types.size()) {
-        return std::nullopt;
-    }
-
-    const auto& type = module.types[type_id];
-    if (type.kind != 4 || type.a >= module.structs.size()) {
-        return std::nullopt;
-    }
-
-    return type.a;
-}
-
-bool build_graphics_varying_layout(const Feather::TypedIR::Module& module, uint32_t type_id,
-                                   GraphicsVaryingLayout* layout) {
-    if (layout == nullptr || type_id >= module.types.size()) {
-        return false;
-    }
-
-    layout->is_float4 = false;
-    layout->type_id = type_id;
-    layout->position_field_type_id = UINT32_MAX;
-    layout->position_field_name.clear();
-    layout->fields.clear();
-
-    const auto type_name = graphics_glsl_type_name(module, type_id);
-    if (type_name == "vec4") {
-        layout->is_float4 = true;
-        layout->position_field_type_id = type_id;
-        layout->fields.push_back(GraphicsVaryingField{"", "vec4", type_id, 0, true});
-        return true;
-    }
-
-    const auto struct_index = graphics_struct_index_for_type(module, type_id);
-    if (!struct_index.has_value()) {
-        return false;
-    }
-
-    const auto& structure = module.structs[*struct_index];
-    if (structure.field_count == 0 ||
-        structure.first_field == UINT32_MAX ||
-        structure.first_field > module.struct_fields.size() ||
-        structure.field_count > module.struct_fields.size() - structure.first_field) {
-        return false;
-    }
-
-    uint32_t location = 0;
-    bool found_position = false;
-    for (uint32_t i = 0; i < structure.field_count; ++i) {
-        const auto& field = module.struct_fields[structure.first_field + i];
-        const auto* field_name = typed_ir_string(module, field.name_id);
-        const auto field_type_name = graphics_glsl_type_name(module, field.type_id);
-        if (field_name == nullptr || field_name->empty() || field_type_name.empty()) {
-            return false;
-        }
-
-        const auto is_position = (field.flags & kTypedStructFieldFlagPosition) != 0;
-        if (is_position && field_type_name != "vec4") {
-            return false;
-        }
-        if (!is_position) {
-            layout->fields.push_back(GraphicsVaryingField{*field_name, field_type_name, field.type_id, location++, false});
-        } else {
-            layout->position_field_type_id = field.type_id;
-            layout->position_field_name = *field_name;
-            found_position = true;
-        }
-    }
-
-    return found_position;
-}
-
-bool build_graphics_fragment_output_layout(const Feather::TypedIR::Module& module,
-                                           uint32_t type_id,
-                                           uint32_t color_attachment_count,
-                                           GraphicsFragmentOutputLayout* layout) {
-    if (layout == nullptr || type_id >= module.types.size() ||
-        color_attachment_count == 0 ||
-        color_attachment_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
-        return false;
-    }
-
-    layout->is_float4 = false;
-    layout->type_id = type_id;
-    layout->fields.clear();
-
-    const auto type_name = graphics_glsl_type_name(module, type_id);
-    if (type_name == "vec4") {
-        if (color_attachment_count != 1) {
-            return false;
-        }
-
-        layout->is_float4 = true;
-        layout->fields.push_back(GraphicsFragmentOutputField{"", "vec4", type_id, 0});
-        return true;
-    }
-
-    const auto struct_index = graphics_struct_index_for_type(module, type_id);
-    if (!struct_index.has_value()) {
-        return false;
-    }
-
-    const auto& structure = module.structs[*struct_index];
-    if (structure.field_count == 0 ||
-        structure.first_field == UINT32_MAX ||
-        structure.first_field > module.struct_fields.size() ||
-        structure.field_count > module.struct_fields.size() - structure.first_field) {
-        return false;
-    }
-
-    std::set<uint32_t> locations;
-    for (uint32_t i = 0; i < structure.field_count; ++i) {
-        const auto& field = module.struct_fields[structure.first_field + i];
-        if ((field.flags & kTypedStructFieldFlagPosition) != 0) {
-            return false;
-        }
-        if ((field.flags & kTypedStructFieldFlagColor) == 0) {
-            return false;
-        }
-
-        const auto location = field.flags >> kTypedStructFieldColorIndexShift;
-        if (location >= color_attachment_count || !locations.insert(location).second) {
-            return false;
-        }
-
-        const auto* field_name = typed_ir_string(module, field.name_id);
-        const auto field_type_name = graphics_glsl_type_name(module, field.type_id);
-        if (field_name == nullptr || field_name->empty() || field_type_name != "vec4") {
-            return false;
-        }
-
-        layout->fields.push_back(GraphicsFragmentOutputField{*field_name, field_type_name, field.type_id, location});
-    }
-
-    if (locations.size() != color_attachment_count) {
-        return false;
-    }
-
-    std::sort(layout->fields.begin(), layout->fields.end(), [](const auto& left, const auto& right) {
-        return left.location < right.location;
-    });
-    return true;
-}
-
-std::string graphics_float_literal(float value) {
-    if (!std::isfinite(value)) {
-        return "0.0";
-    }
-
-    std::ostringstream stream;
-    stream << std::fixed << std::setprecision(8) << value;
-    return stream.str();
-}
-
-std::string normalize_graphics_literal(std::string value) {
-    value = trim_copy(value);
-    while (!value.empty() && (value.back() == 'f' || value.back() == 'F' ||
-                              value.back() == 'd' || value.back() == 'D')) {
-        value.pop_back();
-    }
-
-    return value.empty() ? "0" : value;
-}
-
-std::string graphics_swizzle_components(std::string value) {
-    for (auto& ch : value) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        switch (ch) {
-        case 'r':
-        case 's':
-            ch = 'x';
-            break;
-        case 'g':
-        case 't':
-            ch = 'y';
-            break;
-        case 'b':
-        case 'p':
-            ch = 'z';
-            break;
-        case 'a':
-        case 'q':
-            ch = 'w';
-            break;
-        default:
-            break;
-        }
-    }
-
-    return value;
-}
-
-bool feather_graphics_trace_enabled();
-
-void trace_graphics_expression_failure(const GraphicsLoweringContext& context, const char* stage, uint32_t expr_id,
-                                       const char* reason) {
-    if (!feather_graphics_trace_enabled()) {
-        return;
-    }
-
-    std::cerr << "[feather graphics] " << stage << " expression lowering failed";
-    if (expr_id < context.module.expressions.size()) {
-        const auto& expression = context.module.expressions[expr_id];
-        std::cerr << ": id=" << expr_id << " kind=" << static_cast<int>(expression.kind)
-                  << " type=" << expression.type_id << " op=" << expression.op;
-        if (expression.name_id < context.module.strings.size()) {
-            std::cerr << " name=" << context.module.strings[expression.name_id];
-        }
-    } else {
-        std::cerr << ": id=" << expr_id;
-    }
-    std::cerr << " reason=" << reason << "\n";
-}
-
-bool is_fragment_parameter_reference(const GraphicsFragmentLoweringContext& context, uint32_t expr_id) {
-    if (expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    if (expression.kind != 3 || expression.name_id >= context.module.strings.size()) {
-        return false;
-    }
-
-    return context.module.strings[expression.name_id] == context.fragment_parameter_name;
-}
-
-bool try_graphics_resource_name(const GraphicsFragmentLoweringContext& context, uint32_t expr_id, std::string* name) {
-    if (name == nullptr || expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    if ((expression.kind == 2 || expression.kind == 3) && expression.name_id < context.module.strings.size()) {
-        *name = context.module.strings[expression.name_id];
-        return true;
-    }
-
-    if (expression.kind == 4 && expression.name_id < context.module.strings.size()) {
-        *name = context.module.strings[expression.name_id];
-        return true;
-    }
-
-    return false;
-}
-
-const IrResource* find_graphics_resource_by_binding_and_name(const ParsedIr& ir, uint32_t binding,
-                                                             const std::string& name) {
-    for (const auto& resource : ir.resources) {
-        const auto resource_name = string_or_empty(ir, resource.name_string_id);
-        if (resource.binding == binding && resource_name == name) {
-            return &resource;
-        }
-    }
-
-    return nullptr;
-}
-
-bool try_graphics_push_constant_literal(const GraphicsFragmentLoweringContext& context,
-                                        const Feather::TypedIR::Expression& expression,
-                                        std::string* glsl) {
-    if (glsl == nullptr || expression.name_id >= context.module.strings.size()) {
-        return false;
-    }
-
-    const auto& name = context.module.strings[expression.name_id];
-    const auto it = std::find_if(context.push_constants.begin(), context.push_constants.end(), [&](const auto& entry) {
-        return same_graphics_resource(entry, expression.op, name);
-    });
-    if (it == context.push_constants.end() ||
-        it->offset > context.pipeline.push_constants.size() ||
-        it->size > context.pipeline.push_constants.size() - it->offset) {
-        return false;
-    }
-
-    const auto* data = context.pipeline.push_constants.data() + it->offset;
-    switch (it->size) {
-    case sizeof(float): {
-        *glsl = graphics_float_literal(read_f32_unaligned(data));
-        return true;
-    }
-    case sizeof(float) * 2:
-    case sizeof(float) * 3:
-    case sizeof(float) * 4: {
-        const auto components = it->size / sizeof(float);
-        std::ostringstream stream;
-        stream << "vec" << components << "(";
-        for (size_t i = 0; i < components; ++i) {
-            if (i != 0) {
-                stream << ", ";
-            }
-            stream << graphics_float_literal(read_f32_unaligned(data + i * sizeof(float)));
-        }
-        stream << ")";
-        *glsl = stream.str();
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
-bool lower_graphics_fragment_expression(GraphicsFragmentLoweringContext& context, uint32_t expr_id,
-                                        std::string* glsl);
-
-bool is_graphics_sample_expression(const GraphicsFragmentLoweringContext& context, uint32_t expr_id) {
-    if (expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    if (expression.kind == 23) {
-        return true;
-    }
-    if ((expression.kind == 11 || expression.kind == 15 || expression.kind == 16) &&
-        expression.a != UINT32_MAX) {
-        return is_graphics_sample_expression(context, expression.a);
-    }
-
-    return false;
-}
-
-bool lower_graphics_texture_sample(GraphicsFragmentLoweringContext& context,
-                                   const Feather::TypedIR::Expression& expression,
-                                   std::string* glsl) {
-    if (glsl == nullptr || expression.argument_count < 3 ||
-        expression.first_argument == UINT32_MAX ||
-        expression.first_argument > context.module.arguments.size() ||
-        expression.argument_count > context.module.arguments.size() - expression.first_argument) {
-        return false;
-    }
-
-    const auto texture_expr_id = context.module.arguments[expression.first_argument];
-    const auto uv_expr_id = context.module.arguments[expression.first_argument + 2];
-    std::string texture_name;
-    if (!try_graphics_resource_name(context, texture_expr_id, &texture_name)) {
-        return false;
-    }
-
-    const IrResource* texture_resource = nullptr;
-    for (const auto& resource : context.ir.resources) {
-        const auto resource_name = string_or_empty(context.ir, resource.name_string_id);
-        if (resource_name == texture_name && resource.kind == kIrResourceKindTexture2D) {
-            texture_resource = &resource;
-            break;
-        }
-    }
-    if (texture_resource == nullptr) {
-        return false;
-    }
-
-    std::string uv;
-    if (!lower_graphics_fragment_expression(context, uv_expr_id, &uv)) {
-        return false;
-    }
-
-    context.sampled_texture_binding = texture_resource->binding;
-    std::ostringstream stream;
-    stream << "texture(u_texture_" << texture_resource->binding
-           << ", " << uv << ")";
-    *glsl = stream.str();
-    return true;
-}
-
-bool lower_graphics_fragment_expression(GraphicsFragmentLoweringContext& context, uint32_t expr_id,
-                                        std::string* glsl) {
-    if (glsl == nullptr || expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    switch (expression.kind) {
-    case 1: {
-        const auto* literal = typed_ir_string(context.module, expression.name_id);
-        if (literal == nullptr) {
-            return false;
-        }
-        *glsl = normalize_graphics_literal(*literal);
-        return true;
-    }
-    case 2:
-    case 3: {
-        const auto* name = typed_ir_string(context.module, expression.name_id);
-        if (name == nullptr) {
-            return false;
-        }
-
-        if (*name == context.fragment_parameter_name) {
-            *glsl = "v_color";
-            return true;
-        }
-
-        if (expression.kind == 2) {
-            const auto local = context.locals.find(*name);
-            if (local != context.locals.end()) {
-                return lower_graphics_fragment_expression(context, local->second, glsl);
-            }
-        }
-
-        return false;
-    }
-    case 6: {
-        std::string operand;
-        if (!lower_graphics_fragment_expression(context, expression.a, &operand)) {
-            return false;
-        }
-        const auto op = expression.op == 0 ? "-" : expression.op == 1 ? "!" : "~";
-        *glsl = std::string("(") + op + operand + ")";
-        return true;
-    }
-    case 7: {
-        std::string left;
-        std::string right;
-        if (!lower_graphics_fragment_expression(context, expression.a, &left) ||
-            !lower_graphics_fragment_expression(context, expression.b, &right)) {
-            return false;
-        }
-        const auto* op = expression.op == 0 ? "+"
-                       : expression.op == 1 ? "-"
-                       : expression.op == 2 ? "*"
-                       : expression.op == 3 ? "/"
-                       : expression.op == 4 ? "%"
-                       : nullptr;
-        if (op == nullptr) {
-            return false;
-        }
-        *glsl = "(" + left + " " + op + " " + right + ")";
-        return true;
-    }
-    case 11:
-        return lower_graphics_fragment_expression(context, expression.a, glsl);
-    case 12: {
-        const auto type_name = graphics_glsl_type_name(context.module, expression.type_id);
-        if (type_name.empty() || expression.argument_count == 0 ||
-            expression.first_argument == UINT32_MAX ||
-            expression.first_argument > context.module.arguments.size() ||
-            expression.argument_count > context.module.arguments.size() - expression.first_argument) {
-            return false;
-        }
-
-        std::ostringstream stream;
-        stream << type_name << "(";
-        for (uint32_t i = 0; i < expression.argument_count; ++i) {
-            std::string argument;
-            if (!lower_graphics_fragment_expression(context, context.module.arguments[expression.first_argument + i], &argument)) {
-                return false;
-            }
-            if (i != 0) {
-                stream << ", ";
-            }
-            stream << argument;
-        }
-        stream << ")";
-        *glsl = stream.str();
-        return true;
-    }
-    case 15: {
-        const auto* swizzle = typed_ir_string(context.module, expression.name_id);
-        if (swizzle == nullptr) {
-            return false;
-        }
-
-        const auto components = graphics_swizzle_components(*swizzle);
-        if (is_fragment_parameter_reference(context, expression.a) &&
-            (components == "xy" || components == "rg")) {
-            *glsl = "v_uv";
-            return true;
-        }
-
-        std::string value;
-        if (!lower_graphics_fragment_expression(context, expression.a, &value)) {
-            return false;
-        }
-        *glsl = "(" + value + ")." + components;
-        return true;
-    }
-    case 16: {
-        const auto* member = typed_ir_string(context.module, expression.name_id);
-        if (member == nullptr || member->empty()) {
-            return false;
-        }
-
-        std::string value;
-        if (!lower_graphics_fragment_expression(context, expression.a, &value)) {
-            return false;
-        }
-        if (*member == "X" || *member == "R") {
-            *glsl = "(" + value + ").r";
-            return true;
-        }
-        if (*member == "Y" || *member == "G") {
-            *glsl = "(" + value + ").g";
-            return true;
-        }
-        if (*member == "Z" || *member == "B") {
-            *glsl = "(" + value + ").b";
-            return true;
-        }
-        if (*member == "W" || *member == "A") {
-            *glsl = "(" + value + ").a";
-            return true;
-        }
-        if (*member == "XY" || *member == "RG") {
-            *glsl = "(" + value + ").rg";
-            return true;
-        }
-        if (*member == "ZW" || *member == "BA") {
-            *glsl = "(" + value + ").ba";
-            return true;
-        }
-        if (*member == "XYZ" || *member == "RGB") {
-            *glsl = "(" + value + ").rgb";
-            return true;
-        }
-        if (*member == "RGBA") {
-            *glsl = value;
-            return true;
-        }
-
-        if (is_graphics_sample_expression(context, expression.a)) {
-            if (*member == "R") {
-                *glsl = "(" + value + ").r";
-                return true;
-            }
-            if (*member == "G") {
-                *glsl = "(" + value + ").g";
-                return true;
-            }
-            if (*member == "B") {
-                *glsl = "(" + value + ").b";
-                return true;
-            }
-            if (*member == "A") {
-                *glsl = "(" + value + ").a";
-                return true;
-            }
-        }
-
-        *glsl = "(" + value + ")." + graphics_swizzle_components(*member);
-        return true;
-    }
-    case 19:
-        return try_graphics_push_constant_literal(context, expression, glsl);
-    case 23:
-        return lower_graphics_texture_sample(context, expression, glsl);
-    default:
-        return false;
-    }
-}
-
-bool find_graphics_fragment_return_expression(const GraphicsFragmentLoweringContext& context, uint32_t* expr_id) {
-    if (expr_id == nullptr ||
-        context.module.entry_function >= context.module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.kind != 4 || function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-
-    if (function.parameter_count > 0) {
-        if (function.first_parameter == UINT32_MAX ||
-            function.first_parameter > context.module.parameters.size() ||
-            function.parameter_count > context.module.parameters.size() - function.first_parameter) {
-            return false;
-        }
-    }
-
-    const auto& body = context.module.statements[function.body_statement_index];
-    if (body.kind != 1 || body.child_count == 0 ||
-        body.first_child == UINT32_MAX ||
-        body.first_child > context.module.children.size() ||
-        body.child_count > context.module.children.size() - body.first_child) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < body.child_count; ++i) {
-        const auto statement_id = context.module.children[body.first_child + i];
-        if (statement_id >= context.module.statements.size()) {
-            return false;
-        }
-
-        const auto& statement = context.module.statements[statement_id];
-        if (statement.kind != 11) {
-            continue;
-        }
-        if (statement.a == UINT32_MAX || statement.a >= context.module.expressions.size()) {
-            return false;
-        }
-
-        *expr_id = statement.a;
-        return true;
-    }
-
-    return false;
-}
-
-bool collect_graphics_fragment_locals(GraphicsFragmentLoweringContext* context) {
-    if (context == nullptr ||
-        context->module.entry_function >= context->module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context->module.functions[context->module.entry_function];
-    if (function.body_statement_index >= context->module.statements.size()) {
-        return false;
-    }
-
-    const auto& body = context->module.statements[function.body_statement_index];
-    if (body.kind != 1) {
-        return false;
-    }
-    if (body.child_count == 0) {
-        return true;
-    }
-    if (body.first_child == UINT32_MAX ||
-        body.first_child > context->module.children.size() ||
-        body.child_count > context->module.children.size() - body.first_child) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < body.child_count; ++i) {
-        const auto statement_id = context->module.children[body.first_child + i];
-        if (statement_id >= context->module.statements.size()) {
-            return false;
-        }
-
-        const auto& statement = context->module.statements[statement_id];
-        if (statement.kind == 11) {
-            break;
-        }
-        if (statement.kind != 2) {
-            continue;
-        }
-        if (statement.a == UINT32_MAX || statement.a >= context->module.expressions.size() ||
-            statement.name_id >= context->module.strings.size()) {
-            return false;
-        }
-
-        context->locals[context->module.strings[statement.name_id]] = statement.a;
-    }
-
-    return true;
-}
-
-bool try_build_graphics_fragment_glsl(const GraphicsPipelineState& pipeline, std::string* source,
-                                      std::optional<uint32_t>* sampled_texture_binding) {
-    if (source == nullptr || sampled_texture_binding == nullptr) {
-        return false;
-    }
-
-    ParsedIr vertex_ir;
-    ParsedIr fragment_ir;
-    if (!parse_feather_ir(pipeline.vertex_ir, &vertex_ir) ||
-        !parse_feather_ir(pipeline.fragment_ir, &fragment_ir) ||
-        !fragment_ir.has_section7 ||
-        fragment_ir.typed_module.entry_function >= fragment_ir.typed_module.functions.size()) {
-        return false;
-    }
-
-    std::vector<GraphicsPushConstantLayoutEntry> push_constants;
-    if (!build_graphics_push_constant_layout(vertex_ir, fragment_ir, &push_constants)) {
-        return false;
-    }
-
-    GraphicsFragmentLoweringContext context{
-        fragment_ir,
-        fragment_ir.typed_module,
-        pipeline,
-        push_constants,
-        "input",
-        std::nullopt,
-        {}};
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.parameter_count > 0 && function.first_parameter < context.module.parameters.size()) {
-        const auto& parameter = context.module.parameters[function.first_parameter];
-        if (parameter.name_id < context.module.strings.size()) {
-            context.fragment_parameter_name = context.module.strings[parameter.name_id];
-        }
-    }
-
-    if (!collect_graphics_fragment_locals(&context)) {
-        return false;
-    }
-
-    uint32_t return_expr_id = UINT32_MAX;
-    if (!find_graphics_fragment_return_expression(context, &return_expr_id)) {
-        return false;
-    }
-
-    const auto return_type = graphics_glsl_type_name(context.module, context.module.expressions[return_expr_id].type_id);
-    if (return_type != "vec4") {
-        return false;
-    }
-
-    std::string return_expression;
-    if (!lower_graphics_fragment_expression(context, return_expr_id, &return_expression)) {
-        return false;
-    }
-
-    std::ostringstream glsl;
-    glsl << "#version 450\n";
-    glsl << "layout(location = 0) in vec4 v_color;\n";
-    glsl << "layout(location = 1) in vec2 v_uv;\n";
-    glsl << "layout(location = 0) out vec4 out_color;\n";
-    if (context.sampled_texture_binding.has_value()) {
-        glsl << "layout(set = 0, binding = " << *context.sampled_texture_binding
-             << ") uniform sampler2D u_texture_" << *context.sampled_texture_binding << ";\n";
-    }
-    glsl << "void main() {\n";
-    glsl << "    out_color = " << return_expression << ";\n";
-    glsl << "}\n";
-
-    *sampled_texture_binding = context.sampled_texture_binding;
-    *source = glsl.str();
-    return true;
-}
-
-std::optional<uint32_t> graphics_backend_binding(const GraphicsResourceLayout& layout, uint8_t kind,
-                                                 uint32_t source_binding) {
-    for (const auto& entry : layout.entries) {
-        if (entry.kind == kind && entry.source_binding == source_binding) {
-            return entry.backend_binding;
-        }
-    }
-
-    return std::nullopt;
-}
-
-// The name a typed-IR expression refers to, for the expression kinds a resource reference can take:
-// a local (2), a parameter (3), or a field of the shader struct (4). A captured resource lowers to a
-// global local reference by name, so all three resolve the same way.
-const std::string* typed_ir_reference_name(const Feather::TypedIR::Module& module, uint32_t expr_id) {
-    if (expr_id >= module.expressions.size()) {
-        return nullptr;
-    }
-
-    const auto& expression = module.expressions[expr_id];
-    if (expression.kind != 2 && expression.kind != 3 && expression.kind != 4) {
-        return nullptr;
-    }
-    if (expression.name_id >= module.strings.size()) {
-        return nullptr;
-    }
-
-    return &module.strings[expression.name_id];
-}
-
-const IrResource* find_graphics_sampler_for_texture_sample(const ParsedIr& ir, const IrResource& texture_resource) {
-    // Section 7 first. A shader lowered from C# carries its body only there, so the legacy walk below
-    // finds nothing for one and every texture would fall through to the single-sampler guess. That guess
-    // is right whenever a shader binds one sampler, which is why this was invisible until a pass sampled
-    // an albedo map through a repeating sampler and a shadow map through a clamped one in the same
-    // fragment stage: the two are not interchangeable and the bridge refused the draw rather than
-    // picking wrongly.
-    if (ir.has_section7) {
-        const auto& module = ir.typed_module;
-        // Every expression in the module rather than the entry function's alone: a [Callable] helper
-        // that samples a captured texture puts its sample expression in the same table, and the shadow
-        // test in the raster Cornell example is exactly that.
-        for (const auto& expression : module.expressions) {
-            if (expression.kind != kTypedExpressionTextureSample || expression.argument_count < 3 ||
-                expression.first_argument == UINT32_MAX ||
-                expression.first_argument > module.arguments.size() ||
-                expression.argument_count > module.arguments.size() - expression.first_argument) {
-                continue;
-            }
-
-            const auto* sampled_name = typed_ir_reference_name(module, module.arguments[expression.first_argument]);
-            if (sampled_name == nullptr) {
-                continue;
-            }
-
-            const auto* sampled_resource = find_resource_by_name(ir, *sampled_name);
-            if (sampled_resource == nullptr || sampled_resource->binding != texture_resource.binding) {
-                continue;
-            }
-
-            const auto* sampler_name = typed_ir_reference_name(module, module.arguments[expression.first_argument + 1]);
-            if (sampler_name == nullptr) {
-                continue;
-            }
-
-            const auto* sampler_resource = find_resource_by_name(ir, *sampler_name);
-            if (sampler_resource != nullptr && sampler_resource->kind == kIrResourceKindSampler) {
-                return sampler_resource;
-            }
-        }
-    }
-
-    for (const auto& node : ir.expression_nodes) {
-        if ((node.kind != kIrExpressionNodeKindTextureSample &&
-             node.kind != kIrExpressionNodeKindTextureSampleLevel) ||
-            node.resource_binding != texture_resource.binding) {
-            continue;
-        }
-
-        const auto* sampler_name = get_string(ir, node.symbol_string_id);
-        if (sampler_name == nullptr || sampler_name->empty()) {
-            continue;
-        }
-
-        const auto* sampler_resource = find_resource_by_name(ir, *sampler_name);
-        if (sampler_resource != nullptr && sampler_resource->kind == kIrResourceKindSampler) {
-            return sampler_resource;
-        }
-    }
-
-    return nullptr;
-}
-
-bool append_graphics_resource_layout_from_ir(const ParsedIr& ir, GraphicsResourceLayout* layout,
-                                            uint32_t stage_flags) {
-    if (layout == nullptr) {
-        return false;
-    }
-
-    std::set<uint32_t> used_bindings;
-    for (const auto& entry : layout->entries) {
-        used_bindings.insert(entry.backend_binding);
-    }
-
-    for (const auto& resource : ir.resources) {
-        if (resource.kind == kIrResourceKindPushConstant || resource.kind == kIrResourceKindSampler) {
-            continue;
-        }
-        if (resource.kind != kIrResourceKindBuffer && resource.kind != kIrResourceKindTexture2D) {
-            return false;
-        }
-
-        const auto duplicate = std::find_if(layout->entries.begin(), layout->entries.end(), [&](const auto& entry) {
-            return entry.kind == resource.kind && entry.source_binding == resource.binding;
-        });
-        if (duplicate != layout->entries.end()) {
-            // Both stages read the same resource, so the descriptor has to be visible to both.
-            duplicate->stage_flags |= stage_flags;
-            continue;
-        }
-
-        uint32_t backend_binding = 0;
-        while (used_bindings.count(backend_binding) != 0) {
-            ++backend_binding;
-        }
-        if (backend_binding >= GPU::Backend::MAX_BUFFER_BINDINGS ||
-            backend_binding >= GPU::Backend::MAX_TEXTURE_BINDINGS) {
-            return false;
-        }
-
-        uint32_t sampler_binding = UINT32_MAX;
-        if (resource.kind == kIrResourceKindTexture2D) {
-            if (const auto* sampler = find_graphics_sampler_for_texture_sample(ir, resource); sampler != nullptr) {
-                sampler_binding = sampler->binding;
-            }
-        }
-
-        layout->entries.push_back(GraphicsResourceBindingEntry{
-            resource.binding,
-            backend_binding,
-            resource.kind,
-            resource.access,
-            sampler_binding,
-            stage_flags});
-        used_bindings.insert(backend_binding);
-    }
-
-    return true;
-}
-
-bool build_graphics_resource_layout(const ParsedIr& vertex_ir, const ParsedIr& fragment_ir,
-                                    GraphicsResourceLayout* layout) {
-    if (layout == nullptr) {
-        return false;
-    }
-
-    layout->entries.clear();
-    return append_graphics_resource_layout_from_ir(vertex_ir, layout, GPU::Backend::ResourceStageVertex) &&
-           append_graphics_resource_layout_from_ir(fragment_ir, layout, GPU::Backend::ResourceStageFragment);
-}
-
-bool graphics_find_type_by_name(const Feather::TypedIR::Module& module, const std::string& type_name,
-                                uint32_t* type_id) {
-    if (type_id == nullptr) {
-        return false;
-    }
-
-    const auto normalized_type = type_name.rfind("global::", 0) == 0 ? type_name.substr(8) : type_name;
-    for (uint32_t i = 0; i < module.types.size(); ++i) {
-        const auto& type = module.types[i];
-        if (type.kind == 4 && type.a < module.structs.size()) {
-            const auto& structure = module.structs[type.a];
-            const auto* simple = typed_ir_string(module, structure.name_id);
-            const auto* qualified = typed_ir_string(module, structure.fully_qualified_name_id);
-            const auto normalized_qualified = qualified != nullptr && qualified->rfind("global::", 0) == 0
-                                                  ? qualified->substr(8)
-                                                  : (qualified == nullptr ? std::string{} : *qualified);
-            if ((simple != nullptr && *simple == type_name) ||
-                (qualified != nullptr && *qualified == type_name) ||
-                (!normalized_qualified.empty() && normalized_qualified == normalized_type)) {
-                *type_id = i;
-                return true;
-            }
-            continue;
-        }
-
-        const auto glsl_type = graphics_glsl_type_name(module, i);
-        if ((type_name == "float" && glsl_type == "float") ||
-            (type_name == "System.Single" && glsl_type == "float") ||
-            (type_name == "int" && glsl_type == "int") ||
-            (type_name == "System.Int32" && glsl_type == "int") ||
-            (type_name == "uint" && glsl_type == "uint") ||
-            (type_name == "System.UInt32" && glsl_type == "uint") ||
-            (type_name == "Feather.Math.float2" && glsl_type == "vec2") ||
-            (type_name == "global::Feather.Math.float2" && glsl_type == "vec2") ||
-            (type_name == "float2" && glsl_type == "vec2") ||
-            (type_name == "Feather.Math.float3" && glsl_type == "vec3") ||
-            (type_name == "global::Feather.Math.float3" && glsl_type == "vec3") ||
-            (type_name == "float3" && glsl_type == "vec3") ||
-            (type_name == "Feather.Math.float4" && glsl_type == "vec4") ||
-            (type_name == "global::Feather.Math.float4" && glsl_type == "vec4") ||
-            (type_name == "float4" && glsl_type == "vec4") ||
-            (type_name == "Feather.Math.float2x2" && glsl_type == "mat2") ||
-            (type_name == "global::Feather.Math.float2x2" && glsl_type == "mat2") ||
-            (type_name == "float2x2" && glsl_type == "mat2") ||
-            (type_name == "Feather.Math.float3x3" && glsl_type == "mat3") ||
-            (type_name == "global::Feather.Math.float3x3" && glsl_type == "mat3") ||
-            (type_name == "float3x3" && glsl_type == "mat3") ||
-            (type_name == "Feather.Math.float4x4" && glsl_type == "mat4") ||
-            (type_name == "global::Feather.Math.float4x4" && glsl_type == "mat4") ||
-            (type_name == "float4x4" && glsl_type == "mat4")) {
-            *type_id = i;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool graphics_find_resource_element_type_id(const GraphicsLoweringContext& context, const IrResource& resource,
-                                            uint32_t* type_id) {
-    if (type_id == nullptr) {
-        return false;
-    }
-
-    const auto resource_name = string_or_empty(context.ir, resource.name_string_id);
-    for (const auto& expression : context.module.expressions) {
-        if (expression.kind != 5 || expression.name_id >= context.module.strings.size()) {
-            continue;
-        }
-        if (context.module.strings[expression.name_id] == resource_name &&
-            expression.type_id < context.module.types.size()) {
-            *type_id = expression.type_id;
-            return true;
-        }
-    }
-
-    const auto type_name = string_or_empty(context.ir, resource.element_type_string_id);
-    return !type_name.empty() && graphics_find_type_by_name(context.module, type_name, type_id);
-}
-
-std::string graphics_struct_field_glsl_name(const Feather::TypedIR::Module& module,
-                                            const Feather::TypedIR::StructField& field) {
-    const auto* name = typed_ir_string(module, field.name_id);
-    return name == nullptr ? std::string{} : sanitize_graphics_glsl_identifier(*name);
-}
-
-bool append_graphics_struct_declaration(const Feather::TypedIR::Module& module, uint32_t type_id,
-                                        std::set<uint32_t>* declared, std::ostringstream* glsl) {
-    if (declared == nullptr || glsl == nullptr || type_id >= module.types.size()) {
-        return false;
-    }
-
-    const auto& type = module.types[type_id];
-    if (type.kind == 2 || type.kind == 3 || type.kind == 1 || type.kind == 7) {
-        return true;
-    }
-    if (type.kind != 4 || type.a >= module.structs.size()) {
-        return false;
-    }
-    if (declared->count(type.a) != 0) {
-        return true;
-    }
-
-    const auto& structure = module.structs[type.a];
-    if (structure.first_field == UINT32_MAX ||
-        structure.first_field > module.struct_fields.size() ||
-        structure.field_count > module.struct_fields.size() - structure.first_field) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < structure.field_count; ++i) {
-        const auto& field = module.struct_fields[structure.first_field + i];
-        if (!append_graphics_struct_declaration(module, field.type_id, declared, glsl)) {
-            return false;
-        }
-    }
-
-    const auto struct_name = graphics_glsl_type_name(module, type_id);
-    if (struct_name.empty()) {
-        return false;
-    }
-
-    *glsl << "struct " << struct_name << " {\n";
-    for (uint32_t i = 0; i < structure.field_count; ++i) {
-        const auto& field = module.struct_fields[structure.first_field + i];
-        const auto field_type = graphics_glsl_type_name(module, field.type_id);
-        const auto field_name = graphics_struct_field_glsl_name(module, field);
-        if (field_type.empty() || field_name.empty()) {
-            return false;
-        }
-
-        *glsl << "    " << field_type << " " << field_name << ";\n";
-    }
-    *glsl << "};\n";
-
-    declared->insert(type.a);
-    return true;
-}
-
-bool append_graphics_resource_declarations(GraphicsLoweringContext& context, std::set<uint32_t>* declared_structs,
-                                           std::ostringstream* glsl) {
-    if (declared_structs == nullptr || glsl == nullptr) {
-        return false;
-    }
-
-    for (const auto& resource : context.ir.resources) {
-        if (resource.kind == kIrResourceKindSampler || resource.kind == kIrResourceKindPushConstant) {
-            continue;
-        }
-
-        const auto backend_binding = graphics_backend_binding(context.resources, resource.kind, resource.binding);
-        if (!backend_binding.has_value()) {
-            return false;
-        }
-
-        if (resource.kind == kIrResourceKindBuffer) {
-            uint32_t element_type_id = UINT32_MAX;
-            if (!graphics_find_resource_element_type_id(context, resource, &element_type_id)) {
-                return false;
-            }
-            if (!append_graphics_struct_declaration(context.module, element_type_id, declared_structs, glsl)) {
-                return false;
-            }
-
-            const auto element_type = graphics_glsl_type_name(context.module, element_type_id);
-            if (element_type.empty()) {
-                return false;
-            }
-
-            *glsl << "layout(std430, set = 0, binding = " << *backend_binding << ") readonly buffer fe_buffer_block_"
-                  << *backend_binding << " {\n";
-            *glsl << "    " << element_type << " fe_buffer_" << *backend_binding << "[];\n";
-            *glsl << "};\n";
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindTexture2D) {
-            *glsl << "layout(set = 0, binding = " << *backend_binding << ") uniform sampler2D u_texture_"
-                  << *backend_binding << ";\n";
-            continue;
-        }
-
-        return false;
-    }
-
-    return true;
-}
-
-std::string graphics_varying_variable_name(const GraphicsVaryingField& field) {
-    return "v_" + sanitize_graphics_glsl_identifier(field.name);
-}
-
-bool append_graphics_varying_declarations(const GraphicsVaryingLayout& varyings, GraphicsStage stage,
-                                          std::ostringstream* glsl) {
-    if (glsl == nullptr) {
-        return false;
-    }
-
-    const auto qualifier = stage == GraphicsStage::Vertex ? "out" : "in";
-    if (varyings.is_float4) {
-        *glsl << "layout(location = 0) " << qualifier << " vec4 v_fe_color;\n";
-        *glsl << "layout(location = 1) " << qualifier << " vec2 v_fe_uv;\n";
-        return true;
-    }
-
-    for (const auto& field : varyings.fields) {
-        if (field.position || field.glsl_type.empty()) {
-            continue;
-        }
-
-        *glsl << "layout(location = " << field.location << ") " << qualifier << " " << field.glsl_type
-              << " " << graphics_varying_variable_name(field) << ";\n";
-    }
-
-    return true;
-}
-
-std::string graphics_push_constant_variable_name(const GraphicsPushConstantLayoutEntry& entry) {
-    return "pc_" + std::to_string(entry.binding) + "_" + sanitize_graphics_glsl_identifier(entry.name);
-}
-
-bool append_graphics_push_constant_declarations(const GraphicsLoweringContext& context,
-                                                std::set<uint32_t>* declared_structs,
-                                                std::ostringstream* glsl) {
-    if (declared_structs == nullptr || glsl == nullptr || context.push_constants.empty()) {
-        return true;
-    }
-
-    std::ostringstream body;
-    bool has_entries = false;
-    for (const auto& entry : context.push_constants) {
-        const auto* resource = find_graphics_resource_by_binding_and_name(context.ir, entry.binding, entry.name);
-        if (resource == nullptr) {
-            continue;
-        }
-
-        uint32_t type_id = UINT32_MAX;
-        const auto type_name = string_or_empty(context.ir, resource->element_type_string_id);
-        if (type_name.empty() || !graphics_find_type_by_name(context.module, type_name, &type_id) ||
-            !append_graphics_struct_declaration(context.module, type_id, declared_structs, glsl)) {
-            return false;
-        }
-
-        const auto glsl_type = graphics_glsl_type_name(context.module, type_id);
-        if (glsl_type.empty()) {
-            return false;
-        }
-
-        body << "    layout(offset = " << entry.offset << ") " << glsl_type << " "
-             << graphics_push_constant_variable_name(entry) << ";\n";
-        has_entries = true;
-    }
-    if (!has_entries) {
-        return true;
-    }
-
-    *glsl << "layout(push_constant) uniform fe_push_constants {\n";
-    *glsl << body.str();
-    *glsl << "} fe_pc;\n";
-    return true;
-}
-
-bool is_graphics_parameter_reference(const GraphicsLoweringContext& context, uint32_t expr_id) {
-    if (expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    return expression.kind == 3 &&
-           expression.name_id < context.module.strings.size() &&
-           context.module.strings[expression.name_id] == context.parameter_name;
-}
-
-bool try_graphics_stage_resource_name(const GraphicsLoweringContext& context, uint32_t expr_id,
-                                      std::string* name) {
-    if (name == nullptr || expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    if ((expression.kind == 2 || expression.kind == 3) && expression.name_id < context.module.strings.size()) {
-        *name = context.module.strings[expression.name_id];
-        return true;
-    }
-
-    if (expression.kind == 4 && expression.name_id < context.module.strings.size()) {
-        *name = context.module.strings[expression.name_id];
-        return true;
-    }
-
-    return false;
-}
-
-const IrResource* find_graphics_resource_by_name_and_kind(const ParsedIr& ir, const std::string& name,
-                                                          uint8_t kind) {
-    for (const auto& resource : ir.resources) {
-        if (resource.kind == kind && string_or_empty(ir, resource.name_string_id) == name) {
-            return &resource;
-        }
-    }
-
-    return nullptr;
-}
-
-bool lower_graphics_stage_expression(GraphicsLoweringContext& context, uint32_t expr_id,
-                                     std::string* glsl);
-
-bool is_graphics_stage_sample_expression(const GraphicsLoweringContext& context, uint32_t expr_id) {
-    if (expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    if (expression.kind == 23) {
-        return true;
-    }
-    if ((expression.kind == 11 || expression.kind == 15 || expression.kind == 16) &&
-        expression.a != UINT32_MAX) {
-        return is_graphics_stage_sample_expression(context, expression.a);
-    }
-
-    return false;
-}
-
-bool lower_graphics_texture_sample_expression(GraphicsLoweringContext& context,
-                                              const Feather::TypedIR::Expression& expression,
-                                              std::string* glsl) {
-    if (glsl == nullptr || expression.argument_count < 3 ||
-        expression.first_argument == UINT32_MAX ||
-        expression.first_argument > context.module.arguments.size() ||
-        expression.argument_count > context.module.arguments.size() - expression.first_argument) {
-        return false;
-    }
-
-    const auto texture_expr_id = context.module.arguments[expression.first_argument];
-    const auto uv_expr_id = context.module.arguments[expression.first_argument + 2];
-    std::string texture_name;
-    if (!try_graphics_stage_resource_name(context, texture_expr_id, &texture_name)) {
-        trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                          texture_expr_id, "texture sample resource name lowering failed");
-        return false;
-    }
-
-    const auto* texture_resource = find_graphics_resource_by_name_and_kind(
-        context.ir, texture_name, kIrResourceKindTexture2D);
-    if (texture_resource == nullptr) {
-        trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                          texture_expr_id, "texture sample resource lookup failed");
-        return false;
-    }
-
-    const auto backend_binding = graphics_backend_binding(
-        context.resources, kIrResourceKindTexture2D, texture_resource->binding);
-    if (!backend_binding.has_value()) {
-        trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                          texture_expr_id, "texture sample backend binding lookup failed");
-        return false;
-    }
-
-    std::string uv;
-    if (!lower_graphics_stage_expression(context, uv_expr_id, &uv)) {
-        trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                          uv_expr_id, "texture sample uv lowering failed");
-        return false;
-    }
-
-    context.sampled_texture_binding = texture_resource->binding;
-    std::ostringstream stream;
-    if (expression.op == 0) {
-        stream << "texture(u_texture_" << *backend_binding << ", " << uv;
-    } else if (expression.op == 1) {
-        stream << "textureLod(u_texture_" << *backend_binding << ", " << uv;
-        std::string lod;
-        if (expression.argument_count < 4 ||
-            !lower_graphics_stage_expression(context, context.module.arguments[expression.first_argument + 3], &lod)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              context.module.arguments[expression.first_argument + 3],
-                                              "texture sample lod lowering failed");
-            return false;
-        }
-        stream << ", " << lod;
-    } else if (expression.op == 2) {
-        stream << "textureGrad(u_texture_" << *backend_binding << ", " << uv;
-        std::string ddx;
-        std::string ddy;
-        if (expression.argument_count < 5 ||
-            !lower_graphics_stage_expression(context, context.module.arguments[expression.first_argument + 3], &ddx) ||
-            !lower_graphics_stage_expression(context, context.module.arguments[expression.first_argument + 4], &ddy)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              texture_expr_id,
-                                              "texture sample explicit-gradient lowering failed");
-            return false;
-        }
-        stream << ", " << ddx << ", " << ddy;
-    } else {
-        trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                          texture_expr_id,
-                                          "unsupported texture sample operation");
-        return false;
-    }
-    stream << ")";
-    *glsl = stream.str();
-    return true;
-}
-
-bool graphics_member_access_from_fragment_parameter(const GraphicsLoweringContext& context,
-                                                    const std::string& member,
-                                                    std::string* glsl) {
-    if (glsl == nullptr || context.stage != GraphicsStage::Fragment) {
-        return false;
-    }
-
-    if (context.varyings.is_float4) {
-        const auto components = graphics_swizzle_components(member);
-        if (components == "xy") {
-            *glsl = "v_fe_uv";
-            return true;
-        }
-        if (components == "xyzw") {
-            *glsl = "v_fe_color";
-            return true;
-        }
-        *glsl = "(v_fe_color)." + components;
-        return true;
-    }
-
-    if (member == context.varyings.position_field_name) {
-        *glsl = "gl_FragCoord";
-        return true;
-    }
-
-    for (const auto& field : context.varyings.fields) {
-        if (field.name == member) {
-            *glsl = graphics_varying_variable_name(field);
-            return true;
-        }
-    }
-
-    return false;
-}
-
-const char* graphics_binary_operator(uint32_t op) {
-    switch (op) {
-    case 0:
-        return "+";
-    case 1:
-        return "-";
-    case 2:
-        return "*";
-    case 3:
-        return "/";
-    case 4:
-        return "%";
-    case 5:
-        return "&";
-    case 6:
-        return "|";
-    case 7:
-        return "^";
-    case 8:
-        return "<<";
-    case 9:
-        return ">>";
-    default:
-        return nullptr;
-    }
-}
-
-const char* graphics_compare_operator(uint32_t op) {
-    switch (op) {
-    case 0:
-        return "==";
-    case 1:
-        return "!=";
-    case 2:
-        return "<";
-    case 3:
-        return "<=";
-    case 4:
-        return ">";
-    case 5:
-        return ">=";
-    default:
-        return nullptr;
-    }
-}
-
-std::string graphics_intrinsic_name(std::string symbol) {
-    if (symbol == "global::Feather.Math.ShaderMath.Normalize" ||
-        symbol == "global::Feather.Math.Hlsl.Normalize") {
-        return "normalize";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Length" ||
-        symbol == "global::Feather.Math.Hlsl.Length") {
-        return "length";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.InverseSqrt") {
-        return "inversesqrt";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Fract" ||
-        symbol == "global::Feather.Math.Hlsl.Fract") {
-        return "fract";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Ddx") {
-        return "dFdx";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Ddy") {
-        return "dFdy";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Transpose" ||
-        symbol == "global::Feather.Math.Hlsl.Transpose") {
-        return "transpose";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Determinant") {
-        return "determinant";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Inverse" ||
-        symbol == "global::Feather.Math.Hlsl.Inverse") {
-        return "inverse";
-    }
-    if (symbol == "global::Feather.Math.ShaderMath.Hadamard") {
-        return "matrixCompMult";
-    }
-
-    return easygpu_intrinsic_name(symbol);
-}
-
-bool lower_graphics_intrinsic_expression(GraphicsLoweringContext& context,
-                                         const Feather::TypedIR::Expression& expression,
-                                         std::string* glsl) {
-    if (glsl == nullptr || expression.name_id >= context.module.strings.size() ||
-        expression.first_argument == UINT32_MAX ||
-        expression.first_argument > context.module.arguments.size() ||
-        expression.argument_count > context.module.arguments.size() - expression.first_argument) {
-        return false;
-    }
-
-    const auto& symbol = context.module.strings[expression.name_id];
-    std::vector<std::string> arguments;
-    arguments.reserve(expression.argument_count);
-    for (uint32_t i = 0; i < expression.argument_count; ++i) {
-        std::string argument;
-        if (!lower_graphics_stage_expression(context, context.module.arguments[expression.first_argument + i], &argument)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              context.module.arguments[expression.first_argument + i],
-                                              "intrinsic argument lowering failed");
-            return false;
-        }
-        arguments.push_back(std::move(argument));
-    }
-
-    if (symbol == "global::Feather.Math.ShaderMath.Mul" ||
-        symbol == "global::Feather.Math.Hlsl.Mul") {
-        if (arguments.size() != 2) {
-            return false;
-        }
-        *glsl = "(" + arguments[0] + " * " + arguments[1] + ")";
-        return true;
-    }
-
-    if (symbol == "global::Feather.Math.ShaderMath.Saturate") {
-        if (arguments.size() != 1) {
-            return false;
-        }
-        *glsl = "clamp(" + arguments[0] + ", 0.0, 1.0)";
-        return true;
-    }
-
-    const auto intrinsic = graphics_intrinsic_name(symbol);
-    if (intrinsic.empty()) {
-        return false;
-    }
-
-    std::ostringstream stream;
-    stream << intrinsic << "(";
-    for (size_t i = 0; i < arguments.size(); ++i) {
-        if (i != 0) {
-            stream << ", ";
-        }
-        stream << arguments[i];
-    }
-    stream << ")";
-    *glsl = stream.str();
-    return true;
-}
-
-bool lower_graphics_stage_expression(GraphicsLoweringContext& context, uint32_t expr_id,
-                                     std::string* glsl) {
-    if (glsl == nullptr || expr_id >= context.module.expressions.size()) {
-        return false;
-    }
-
-    const auto& expression = context.module.expressions[expr_id];
-    switch (expression.kind) {
-    case 1: {
-        const auto* literal = typed_ir_string(context.module, expression.name_id);
-        if (literal == nullptr) {
-            return false;
-        }
-        *glsl = normalize_graphics_literal(*literal);
-        return true;
-    }
-    case 2:
-    case 3: {
-        const auto* name = typed_ir_string(context.module, expression.name_id);
-        if (name == nullptr) {
-            return false;
-        }
-
-        if (context.stage == GraphicsStage::Fragment && *name == context.parameter_name) {
-            if (context.varyings.is_float4) {
-                *glsl = "v_fe_color";
-                return true;
-            }
-            trace_graphics_expression_failure(context, "fragment", expr_id,
-                                              "struct varying parameter needs a field/member access");
-            return false;
-        }
-
-        if (expression.kind == 2) {
-            const auto local = context.locals.find(*name);
-            if (local != context.locals.end()) {
-                return lower_graphics_stage_expression(context, local->second, glsl);
-            }
-        }
-
-        *glsl = sanitize_graphics_glsl_identifier(*name);
-        return true;
-    }
-    case 4: {
-        const auto* member = typed_ir_string(context.module, expression.name_id);
-        if (member == nullptr || member->empty()) {
-            return false;
-        }
-        if (is_graphics_parameter_reference(context, expression.a) &&
-            graphics_member_access_from_fragment_parameter(context, *member, glsl)) {
-            return true;
-        }
-
-        std::string instance;
-        if (!lower_graphics_stage_expression(context, expression.a, &instance)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "field instance lowering failed");
-            return false;
-        }
-        *glsl = "(" + instance + ")." + sanitize_graphics_glsl_identifier(*member);
-        return true;
-    }
-    case 5: {
-        const auto* resource_name = typed_ir_string(context.module, expression.name_id);
-        if (resource_name == nullptr || resource_name->empty()) {
-            return false;
-        }
-        const auto* resource = find_graphics_resource_by_name_and_kind(
-            context.ir, *resource_name, kIrResourceKindBuffer);
-        if (resource == nullptr) {
-            return false;
-        }
-        const auto backend_binding = graphics_backend_binding(
-            context.resources, kIrResourceKindBuffer, resource->binding);
-        if (!backend_binding.has_value()) {
-            return false;
-        }
-
-        std::string index;
-        if (!lower_graphics_stage_expression(context, expression.a, &index)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "resource index lowering failed");
-            return false;
-        }
-
-        context.used_buffer_bindings.insert(resource->binding);
-        *glsl = "fe_buffer_" + std::to_string(*backend_binding) + "[" + index + "]";
-        return true;
-    }
-    case 6: {
-        std::string operand;
-        if (!lower_graphics_stage_expression(context, expression.a, &operand)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "unary operand lowering failed");
-            return false;
-        }
-        const auto op = expression.op == 0 ? "-" : expression.op == 1 ? "!" : "~";
-        *glsl = std::string("(") + op + operand + ")";
-        return true;
-    }
-    case 7: {
-        std::string left;
-        std::string right;
-        const auto* op = graphics_binary_operator(expression.op);
-        if (op == nullptr) {
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.a, &left)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "binary left operand lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &right)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "binary right operand lowering failed");
-            return false;
-        }
-        *glsl = "(" + left + " " + op + " " + right + ")";
-        return true;
-    }
-    case 8: {
-        std::string left;
-        std::string right;
-        const auto* op = graphics_compare_operator(expression.op);
-        if (op == nullptr) {
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.a, &left)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "comparison left operand lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &right)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "comparison right operand lowering failed");
-            return false;
-        }
-        *glsl = "(" + left + " " + op + " " + right + ")";
-        return true;
-    }
-    case 9: {
-        std::string left;
-        std::string right;
-        if (!lower_graphics_stage_expression(context, expression.a, &left)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "logical left operand lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &right)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "logical right operand lowering failed");
-            return false;
-        }
-        *glsl = "(" + left + (expression.op == 0 ? " && " : " || ") + right + ")";
-        return true;
-    }
-    case 10: {
-        std::string condition;
-        std::string when_true;
-        std::string when_false;
-        if (!lower_graphics_stage_expression(context, expression.a, &condition)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "conditional condition lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &when_true)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "conditional true branch lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.c, &when_false)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.c, "conditional false branch lowering failed");
-            return false;
-        }
-        *glsl = "(" + condition + " ? " + when_true + " : " + when_false + ")";
-        return true;
-    }
-    case 11: {
-        std::string operand;
-        if (!lower_graphics_stage_expression(context, expression.a, &operand)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "conversion operand lowering failed");
-            return false;
-        }
-        const auto target_type = graphics_glsl_type_name(context.module, expression.type_id);
-        const auto source_type = expression.a < context.module.expressions.size()
-                                     ? graphics_glsl_type_name(context.module, context.module.expressions[expression.a].type_id)
-                                     : std::string{};
-        if (target_type.empty()) {
-            return false;
-        }
-        *glsl = target_type == source_type ? operand : (target_type + "(" + operand + ")");
-        return true;
-    }
-    case 12: {
-        const auto type_name = graphics_glsl_type_name(context.module, expression.type_id);
-        if (type_name.empty() ||
-            expression.first_argument == UINT32_MAX ||
-            expression.first_argument > context.module.arguments.size() ||
-            expression.argument_count > context.module.arguments.size() - expression.first_argument) {
-            return false;
-        }
-
-        std::ostringstream stream;
-        stream << type_name << "(";
-        for (uint32_t i = 0; i < expression.argument_count; ++i) {
-            std::string argument;
-            if (!lower_graphics_stage_expression(context, context.module.arguments[expression.first_argument + i], &argument)) {
-                trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                                  context.module.arguments[expression.first_argument + i],
-                                                  "constructor argument lowering failed");
-                return false;
-            }
-            if (i != 0) {
-                stream << ", ";
-            }
-            stream << argument;
-        }
-        stream << ")";
-        *glsl = stream.str();
-        return true;
-    }
-    case 13:
-        return lower_graphics_intrinsic_expression(context, expression, glsl);
-    case 14: {
-        if (expression.name_id >= context.module.strings.size() ||
-            (expression.argument_count == 0 && expression.first_argument != UINT32_MAX) ||
-            (expression.argument_count > 0 &&
-             (expression.first_argument == UINT32_MAX ||
-              expression.first_argument > context.module.arguments.size() ||
-              expression.argument_count > context.module.arguments.size() - expression.first_argument))) {
-            return false;
-        }
-
-        std::ostringstream stream;
-        stream << sanitize_graphics_glsl_identifier(context.module.strings[expression.name_id]) << "(";
-        for (uint32_t i = 0; i < expression.argument_count; ++i) {
-            std::string argument;
-            const auto argument_expr_id = context.module.arguments[expression.first_argument + i];
-            if (!lower_graphics_stage_expression(context, argument_expr_id, &argument)) {
-                trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                                  argument_expr_id,
-                                                  "callable argument lowering failed");
-                return false;
-            }
-            if (i != 0) {
-                stream << ", ";
-            }
-            stream << argument;
-        }
-        stream << ")";
-        *glsl = stream.str();
-        return true;
-    }
-    case 15: {
-        const auto* swizzle = typed_ir_string(context.module, expression.name_id);
-        if (swizzle == nullptr) {
-            return false;
-        }
-        const auto components = graphics_swizzle_components(*swizzle);
-        if (is_graphics_parameter_reference(context, expression.a) &&
-            graphics_member_access_from_fragment_parameter(context, components, glsl)) {
-            return true;
-        }
-
-        std::string value;
-        if (!lower_graphics_stage_expression(context, expression.a, &value)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "swizzle value lowering failed");
-            return false;
-        }
-        *glsl = "(" + value + ")." + components;
-        return true;
-    }
-    case 16: {
-        const auto* member = typed_ir_string(context.module, expression.name_id);
-        if (member == nullptr || member->empty()) {
-            return false;
-        }
-        if (is_graphics_parameter_reference(context, expression.a) &&
-            graphics_member_access_from_fragment_parameter(context, *member, glsl)) {
-            return true;
-        }
-
-        std::string value;
-        if (!lower_graphics_stage_expression(context, expression.a, &value)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "member value lowering failed");
-            return false;
-        }
-        if (*member == "X" || *member == "R") {
-            *glsl = "(" + value + ").r";
-            return true;
-        }
-        if (*member == "Y" || *member == "G") {
-            *glsl = "(" + value + ").g";
-            return true;
-        }
-        if (*member == "Z" || *member == "B") {
-            *glsl = "(" + value + ").b";
-            return true;
-        }
-        if (*member == "W" || *member == "A") {
-            *glsl = "(" + value + ").a";
-            return true;
-        }
-        if (*member == "XY" || *member == "RG") {
-            *glsl = "(" + value + ").rg";
-            return true;
-        }
-        if (*member == "ZW" || *member == "BA") {
-            *glsl = "(" + value + ").ba";
-            return true;
-        }
-        if (*member == "XYZ" || *member == "RGB") {
-            *glsl = "(" + value + ").rgb";
-            return true;
-        }
-        if (*member == "RGBA") {
-            *glsl = value;
-            return true;
-        }
-        if (is_graphics_stage_sample_expression(context, expression.a)) {
-            *glsl = "(" + value + ")." + graphics_swizzle_components(*member);
-            return true;
-        }
-
-        *glsl = "(" + value + ")." + sanitize_graphics_glsl_identifier(*member);
-        return true;
-    }
-    case 17: {
-        std::string value;
-        std::string index;
-        if (!lower_graphics_stage_expression(context, expression.a, &value)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "index value lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &index)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "index expression lowering failed");
-            return false;
-        }
-        *glsl = "(" + value + ")[" + index + "]";
-        return true;
-    }
-    case 18:
-        switch (expression.op) {
-        case 16:
-            *glsl = "int(gl_VertexIndex)";
-            return true;
-        case 17:
-            *glsl = "int(gl_InstanceIndex)";
-            return true;
-        case 18:
-            *glsl = "gl_FragCoord";
-            return true;
-        case 19:
-            *glsl = "gl_FragCoord.y";
-            return true;
-        case 20:
-            *glsl = "gl_FragCoord.z";
-            return true;
-        case 21:
-            *glsl = "gl_FragCoord.w";
-            return true;
-        default:
-            return false;
-        }
-    case 19: {
-        if (expression.name_id >= context.module.strings.size()) {
-            return false;
-        }
-        const auto& name = context.module.strings[expression.name_id];
-        const auto it = std::find_if(context.push_constants.begin(), context.push_constants.end(), [&](const auto& entry) {
-            return same_graphics_resource(entry, expression.op, name);
-        });
-        if (it == context.push_constants.end()) {
-            return false;
-        }
-
-        *glsl = "fe_pc." + graphics_push_constant_variable_name(*it);
-        return true;
-    }
-    case 20: {
-        std::string matrix;
-        std::string column;
-        if (!lower_graphics_stage_expression(context, expression.a, &matrix)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.a, "matrix value lowering failed");
-            return false;
-        }
-        if (!lower_graphics_stage_expression(context, expression.b, &column)) {
-            trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                              expression.b, "matrix column lowering failed");
-            return false;
-        }
-        *glsl = "(" + matrix + ")[" + column + "]";
-        return true;
-    }
-    case 23:
-        return lower_graphics_texture_sample_expression(context, expression, glsl);
-    default:
-        return false;
-    }
-}
-
-bool collect_graphics_stage_locals(GraphicsLoweringContext* context) {
-    if (context == nullptr || context->module.entry_function >= context->module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context->module.functions[context->module.entry_function];
-    if (function.body_statement_index >= context->module.statements.size()) {
-        return false;
-    }
-
-    const auto& body = context->module.statements[function.body_statement_index];
-    if (body.kind != 1) {
-        return false;
-    }
-    if (body.child_count == 0) {
-        return true;
-    }
-    if (body.first_child == UINT32_MAX ||
-        body.first_child > context->module.children.size() ||
-        body.child_count > context->module.children.size() - body.first_child) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < body.child_count; ++i) {
-        const auto statement_id = context->module.children[body.first_child + i];
-        if (statement_id >= context->module.statements.size()) {
-            return false;
-        }
-
-        const auto& statement = context->module.statements[statement_id];
-        if (statement.kind == 11) {
-            break;
-        }
-        if (statement.kind != 2) {
-            continue;
-        }
-        if (statement.a == UINT32_MAX || statement.a >= context->module.expressions.size() ||
-            statement.name_id >= context->module.strings.size()) {
-            return false;
-        }
-
-        context->locals[context->module.strings[statement.name_id]] = statement.a;
-    }
-
-    return true;
-}
-
-bool find_graphics_stage_return_expression(const GraphicsLoweringContext& context, uint32_t expected_function_kind,
-                                           uint32_t* expr_id) {
-    if (expr_id == nullptr || context.module.entry_function >= context.module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.kind != expected_function_kind || function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-
-    const auto& body = context.module.statements[function.body_statement_index];
-    if (body.kind != 1 || body.child_count == 0 ||
-        body.first_child == UINT32_MAX ||
-        body.first_child > context.module.children.size() ||
-        body.child_count > context.module.children.size() - body.first_child) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < body.child_count; ++i) {
-        const auto statement_id = context.module.children[body.first_child + i];
-        if (statement_id >= context.module.statements.size()) {
-            return false;
-        }
-
-        const auto& statement = context.module.statements[statement_id];
-        if (statement.kind != 11) {
-            continue;
-        }
-        if (statement.a == UINT32_MAX || statement.a >= context.module.expressions.size()) {
-            return false;
-        }
-
-        *expr_id = statement.a;
-        return true;
-    }
-
-    return false;
-}
-
-size_t graphics_push_constant_total_size(const std::vector<GraphicsPushConstantLayoutEntry>& push_constants) {
-    size_t total = 0;
-    for (const auto& entry : push_constants) {
-        total = std::max(total, entry.offset + entry.size);
-    }
-
-    return total;
-}
-
-bool append_graphics_shader_prelude(GraphicsLoweringContext& context,
-                                    std::ostringstream* glsl,
-                                    uint32_t extra_struct_type_id = UINT32_MAX) {
-    if (glsl == nullptr) {
-        return false;
-    }
-
-    std::set<uint32_t> declared_structs;
-    *glsl << "#version 450\n";
-    for (uint32_t type_id = 0; type_id < context.module.types.size(); ++type_id) {
-        if (context.module.types[type_id].kind == 4 &&
-            !append_graphics_struct_declaration(context.module, type_id, &declared_structs, glsl)) {
-            return false;
-        }
-    }
-    if (context.stage == GraphicsStage::Vertex &&
-        !append_graphics_struct_declaration(context.module, context.varyings.type_id, &declared_structs, glsl)) {
-        return false;
-    }
-    if (extra_struct_type_id != UINT32_MAX &&
-        !append_graphics_struct_declaration(context.module, extra_struct_type_id, &declared_structs, glsl)) {
-        return false;
-    }
-    if (!append_graphics_resource_declarations(context, &declared_structs, glsl) ||
-        !append_graphics_push_constant_declarations(context, &declared_structs, glsl) ||
-        !append_graphics_varying_declarations(context.varyings, context.stage, glsl)) {
-        return false;
-    }
-
-    return true;
-}
-
-std::string graphics_indent(int depth) {
-    return std::string(static_cast<size_t>(std::max(depth, 0)) * 4, ' ');
-}
-
-const char* graphics_compound_operator(uint32_t op) {
-    switch (op) {
-    case 0:
-        return "+=";
-    case 1:
-        return "-=";
-    case 2:
-        return "*=";
-    case 3:
-        return "/=";
-    case 4:
-        return "%=";
-    case 5:
-        return "&=";
-    case 6:
-        return "|=";
-    case 7:
-        return "^=";
-    case 8:
-        return "<<=";
-    case 9:
-        return ">>=";
-    default:
-        return nullptr;
-    }
-}
-
-bool lower_graphics_stage_lvalue(GraphicsLoweringContext& context, uint32_t lvalue_id,
-                                 std::string* glsl) {
-    if (glsl == nullptr || lvalue_id >= context.module.lvalues.size()) {
-        return false;
-    }
-
-    const auto& lvalue = context.module.lvalues[lvalue_id];
-    switch (lvalue.kind) {
-    case 1:
-    case 2: {
-        const auto* name = typed_ir_string(context.module, lvalue.name_id);
-        if (name == nullptr || name->empty()) {
-            return false;
-        }
-        *glsl = sanitize_graphics_glsl_identifier(*name);
-        return true;
-    }
-    case 3:
-    case 6: {
-        const auto* member = typed_ir_string(context.module, lvalue.name_id);
-        if (member == nullptr || member->empty()) {
-            return false;
-        }
-        if (lvalue.a == UINT32_MAX) {
-            *glsl = sanitize_graphics_glsl_identifier(*member);
-            return true;
-        }
-
-        std::string instance;
-        if (!lower_graphics_stage_lvalue(context, lvalue.a, &instance)) {
-            return false;
-        }
-        *glsl = "(" + instance + ")." + sanitize_graphics_glsl_identifier(*member);
-        return true;
-    }
-    case 4: {
-        const auto* resource_name = typed_ir_string(context.module, lvalue.name_id);
-        if (resource_name == nullptr || resource_name->empty()) {
-            return false;
-        }
-        const auto* resource = find_graphics_resource_by_name_and_kind(
-            context.ir, *resource_name, kIrResourceKindBuffer);
-        if (resource == nullptr) {
-            return false;
-        }
-        const auto backend_binding = graphics_backend_binding(
-            context.resources, kIrResourceKindBuffer, resource->binding);
-        if (!backend_binding.has_value()) {
-            return false;
-        }
-
-        std::string index;
-        if (!lower_graphics_stage_expression(context, lvalue.a, &index)) {
-            return false;
-        }
-
-        context.used_buffer_bindings.insert(resource->binding);
-        *glsl = "fe_buffer_" + std::to_string(*backend_binding) + "[" + index + "]";
-        return true;
-    }
-    case 5: {
-        const auto* swizzle = typed_ir_string(context.module, lvalue.name_id);
-        if (swizzle == nullptr || swizzle->empty()) {
-            return false;
-        }
-
-        std::string value;
-        if (!lower_graphics_stage_expression(context, lvalue.a, &value)) {
-            return false;
-        }
-        *glsl = "(" + value + ")." + graphics_swizzle_components(*swizzle);
-        return true;
-    }
-    case 7: {
-        std::string value;
-        std::string index;
-        if (!lower_graphics_stage_lvalue(context, lvalue.a, &value) ||
-            !lower_graphics_stage_expression(context, lvalue.b, &index)) {
-            return false;
-        }
-        *glsl = "(" + value + ")[" + index + "]";
-        return true;
-    }
-    case 8: {
-        std::string matrix;
-        std::string column;
-        if (!lower_graphics_stage_expression(context, lvalue.a, &matrix) ||
-            !lower_graphics_stage_expression(context, lvalue.b, &column)) {
-            return false;
-        }
-        *glsl = "(" + matrix + ")[" + column + "]";
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
-using GraphicsReturnEmitter = std::function<bool(GraphicsLoweringContext&, uint32_t, int, std::ostringstream*)>;
-
-bool append_graphics_stage_statement(GraphicsLoweringContext& context,
-                                     uint32_t statement_id,
-                                     int indent,
-                                     const GraphicsReturnEmitter& return_emitter,
-                                     std::ostringstream* glsl);
-
-bool append_graphics_stage_statement_clause(GraphicsLoweringContext& context,
-                                            uint32_t statement_id,
-                                            std::string* glsl) {
-    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
-        return false;
-    }
-
-    const auto& statement = context.module.statements[statement_id];
-    switch (statement.kind) {
-    case 1: {
-        if (statement.child_count == 0) {
-            *glsl = "";
-            return statement.first_child == UINT32_MAX;
-        }
-        if (statement.child_count != 1 ||
-            statement.first_child == UINT32_MAX ||
-            statement.first_child >= context.module.children.size()) {
-            return false;
-        }
-        return append_graphics_stage_statement_clause(
-            context,
-            context.module.children[statement.first_child],
-            glsl);
-    }
-    case 2: {
-        if (statement.name_id >= context.module.strings.size() || statement.op >= context.module.types.size()) {
-            return false;
-        }
-        const auto type_name = graphics_glsl_type_name(context.module, statement.op);
-        if (type_name.empty()) {
-            return false;
-        }
-        std::ostringstream stream;
-        stream << type_name << " " << sanitize_graphics_glsl_identifier(context.module.strings[statement.name_id]);
-        if (statement.a != UINT32_MAX) {
-            std::string initializer;
-            if (!lower_graphics_stage_expression(context, statement.a, &initializer)) {
-                return false;
-            }
-            stream << " = " << initializer;
-        }
-        *glsl = stream.str();
-        return true;
-    }
-    case 3: {
-        std::string target;
-        std::string value;
-        if (!lower_graphics_stage_lvalue(context, statement.a, &target) ||
-            !lower_graphics_stage_expression(context, statement.b, &value)) {
-            return false;
-        }
-        *glsl = target + " = " + value;
-        return true;
-    }
-    case 4: {
-        const auto* op = graphics_compound_operator(statement.op);
-        std::string target;
-        std::string value;
-        if (op == nullptr ||
-            !lower_graphics_stage_lvalue(context, statement.a, &target) ||
-            !lower_graphics_stage_expression(context, statement.b, &value)) {
-            return false;
-        }
-        *glsl = target + " " + op + " " + value;
-        return true;
-    }
-    case 12: {
-        return lower_graphics_stage_expression(context, statement.a, glsl);
-    }
-    case 14: {
-        std::string target;
-        if (!lower_graphics_stage_lvalue(context, statement.a, &target)) {
-            return false;
-        }
-        const auto op = (statement.op & 1u) ? "++" : "--";
-        *glsl = (statement.op & 2u) ? std::string(op) + target : target + op;
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
-bool append_graphics_stage_statement_list(GraphicsLoweringContext& context,
-                                          uint32_t statement_id,
-                                          int indent,
-                                          const GraphicsReturnEmitter& return_emitter,
-                                          std::ostringstream* glsl) {
-    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
-        return false;
-    }
-
-    const auto& statement = context.module.statements[statement_id];
-    if (statement.kind != 1) {
-        return append_graphics_stage_statement(context, statement_id, indent, return_emitter, glsl);
-    }
-    if (statement.child_count == 0) {
-        return statement.first_child == UINT32_MAX;
-    }
-    if (statement.first_child == UINT32_MAX ||
-        statement.first_child > context.module.children.size() ||
-        statement.child_count > context.module.children.size() - statement.first_child) {
-        return false;
-    }
-
-    for (uint32_t i = 0; i < statement.child_count; ++i) {
-        if (!append_graphics_stage_statement(
-                context,
-                context.module.children[statement.first_child + i],
-                indent,
-                return_emitter,
-                glsl)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool append_graphics_stage_statement(GraphicsLoweringContext& context,
-                                     uint32_t statement_id,
-                                     int indent,
-                                     const GraphicsReturnEmitter& return_emitter,
-                                     std::ostringstream* glsl) {
-    if (glsl == nullptr || statement_id >= context.module.statements.size()) {
-        return false;
-    }
-
-    const auto& statement = context.module.statements[statement_id];
-    const auto pad = graphics_indent(indent);
-    switch (statement.kind) {
-    case 1:
-        *glsl << pad << "{\n";
-        if (!append_graphics_stage_statement_list(context, statement_id, indent + 1, return_emitter, glsl)) {
-            return false;
-        }
-        *glsl << pad << "}\n";
-        return true;
-    case 2: {
-        if (statement.name_id >= context.module.strings.size() || statement.op >= context.module.types.size()) {
-            return false;
-        }
-        const auto type_name = graphics_glsl_type_name(context.module, statement.op);
-        if (type_name.empty()) {
-            return false;
-        }
-        *glsl << pad << type_name << " " << sanitize_graphics_glsl_identifier(context.module.strings[statement.name_id]);
-        if (statement.a != UINT32_MAX) {
-            std::string initializer;
-            if (!lower_graphics_stage_expression(context, statement.a, &initializer)) {
-                trace_graphics_expression_failure(context, context.stage == GraphicsStage::Vertex ? "vertex" : "fragment",
-                                                  statement.a, "local initializer lowering failed");
-                return false;
-            }
-            *glsl << " = " << initializer;
-        }
-        *glsl << ";\n";
-        return true;
-    }
-    case 3: {
-        std::string target;
-        std::string value;
-        if (!lower_graphics_stage_lvalue(context, statement.a, &target) ||
-            !lower_graphics_stage_expression(context, statement.b, &value)) {
-            return false;
-        }
-        *glsl << pad << target << " = " << value << ";\n";
-        return true;
-    }
-    case 4: {
-        const auto* op = graphics_compound_operator(statement.op);
-        std::string target;
-        std::string value;
-        if (op == nullptr ||
-            !lower_graphics_stage_lvalue(context, statement.a, &target) ||
-            !lower_graphics_stage_expression(context, statement.b, &value)) {
-            return false;
-        }
-        *glsl << pad << target << " " << op << " " << value << ";\n";
-        return true;
-    }
-    case 5: {
-        std::string condition;
-        if (!lower_graphics_stage_expression(context, statement.a, &condition) ||
-            statement.b >= context.module.statements.size()) {
-            return false;
-        }
-        *glsl << pad << "if (" << condition << ") {\n";
-        if (!append_graphics_stage_statement_list(context, statement.b, indent + 1, return_emitter, glsl)) {
-            return false;
-        }
-        *glsl << pad << "}";
-        if (statement.c != UINT32_MAX) {
-            if (statement.c >= context.module.statements.size()) {
-                return false;
-            }
-            *glsl << " else {\n";
-            if (!append_graphics_stage_statement_list(context, statement.c, indent + 1, return_emitter, glsl)) {
-                return false;
-            }
-            *glsl << pad << "}";
-        }
-        *glsl << "\n";
-        return true;
-    }
-    case 6: {
-        if (statement.op >= context.module.statements.size()) {
-            return false;
-        }
-
-        std::string initializer;
-        std::string condition;
-        std::string step;
-        if (statement.a != UINT32_MAX &&
-            !append_graphics_stage_statement_clause(context, statement.a, &initializer)) {
-            return false;
-        }
-        if (statement.b != UINT32_MAX &&
-            !lower_graphics_stage_expression(context, statement.b, &condition)) {
-            return false;
-        }
-        if (statement.c != UINT32_MAX &&
-            !append_graphics_stage_statement_clause(context, statement.c, &step)) {
-            return false;
-        }
-
-        *glsl << pad << "for (" << initializer << "; " << condition << "; " << step << ") {\n";
-        if (!append_graphics_stage_statement_list(context, statement.op, indent + 1, return_emitter, glsl)) {
-            return false;
-        }
-        *glsl << pad << "}\n";
-        return true;
-    }
-    case 7: {
-        std::string condition;
-        if (!lower_graphics_stage_expression(context, statement.a, &condition) ||
-            statement.b >= context.module.statements.size()) {
-            return false;
-        }
-        *glsl << pad << "while (" << condition << ") {\n";
-        if (!append_graphics_stage_statement_list(context, statement.b, indent + 1, return_emitter, glsl)) {
-            return false;
-        }
-        *glsl << pad << "}\n";
-        return true;
-    }
-    case 8: {
-        if (statement.a >= context.module.statements.size()) {
-            return false;
-        }
-        std::string condition;
-        if (!lower_graphics_stage_expression(context, statement.b, &condition)) {
-            return false;
-        }
-        *glsl << pad << "do {\n";
-        if (!append_graphics_stage_statement_list(context, statement.a, indent + 1, return_emitter, glsl)) {
-            return false;
-        }
-        *glsl << pad << "} while (" << condition << ");\n";
-        return true;
-    }
-    case 9:
-        *glsl << pad << "break;\n";
-        return true;
-    case 10:
-        *glsl << pad << "continue;\n";
-        return true;
-    case 11:
-        if (return_emitter) {
-            if (statement.a == UINT32_MAX) {
-                return false;
-            }
-            return return_emitter(context, statement.a, indent, glsl);
-        }
-        if (statement.a == UINT32_MAX) {
-            *glsl << pad << "return;\n";
-            return true;
-        } else {
-            std::string value;
-            if (!lower_graphics_stage_expression(context, statement.a, &value)) {
-                return false;
-            }
-            *glsl << pad << "return " << value << ";\n";
-            return true;
-        }
-    case 12: {
-        std::string value;
-        if (!lower_graphics_stage_expression(context, statement.a, &value)) {
-            return false;
-        }
-        *glsl << pad << value << ";\n";
-        return true;
-    }
-    case 14: {
-        std::string target;
-        if (!lower_graphics_stage_lvalue(context, statement.a, &target)) {
-            return false;
-        }
-        *glsl << pad << (statement.op & 1u ? "++" : "--") << target << ";\n";
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
-bool append_graphics_callable_declarations(GraphicsLoweringContext& context,
-                                           std::ostringstream* glsl) {
-    if (glsl == nullptr) {
-        return false;
-    }
-
-    for (const auto& function : context.module.functions) {
-        if (function.kind != 5) {
-            continue;
-        }
-        if (function.mangled_name_id >= context.module.strings.size() ||
-            function.return_type_id >= context.module.types.size()) {
-            return false;
-        }
-
-        const auto return_type = graphics_glsl_type_name(context.module, function.return_type_id);
-        if (return_type.empty()) {
-            return false;
-        }
-
-        *glsl << return_type << " "
-              << sanitize_graphics_glsl_identifier(context.module.strings[function.mangled_name_id]) << "(";
-        if (function.parameter_count > 0) {
-            if (function.first_parameter == UINT32_MAX ||
-                function.first_parameter > context.module.parameters.size() ||
-                function.parameter_count > context.module.parameters.size() - function.first_parameter) {
-                return false;
-            }
-            for (uint32_t i = 0; i < function.parameter_count; ++i) {
-                const auto& parameter = context.module.parameters[function.first_parameter + i];
-                if (parameter.name_id >= context.module.strings.size()) {
-                    return false;
-                }
-                const auto parameter_type = graphics_glsl_type_name(context.module, parameter.type_id);
-                if (parameter_type.empty()) {
-                    return false;
-                }
-                if (i != 0) {
-                    *glsl << ", ";
-                }
-                if (parameter.direction != 0) {
-                    *glsl << "inout ";
-                }
-                *glsl << parameter_type << " "
-                      << sanitize_graphics_glsl_identifier(context.module.strings[parameter.name_id]);
-            }
-        }
-        *glsl << ");\n";
-    }
-
-    if (!context.module.functions.empty()) {
-        *glsl << "\n";
-    }
-    return true;
-}
-
-bool append_graphics_callable_definitions(GraphicsLoweringContext& context,
-                                          std::ostringstream* glsl) {
-    if (glsl == nullptr) {
-        return false;
-    }
-
-    for (const auto& function : context.module.functions) {
-        if (function.kind != 5) {
-            continue;
-        }
-        if (function.mangled_name_id >= context.module.strings.size() ||
-            function.return_type_id >= context.module.types.size() ||
-            function.body_statement_index >= context.module.statements.size()) {
-            return false;
-        }
-
-        const auto return_type = graphics_glsl_type_name(context.module, function.return_type_id);
-        if (return_type.empty()) {
-            return false;
-        }
-
-        *glsl << return_type << " "
-              << sanitize_graphics_glsl_identifier(context.module.strings[function.mangled_name_id]) << "(";
-        if (function.parameter_count > 0) {
-            if (function.first_parameter == UINT32_MAX ||
-                function.first_parameter > context.module.parameters.size() ||
-                function.parameter_count > context.module.parameters.size() - function.first_parameter) {
-                return false;
-            }
-            for (uint32_t i = 0; i < function.parameter_count; ++i) {
-                const auto& parameter = context.module.parameters[function.first_parameter + i];
-                if (parameter.name_id >= context.module.strings.size()) {
-                    return false;
-                }
-                const auto parameter_type = graphics_glsl_type_name(context.module, parameter.type_id);
-                if (parameter_type.empty()) {
-                    return false;
-                }
-                if (i != 0) {
-                    *glsl << ", ";
-                }
-                if (parameter.direction != 0) {
-                    *glsl << "inout ";
-                }
-                *glsl << parameter_type << " "
-                      << sanitize_graphics_glsl_identifier(context.module.strings[parameter.name_id]);
-            }
-        }
-        *glsl << ") {\n";
-
-        auto callable_context = context;
-        callable_context.parameter_name.clear();
-        callable_context.locals.clear();
-        if (!append_graphics_stage_statement_list(
-                callable_context,
-                function.body_statement_index,
-                1,
-                {},
-                glsl)) {
-            return false;
-        }
-        *glsl << "}\n\n";
-    }
-
-    return true;
-}
-
-bool append_graphics_vertex_main(GraphicsLoweringContext& context, std::ostringstream* glsl) {
-    if (glsl == nullptr) {
-        return false;
-    }
-
-    if (context.module.entry_function >= context.module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-
-    GraphicsReturnEmitter emit_vertex_return = [](GraphicsLoweringContext& context,
-                                                  uint32_t expr_id,
-                                                  int indent,
-                                                  std::ostringstream* glsl) {
-        std::string return_expression;
-        if (!lower_graphics_stage_expression(context, expr_id, &return_expression)) {
-            trace_graphics_expression_failure(context, "vertex", expr_id, "return expression lowering failed");
-            return false;
-        }
-
-        const auto pad = graphics_indent(indent);
-        const auto result_name = "fe_result_" + std::to_string(expr_id);
-        if (context.varyings.is_float4) {
-            *glsl << pad << "vec4 " << result_name << " = " << return_expression << ";\n";
-            *glsl << pad << "gl_Position = " << result_name << ";\n";
-            *glsl << pad << "v_fe_color = " << result_name << ";\n";
-            *glsl << pad << "v_fe_uv = " << result_name << ".xy * 0.5 + vec2(0.5);\n";
-            *glsl << pad << "return;\n";
-            return true;
-        }
-
-        const auto result_type = graphics_glsl_type_name(context.module, context.varyings.type_id);
-        if (result_type.empty() || context.varyings.position_field_name.empty()) {
-            return false;
-        }
-
-        *glsl << pad << result_type << " " << result_name << " = " << return_expression << ";\n";
-        *glsl << pad << "gl_Position = " << result_name << "."
-              << sanitize_graphics_glsl_identifier(context.varyings.position_field_name) << ";\n";
-        for (const auto& field : context.varyings.fields) {
-            if (field.position) {
-                continue;
-            }
-            *glsl << pad << graphics_varying_variable_name(field) << " = " << result_name << "."
-                  << sanitize_graphics_glsl_identifier(field.name) << ";\n";
-        }
-        *glsl << pad << "return;\n";
-        return true;
-    };
-
-    *glsl << "void main() {\n";
-    if (!append_graphics_stage_statement_list(
-            context,
-            function.body_statement_index,
-            1,
-            emit_vertex_return,
-            glsl)) {
-        return false;
-    }
-    *glsl << "}\n";
-    return true;
-}
-
-bool append_graphics_fragment_output_declarations(const GraphicsFragmentOutputLayout& outputs,
-                                                  std::ostringstream* glsl) {
-    if (glsl == nullptr || outputs.fields.empty()) {
-        return false;
-    }
-
-    for (const auto& field : outputs.fields) {
-        if (field.glsl_type.empty()) {
-            return false;
-        }
-
-        *glsl << "layout(location = " << field.location << ") out "
-              << field.glsl_type << " out_color_" << field.location << ";\n";
-    }
-    return true;
-}
-
-bool append_graphics_fragment_main(GraphicsLoweringContext& context,
-                                   const GraphicsFragmentOutputLayout& outputs,
-                                   std::ostringstream* glsl) {
-    if (glsl == nullptr || outputs.fields.empty()) {
-        return false;
-    }
-
-    if (context.module.entry_function >= context.module.functions.size()) {
-        return false;
-    }
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-
-    GraphicsReturnEmitter emit_fragment_return = [&outputs](GraphicsLoweringContext& context,
-                                                            uint32_t expr_id,
-                                                            int indent,
-                                                            std::ostringstream* glsl) {
-        std::string return_expression;
-        if (!lower_graphics_stage_expression(context, expr_id, &return_expression)) {
-            trace_graphics_expression_failure(context, "fragment", expr_id, "return expression lowering failed");
-            return false;
-        }
-
-        const auto pad = graphics_indent(indent);
-        if (outputs.is_float4) {
-            *glsl << pad << "out_color_0 = " << return_expression << ";\n";
-            *glsl << pad << "return;\n";
-            return true;
-        }
-
-        const auto result_type = graphics_glsl_type_name(context.module, outputs.type_id);
-        if (result_type.empty()) {
-            return false;
-        }
-
-        const auto result_name = "fe_result_" + std::to_string(expr_id);
-        *glsl << pad << result_type << " " << result_name << " = " << return_expression << ";\n";
-        for (const auto& field : outputs.fields) {
-            if (field.name.empty()) {
-                return false;
-            }
-
-            *glsl << pad << "out_color_" << field.location << " = " << result_name << "."
-                  << sanitize_graphics_glsl_identifier(field.name) << ";\n";
-        }
-        *glsl << pad << "return;\n";
-        return true;
-    };
-
-    *glsl << "void main() {\n";
-    if (!append_graphics_stage_statement_list(
-            context,
-            function.body_statement_index,
-            1,
-            emit_fragment_return,
-            glsl)) {
-        return false;
-    }
-    *glsl << "}\n";
-    return true;
-}
-
-bool build_graphics_vertex_glsl(const ParsedIr& vertex_ir, const GraphicsPipelineState& pipeline,
-                                const std::vector<GraphicsPushConstantLayoutEntry>& push_constants,
-                                const GraphicsVaryingLayout& varyings,
-                                const GraphicsResourceLayout& resources,
-                                std::string* source) {
-    if (source == nullptr || !vertex_ir.has_section7 ||
-        vertex_ir.typed_module.entry_function >= vertex_ir.typed_module.functions.size()) {
-        return false;
-    }
-
-    GraphicsLoweringContext context{
-        GraphicsStage::Vertex,
-        vertex_ir,
-        vertex_ir.typed_module,
-        pipeline,
-        push_constants,
-        varyings,
-        resources,
-        {},
-        std::nullopt,
-        {},
-        {}};
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.kind != 3 || function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-
-    std::ostringstream glsl;
-    if (!append_graphics_shader_prelude(context, &glsl) ||
-        !append_graphics_callable_declarations(context, &glsl) ||
-        !append_graphics_callable_definitions(context, &glsl) ||
-        !append_graphics_vertex_main(context, &glsl)) {
-        return false;
-    }
-
-    *source = glsl.str();
-    return true;
-}
-
-bool build_graphics_fragment_glsl(const ParsedIr& fragment_ir, const GraphicsPipelineState& pipeline,
-                                  const std::vector<GraphicsPushConstantLayoutEntry>& push_constants,
-                                  const GraphicsVaryingLayout& varyings,
-                                  const GraphicsResourceLayout& resources,
-                                  std::string* source) {
-    if (source == nullptr || !fragment_ir.has_section7 ||
-        fragment_ir.typed_module.entry_function >= fragment_ir.typed_module.functions.size()) {
-        return false;
-    }
-
-    GraphicsLoweringContext context{
-        GraphicsStage::Fragment,
-        fragment_ir,
-        fragment_ir.typed_module,
-        pipeline,
-        push_constants,
-        varyings,
-        resources,
-        "input",
-        std::nullopt,
-        {},
-        {}};
-
-    const auto& function = context.module.functions[context.module.entry_function];
-    if (function.kind != 4 || function.body_statement_index >= context.module.statements.size()) {
-        return false;
-    }
-    if (function.parameter_count > 0 && function.first_parameter < context.module.parameters.size()) {
-        const auto& parameter = context.module.parameters[function.first_parameter];
-        if (parameter.name_id < context.module.strings.size()) {
-            context.parameter_name = context.module.strings[parameter.name_id];
-        }
-    }
-
-    GraphicsFragmentOutputLayout outputs;
-    if (!build_graphics_fragment_output_layout(
-            context.module,
-            function.return_type_id,
-            pipeline.color_attachment_count,
-            &outputs)) {
-        if (feather_graphics_trace_enabled()) {
-            std::cerr << "[feather graphics] fragment output type is not a supported color output shape\n";
-        }
-        return false;
-    }
-
-    std::ostringstream glsl;
-    if (!append_graphics_shader_prelude(context, &glsl, outputs.is_float4 ? UINT32_MAX : outputs.type_id)) {
-        if (feather_graphics_trace_enabled()) {
-            std::cerr << "[feather graphics] fragment prelude lowering failed\n";
-        }
-        return false;
-    }
-    if (!append_graphics_fragment_output_declarations(outputs, &glsl) ||
-        !append_graphics_callable_declarations(context, &glsl) ||
-        !append_graphics_callable_definitions(context, &glsl) ||
-        !append_graphics_fragment_main(context, outputs, &glsl)) {
-        return false;
-    }
-
-    *source = glsl.str();
-    return true;
-}
-
-bool try_build_graphics_pipeline_glsl(const GraphicsPipelineState& pipeline,
-                                      std::string* vertex_source,
-                                      std::string* fragment_source,
-                                      GraphicsResourceLayout* resource_layout,
-                                      std::vector<GraphicsPushConstantLayoutEntry>* push_constants,
-                                      std::string* failure_reason = nullptr) {
-    auto trace_failure = [&](const char* reason) {
-        if (failure_reason != nullptr) {
-            *failure_reason = reason;
-        }
-        const auto* trace = std::getenv("FEATHER_GRAPHICS_TRACE");
-        if (trace != nullptr && trace[0] != '\0' && std::strcmp(trace, "0") != 0) {
-            std::cerr << "[feather graphics] lowering failed: " << reason << "\n";
-        }
-        return false;
-    };
-
-    if (vertex_source == nullptr || fragment_source == nullptr ||
-        resource_layout == nullptr || push_constants == nullptr) {
-        return trace_failure("null output pointer");
-    }
-
-    ParsedIr vertex_ir;
-    ParsedIr fragment_ir;
-    if (!parse_feather_ir(pipeline.vertex_ir, &vertex_ir) ||
-        !parse_feather_ir(pipeline.fragment_ir, &fragment_ir) ||
-        !vertex_ir.has_section7 ||
-        !fragment_ir.has_section7 ||
-        vertex_ir.typed_module.entry_function >= vertex_ir.typed_module.functions.size()) {
-        return trace_failure("invalid typed IR sections");
-    }
-
-    const auto& vertex_function = vertex_ir.typed_module.functions[vertex_ir.typed_module.entry_function];
-    if (vertex_function.kind != 3 || vertex_function.return_type_id >= vertex_ir.typed_module.types.size()) {
-        return trace_failure("invalid vertex entry function");
-    }
-
-    GraphicsVaryingLayout varyings;
-    if (!build_graphics_varying_layout(vertex_ir.typed_module, vertex_function.return_type_id, &varyings)) {
-        return trace_failure("varying layout unsupported");
-    }
-    if (!build_graphics_resource_layout(vertex_ir, fragment_ir, resource_layout)) {
-        return trace_failure("resource layout unsupported");
-    }
-    if (!build_graphics_push_constant_layout(vertex_ir, fragment_ir, push_constants)) {
-        return trace_failure("push constant layout unsupported");
-    }
-
-    if (!build_graphics_vertex_glsl(vertex_ir, pipeline, *push_constants, varyings, *resource_layout, vertex_source)) {
-        return trace_failure("vertex stage lowering failed");
-    }
-    if (!build_graphics_fragment_glsl(fragment_ir, pipeline, *push_constants, varyings, *resource_layout, fragment_source)) {
-        return trace_failure("fragment stage lowering failed");
-    }
-    return true;
-}
-
-void dump_graphics_glsl_if_requested(const GraphicsPipelineState& pipeline,
-                                     const std::string& vertex_source,
-                                     const std::string& fragment_source) {
-    const auto* dump = std::getenv("FEATHER_GRAPHICS_DUMP_GLSL");
-    if (dump == nullptr || dump[0] == '\0' || std::strcmp(dump, "0") == 0) {
-        return;
-    }
-
-    std::cerr << "=== Feather generated vertex GLSL: " << pipeline.debug_name << " ===\n"
-              << vertex_source
-              << "\n=== Feather generated fragment GLSL: " << pipeline.debug_name << " ===\n"
-              << fragment_source
-              << "\n";
-}
-
-bool feather_graphics_trace_enabled() {
-    const auto* trace = std::getenv("FEATHER_GRAPHICS_TRACE");
-    return trace != nullptr && trace[0] != '\0' && std::strcmp(trace, "0") != 0;
-}
-
-void trace_graphics_step(const char* step) {
-    if (!feather_graphics_trace_enabled()) {
-        return;
-    }
-
-    // Each step reports how long the work since the previous step took. A bare sequence of step
-    // names says which stages run but not which one costs the frame, and per-frame shader
-    // compilation looks identical to a cache hit without the elapsed time next to it.
-    static thread_local std::chrono::steady_clock::time_point previous_step{};
-    const auto now = std::chrono::steady_clock::now();
-    const auto elapsed = previous_step.time_since_epoch().count() == 0
-                             ? std::chrono::steady_clock::duration::zero()
-                             : now - previous_step;
-    previous_step = now;
-    std::cerr << "[feather graphics] " << step << " +"
-              << std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / 1000.0
-              << "ms\n";
-}
-
-std::string generic_graphics_vertex_glsl() {
-    return R"GLSL(#version 450
-layout(location = 0) in vec4 in_position;
-layout(location = 0) out vec4 v_color;
-layout(location = 1) out vec2 v_uv;
-
-void main() {
-    gl_Position = in_position;
-    v_color = vec4(clamp(in_position.xyz * 0.5 + vec3(0.5), vec3(0.0), vec3(1.0)), in_position.w);
-    v_uv = in_position.xy * 0.5 + vec2(0.5);
-}
-)GLSL";
-}
-
-std::string generic_graphics_fragment_glsl(bool sampled_texture, GraphicsColor color) {
-    std::ostringstream glsl;
-    glsl << "#version 450\n";
-    glsl << "layout(location = 1) in vec2 v_uv;\n";
-    glsl << "layout(location = 0) out vec4 out_color;\n";
-    if (sampled_texture) {
-        glsl << "layout(set = 0, binding = 0) uniform sampler2D u_texture;\n";
-    }
-    glsl << "void main() {\n";
-    if (sampled_texture) {
-        glsl << "    out_color = texture(u_texture, clamp(v_uv, vec2(0.0), vec2(1.0)));\n";
-    } else {
-        glsl << std::fixed << std::setprecision(8);
-        glsl << "    out_color = vec4(" << (static_cast<float>(color.r) / 255.0f) << ", "
-             << (static_cast<float>(color.g) / 255.0f) << ", " << (static_cast<float>(color.b) / 255.0f)
-             << ", " << (static_cast<float>(color.a) / 255.0f) << ");\n";
-    }
-    glsl << "}\n";
-    return glsl.str();
-}
-
-std::string graphics_resource_layout_key(const GraphicsResourceLayout& layout,
-                                         const std::vector<GPU::Backend::PixelFormat>& sampled_texture_formats) {
-    std::ostringstream key;
-    key << "resources=" << layout.entries.size();
-    for (const auto& resource : layout.entries) {
-        key << "|b" << resource.backend_binding
-            << ":s" << resource.source_binding
-            << ":k" << static_cast<uint32_t>(resource.kind)
-            << ":a" << static_cast<uint32_t>(resource.access)
-            << ":sam" << resource.sampler_binding
-            // Stage visibility is part of the descriptor set layout, so it has to be part of the key
-            // that decides whether a cached pipeline can be reused.
-            << ":st" << resource.stage_flags;
-        if (resource.kind == kIrResourceKindTexture2D && resource.backend_binding < sampled_texture_formats.size()) {
-            key << ":fmt" << static_cast<uint32_t>(sampled_texture_formats[resource.backend_binding]);
-        }
-    }
-    return key.str();
-}
-
-std::string graphics_pipeline_variant_key(const GraphicsPipelineState& pipeline,
-                                          const std::vector<GPU::Backend::PixelFormat>& color_formats,
-                                          GPU::Backend::PixelFormat depth_format,
-                                          bool has_depth_attachment,
-                                          const GraphicsResourceLayout& layout,
-                                          const std::vector<GPU::Backend::PixelFormat>& sampled_texture_formats,
-                                          uint32_t push_constant_size) {
-    std::ostringstream key;
-    key << "topo=" << pipeline.topology
-        << "|samples=" << pipeline.sample_count
-        << "|colors=" << color_formats.size();
-    for (auto format : color_formats) {
-        key << ":" << static_cast<uint32_t>(format);
-    }
-    key << "|depth=" << (has_depth_attachment ? static_cast<uint32_t>(depth_format) : UINT32_MAX)
-        << "|depthTest=" << pipeline.depth_test
-        << "|depthWrite=" << pipeline.depth_write
-        << "|depthCompare=" << pipeline.depth_compare
-        << "|stencil=" << pipeline.stencil_test
-        << "|stencilMasks=" << pipeline.stencil_read_mask << "," << pipeline.stencil_write_mask << "," << pipeline.stencil_reference
-        << "|stencilFront=" << pipeline.stencil_front.fail_op << "," << pipeline.stencil_front.pass_op << ","
-        << pipeline.stencil_front.depth_fail_op << "," << pipeline.stencil_front.compare_op
-        << "|stencilBack=" << pipeline.stencil_back.fail_op << "," << pipeline.stencil_back.pass_op << ","
-        << pipeline.stencil_back.depth_fail_op << "," << pipeline.stencil_back.compare_op
-        << "|blend=" << pipeline.blend_enable << "," << pipeline.blend_src_color << "," << pipeline.blend_dst_color << ","
-        << pipeline.blend_color_op << "," << pipeline.blend_src_alpha << "," << pipeline.blend_dst_alpha << ","
-        << pipeline.blend_alpha_op << "," << pipeline.blend_write_mask
-        << "|blendAttachments=" << pipeline.color_blend_attachment_count;
-    for (uint32_t i = 0; i < pipeline.color_blend_attachment_count; ++i) {
-        const auto& blend = pipeline.color_blend_attachments[i];
-        key << ":" << blend.blend_enable << "," << blend.src_color << "," << blend.dst_color << ","
-            << blend.color_op << "," << blend.src_alpha << "," << blend.dst_alpha << ","
-            << blend.alpha_op << "," << blend.write_mask;
-    }
-    key
-        << "|raster=" << pipeline.cull_mode << "," << pipeline.front_face << "," << pipeline.polygon_mode << ","
-        << pipeline.depth_clamp
-        << "|push=" << push_constant_size
-        << "|" << graphics_resource_layout_key(layout, sampled_texture_formats);
-    return key.str();
-}
-
-FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline,
-                                                 GPU::Backend::Backend& backend,
-                                                 GPU::Backend::PrimitiveTopology topology,
-                                                 GPU::Backend::SampleCount sample_count,
-                                                 const std::vector<TextureState*>& color_targets,
-                                                 const TextureState* depth,
-                                                 const std::string& vertex_shader_source,
-                                                 const std::string& fragment_shader_source,
-                                                 const GraphicsResourceLayout& resource_layout,
-                                                 uint32_t push_constant_size,
-                                                 GPU::Backend::PipelineHandle* out_pipeline) {
-    if (out_pipeline == nullptr) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline variant output is required.");
-    }
-
-    std::vector<GPU::Backend::PixelFormat> color_formats;
-    color_formats.reserve(color_targets.size());
-    for (const auto* color_target : color_targets) {
-        GPU::Backend::PixelFormat format = GPU::Backend::PixelFormat::RGBA8;
-        if (color_target == nullptr || !easygpu_backend_pixel_format(color_target->pixel_format, &format)) {
-            return fail(FE_ERROR_UNSUPPORTED, "Color target format is not supported by EasyGPU graphics.");
-        }
-        color_formats.push_back(format);
-    }
-
-    GPU::Backend::PixelFormat depth_format = GPU::Backend::PixelFormat::D32F;
-    const bool has_depth_attachment = depth != nullptr;
-    if (has_depth_attachment && !easygpu_backend_pixel_format(depth->pixel_format, &depth_format)) {
-        return fail(FE_ERROR_UNSUPPORTED, "Depth target format is not supported by EasyGPU graphics.");
-    }
-
-    std::vector<GPU::Backend::PixelFormat> sampled_texture_formats(GPU::Backend::MAX_TEXTURE_BINDINGS,
-                                                                    GPU::Backend::PixelFormat::RGBA8);
-    for (const auto& resource : resource_layout.entries) {
-        if (resource.kind != kIrResourceKindTexture2D) {
-            continue;
-        }
-
-        const auto bound_texture = pipeline.textures.find(resource.source_binding);
-        if (bound_texture == pipeline.textures.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Generated graphics shader references an unbound sampled texture.");
-        }
-
-        const auto texture_it = g_textures.find(bound_texture->second);
-        if (texture_it == g_textures.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid sampled texture.");
-        }
-
-        if (texture_it->second.depth != 1 ||
-            !easygpu_backend_pixel_format(texture_it->second.pixel_format, &sampled_texture_formats[resource.backend_binding])) {
-            return fail(FE_ERROR_UNSUPPORTED, "Generated graphics shader sampled texture format is not supported.");
-        }
-    }
-
-    const auto key = graphics_pipeline_variant_key(
-        pipeline,
-        color_formats,
-        depth_format,
-        has_depth_attachment,
-        resource_layout,
-        sampled_texture_formats,
-        push_constant_size);
-    for (const auto& entry : pipeline.backend_cache) {
-        if (entry.key == key) {
-            *out_pipeline = entry.pipeline;
-            trace_graphics_step("reuse graphics pipeline");
-            return ok();
-        }
-    }
-
-    GPU::Backend::ShaderDesc vertex_shader_desc;
-    vertex_shader_desc.type = GPU::Backend::ShaderType::Vertex;
-    vertex_shader_desc.sourceCode = vertex_shader_source;
-    vertex_shader_desc.entryPoint = "main";
-    vertex_shader_desc.optimizationLevel = kShaderOptimizationLevel;
-    trace_graphics_step("create vertex shader");
-    const auto vertex_shader = backend.CreateShader(vertex_shader_desc);
-    if (vertex_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
-        return fail(FE_ERROR_SHADER_COMPILE_FAILED, "EasyGPU backend failed to compile generated vertex shader.");
-    }
-
-    GPU::Backend::ShaderDesc fragment_shader_desc;
-    fragment_shader_desc.type = GPU::Backend::ShaderType::Fragment;
-    fragment_shader_desc.sourceCode = fragment_shader_source;
-    fragment_shader_desc.entryPoint = "main";
-    fragment_shader_desc.optimizationLevel = kShaderOptimizationLevel;
-    trace_graphics_step("create fragment shader");
-    const auto fragment_shader = backend.CreateShader(fragment_shader_desc);
-    if (fragment_shader == GPU::Backend::INVALID_SHADER_HANDLE) {
-        backend.DestroyShader(vertex_shader);
-        return fail(FE_ERROR_SHADER_COMPILE_FAILED, "EasyGPU backend failed to compile generated fragment shader.");
-    }
-
-    GPU::Backend::GraphicsPipelineDesc pipeline_desc;
-    pipeline_desc.vertexShader = vertex_shader;
-    pipeline_desc.fragmentShader = fragment_shader;
-    pipeline_desc.topology = topology;
-    pipeline_desc.colorAttachmentFormats = color_formats;
-    pipeline_desc.colorAttachmentFormat = color_formats.front();
-    pipeline_desc.depthAttachmentFormat = depth_format;
-    pipeline_desc.sampleCount = sample_count;
-    pipeline_desc.depthTestEnable = depth != nullptr && pipeline.depth_test != 0;
-    pipeline_desc.depthWriteEnable = depth != nullptr && pipeline.depth_write != 0;
-    if (!map_graphics_compare_op(pipeline.depth_compare, &pipeline_desc.depthCompareOp) ||
-        !map_graphics_stencil_face(pipeline.stencil_front, &pipeline_desc.stencilFront) ||
-        !map_graphics_stencil_face(pipeline.stencil_back, &pipeline_desc.stencilBack) ||
-        !map_graphics_blend_factor(pipeline.blend_src_color, &pipeline_desc.blendSrcColor) ||
-        !map_graphics_blend_factor(pipeline.blend_dst_color, &pipeline_desc.blendDstColor) ||
-        !map_graphics_blend_op(pipeline.blend_color_op, &pipeline_desc.blendColorOp) ||
-        !map_graphics_blend_factor(pipeline.blend_src_alpha, &pipeline_desc.blendSrcAlpha) ||
-        !map_graphics_blend_factor(pipeline.blend_dst_alpha, &pipeline_desc.blendDstAlpha) ||
-        !map_graphics_blend_op(pipeline.blend_alpha_op, &pipeline_desc.blendAlphaOp) ||
-        !map_graphics_raster_state(pipeline, &pipeline_desc.cullMode, &pipeline_desc.frontFace, &pipeline_desc.polygonMode)) {
-        backend.DestroyShader(fragment_shader);
-        backend.DestroyShader(vertex_shader);
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline descriptor contains an unsupported state enum value.");
-    }
-    pipeline_desc.stencilTestEnable = depth != nullptr && pipeline.stencil_test != 0;
-    pipeline_desc.stencilReadMask = pipeline.stencil_read_mask;
-    pipeline_desc.stencilWriteMask = pipeline.stencil_write_mask;
-    pipeline_desc.stencilReference = pipeline.stencil_reference;
-    pipeline_desc.blendEnable = pipeline.blend_enable != 0;
-    pipeline_desc.colorWriteMask = pipeline.blend_write_mask;
-    pipeline_desc.colorBlendAttachments.clear();
-    pipeline_desc.colorBlendAttachments.reserve(pipeline.color_blend_attachment_count);
-    for (uint32_t i = 0; i < pipeline.color_blend_attachment_count; ++i) {
-        GPU::Backend::ColorAttachmentBlendState blend_state;
-        if (!map_graphics_color_blend_attachment(pipeline.color_blend_attachments[i], &blend_state)) {
-            backend.DestroyShader(fragment_shader);
-            backend.DestroyShader(vertex_shader);
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics color blend attachment descriptor contains an unsupported value.");
-        }
-        pipeline_desc.colorBlendAttachments.push_back(blend_state);
-    }
-    pipeline_desc.depthClampEnable = pipeline.depth_clamp != 0;
-    pipeline_desc.pushConstantSize = push_constant_size;
-
-    for (const auto& resource : resource_layout.entries) {
-        if (resource.kind == kIrResourceKindBuffer) {
-            GPU::Backend::ResourceLayoutEntry entry;
-            entry.binding = resource.backend_binding;
-            entry.type = GPU::Backend::BindingType::Buffer;
-            entry.format = GPU::Backend::PixelFormat::RGBA8;
-            entry.readOnly = true;
-            // The stage that declared the buffer, not a fixed guess: a vertex stream is read by the
-            // vertex shader, but a structured buffer the fragment shader loops over is read there.
-            entry.stageFlags = resource.stage_flags;
-            pipeline_desc.resources.push_back(entry);
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindTexture2D) {
-            GPU::Backend::ResourceLayoutEntry entry;
-            entry.binding = resource.backend_binding;
-            entry.type = GPU::Backend::BindingType::Sampler;
-            entry.format = sampled_texture_formats[resource.backend_binding];
-            entry.readOnly = true;
-            entry.stageFlags = resource.stage_flags;
-            pipeline_desc.resources.push_back(entry);
-        }
-    }
-
-    trace_graphics_step("create graphics pipeline");
-    GPU::Backend::PipelineHandle backend_pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
-    try {
-        backend_pipeline = backend.CreateGraphicsPipeline(pipeline_desc);
-    } catch (const std::exception& ex) {
-        backend.DestroyShader(fragment_shader);
-        backend.DestroyShader(vertex_shader);
-        const std::string message = ex.what();
-        if (message.find("fillModeNonSolid") != std::string::npos ||
-            message.find("depthClamp") != std::string::npos) {
-            return fail(FE_ERROR_UNSUPPORTED, message);
-        }
-        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend failed to create graphics pipeline: " + message);
-    }
-    if (backend_pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
-        backend.DestroyShader(fragment_shader);
-        backend.DestroyShader(vertex_shader);
-        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend failed to create graphics pipeline.");
-    }
-
-    GraphicsPipelineCacheEntry entry;
-    entry.key = key;
-    entry.vertex_shader = vertex_shader;
-    entry.fragment_shader = fragment_shader;
-    entry.pipeline = backend_pipeline;
-    entry.push_constant_size = push_constant_size;
-    pipeline.backend_cache.push_back(std::move(entry));
-    *out_pipeline = backend_pipeline;
-    return ok();
-}
-
-FeResult validate_graphics_sampler_binding(const GraphicsPipelineState& pipeline,
-                                           const GraphicsResourceBindingEntry& texture_resource,
-                                           GPU::Backend::SamplerDesc* out_sampler) {
-    if (out_sampler == nullptr) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Sampler descriptor output is required.");
-    }
-
-    FeSamplerHandle sampler_handle = 0;
-    if (texture_resource.sampler_binding != UINT32_MAX) {
-        const auto bound_sampler = pipeline.samplers.find(texture_resource.sampler_binding);
-        if (bound_sampler == pipeline.samplers.end() || bound_sampler->second == 0) {
-            return fail(FE_ERROR_INVALID_HANDLE,
-                        "Generated graphics shader references an unbound sampler.");
-        }
-        sampler_handle = bound_sampler->second;
-    } else if (pipeline.samplers.size() == 1) {
-        sampler_handle = pipeline.samplers.begin()->second;
-    } else {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "Graphics texture sampling requires an explicit SamplerState argument.");
-    }
-
-    if (sampler_handle == 0) {
-        return fail(FE_ERROR_INVALID_HANDLE,
-                    "Generated graphics shader references an unbound sampler.");
-    }
-
-    const auto sampler_it = g_samplers.find(sampler_handle);
-    if (sampler_it == g_samplers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE,
-                    "Graphics draw references an invalid sampler.");
-    }
-
-    if (!map_sampler_desc(sampler_it->second.desc, out_sampler)) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    "Graphics draw references an unsupported sampler descriptor.");
-    }
-
-    return ok();
-}
-
-// Picks the buffer that feeds the rasterizer when no explicit vertex buffer was set. `buffers` is
-// unordered, so the lowest binding is chosen deliberately rather than relying on iteration order:
-// a shader may bind several buffers and the vertex stream is always the first one it declares.
 FeBufferHandle infer_graphics_vertex_buffer(const GraphicsPipelineState& pipeline) {
     if (pipeline.vertex_buffer != 0) {
         return pipeline.vertex_buffer;
@@ -10981,9 +4124,10 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
         output_resource.element_type = "float4";
         output_resource.width = targets[i]->width;
         output_resource.height = targets[i]->height;
-        if (!easygpu_runtime_pixel_format(targets[i]->pixel_format, &output_resource.texture_format)) {
+        if (!luisa_pixel_format(targets[i]->pixel_format)) {
             return fail(FE_ERROR_UNSUPPORTED, "Compute raster fragment target format is unsupported.");
         }
+        output_resource.texture_format = targets[i]->pixel_format;
         lowering.resources.push_back(std::move(output_resource));
         const auto& blend = pipeline.color_blend_attachments[i];
         lowering.graphics_color_targets.push_back(Feather::TypedIR::GraphicsColorTargetInfo{
@@ -11538,7 +4682,6 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     trace_graphics_step("compute fragment complete");
     for (auto* color_target : color_targets) {
         color_target->host_dirty = false;
-        color_target->device_dirty = false;
         color_target->mipmaps_dirty = false;
         color_target->luisa_dirty = true;
         color_target->luisa_uploaded = true;
@@ -11546,492 +4689,11 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     }
     if (depth_it != g_textures.end()) {
         depth_it->second.host_dirty = true;
-        depth_it->second.device_dirty = false;
         depth_it->second.mipmaps_dirty = false;
     }
     return ok();
 }
 #endif
-
-FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
-    trace_graphics_step("draw begin");
-    GPU::Backend::PrimitiveTopology topology;
-    if (!map_graphics_topology(pipeline.topology, &topology)) {
-        return fail(FE_ERROR_UNSUPPORTED, "Unsupported graphics primitive topology.");
-    }
-
-    GPU::Backend::SampleCount sample_count;
-    if (!map_graphics_sample_count(pipeline.sample_count, &sample_count)) {
-        return fail(FE_ERROR_UNSUPPORTED, "Unsupported graphics sample count.");
-    }
-
-    const uint32_t minimum_count =
-        topology == GPU::Backend::PrimitiveTopology::PointList
-            ? 1u
-            : (topology == GPU::Backend::PrimitiveTopology::LineList ||
-                       topology == GPU::Backend::PrimitiveTopology::LineStrip
-                   ? 2u
-                   : 3u);
-    if (draw.count < minimum_count) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw count is too small for the selected topology.");
-    }
-    const uint32_t instance_count = draw.instance_count == 0 ? 1u : draw.instance_count;
-    if (draw.color_targets == nullptr || draw.color_target_count == 0 ||
-        draw.color_target_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires one to eight color targets.");
-    }
-    if (draw.color_target_count != pipeline.color_attachment_count) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw color target count must match the pipeline descriptor.");
-    }
-    if ((draw.viewport_enabled != 0 && (draw.viewport_width == 0 || draw.viewport_height == 0)) ||
-        (draw.scissor_enabled != 0 && (draw.scissor_width == 0 || draw.scissor_height == 0))) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw viewport and scissor rectangles must have positive dimensions.");
-    }
-
-    std::vector<TextureState*> targets;
-    targets.reserve(draw.color_target_count);
-    for (uint32_t i = 0; i < draw.color_target_count; ++i) {
-        auto target_it = g_textures.find(draw.color_targets[i]);
-        if (target_it == g_textures.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid color target handle.");
-        }
-        targets.push_back(&target_it->second);
-    }
-
-    auto& target = *targets.front();
-    if (target.depth != 1 || target.width == 0 || target.height == 0) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires a valid 2D color target.");
-    }
-    for (const auto* color_target : targets) {
-        if (color_target->depth != 1 ||
-            color_target->width != target.width ||
-            color_target->height != target.height) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics MRT color target dimensions must match.");
-        }
-    }
-
-    TextureState* depth = nullptr;
-    if (draw.depth_target != 0) {
-        auto depth_it = g_textures.find(draw.depth_target);
-        if (depth_it == g_textures.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid depth target handle.");
-        }
-        if (depth_it->second.width != target.width || depth_it->second.height != target.height ||
-            depth_it->second.depth != 1) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Depth target dimensions must match the color target.");
-        }
-        if (pipeline.stencil_test != 0) {
-            if (depth_it->second.pixel_format != 100) {
-                return fail(FE_ERROR_UNSUPPORTED, "Graphics stencil state requires a Depth24Stencil8 depth target.");
-            }
-        } else if (depth_it->second.pixel_format != 101 && depth_it->second.pixel_format != 100) {
-            return fail(FE_ERROR_UNSUPPORTED, "EasyGPU graphics bridge currently supports Depth32Float or Depth24Stencil8 depth targets.");
-        }
-        depth = &depth_it->second;
-    }
-
-    const FeBufferHandle vertex_handle = infer_graphics_vertex_buffer(pipeline);
-    auto vertex_it = g_buffers.find(vertex_handle);
-    if (vertex_it == g_buffers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw requires a bound vertex buffer.");
-    }
-
-    uint32_t stride = pipeline.vertex_stride;
-    if (stride == 0) {
-        stride = vertex_it->second.stride != 0 ? vertex_it->second.stride : static_cast<uint32_t>(sizeof(float) * 4);
-    }
-    if (stride < sizeof(float) * 4) {
-        return fail(FE_ERROR_UNSUPPORTED, "EasyGPU graphics bridge currently requires float4 vertex positions.");
-    }
-
-    BufferState* index_buffer = nullptr;
-    bool index_buffer_is_uint16 = false;
-    if (draw.indexed != 0) {
-        if (draw.index_buffer == 0) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw requires an explicit index buffer.");
-        }
-
-        auto index_it = g_buffers.find(draw.index_buffer);
-        if (index_it == g_buffers.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw references an invalid index buffer.");
-        }
-        const auto index_stride = index_it->second.stride != 0 ? index_it->second.stride : sizeof(uint32_t);
-        if (index_stride != sizeof(uint32_t) && index_stride != sizeof(uint16_t)) {
-            return fail(FE_ERROR_UNSUPPORTED, "EasyGPU graphics bridge currently requires uint or ushort index buffers.");
-        }
-        const auto required_index_elements = static_cast<uint64_t>(draw.first_index) + draw.count;
-        if (required_index_elements > std::numeric_limits<size_t>::max() / index_stride ||
-            index_it->second.bytes.size() < static_cast<size_t>(required_index_elements) * index_stride) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Index buffer is too small for the requested indexed draw.");
-        }
-        index_buffer_is_uint16 = index_stride == sizeof(uint16_t);
-        index_buffer = &index_it->second;
-    }
-
-    GPU::Runtime::AutoInitContext();
-    GPU::Runtime::ContextGuard guard(GPU::Runtime::Context::GetInstance());
-    auto* backend = GPU::Runtime::Context::GetBackend();
-    if (backend == nullptr) {
-        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for graphics draw.");
-    }
-    const auto caps = backend->GetCaps();
-    if (!caps.supportsGraphics) {
-        return fail(FE_ERROR_UNSUPPORTED, "Active EasyGPU backend does not support graphics pipelines.");
-    }
-
-    if (!pipeline.graphics_lowered) {
-        std::string graphics_lowering_failure;
-        if (!try_build_graphics_pipeline_glsl(
-                pipeline,
-                &pipeline.vertex_shader_source,
-                &pipeline.fragment_shader_source,
-                &pipeline.resource_layout,
-                &pipeline.push_constant_layout,
-                &graphics_lowering_failure)) {
-            return fail(FE_ERROR_UNSUPPORTED,
-                        "Generated graphics pipeline could not be lowered to typed EasyGPU GLSL: " +
-                        graphics_lowering_failure + ".");
-        }
-        pipeline.graphics_lowered = true;
-        dump_graphics_glsl_if_requested(pipeline, pipeline.vertex_shader_source, pipeline.fragment_shader_source);
-        trace_graphics_step("glsl lowered");
-    }
-
-    const auto vertex_buffer = ensure_easygpu_buffer(vertex_it->second, *backend);
-    std::vector<GPU::Backend::TextureHandle> target_textures;
-    target_textures.reserve(targets.size());
-    for (auto* color_target : targets) {
-        const auto target_texture = ensure_easygpu_texture(*color_target, *backend);
-        if (target_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU color target texture could not be created.");
-        }
-        target_textures.push_back(target_texture);
-    }
-    GPU::Backend::TextureHandle depth_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
-    if (depth != nullptr) {
-        depth_texture = ensure_easygpu_texture(*depth, *backend);
-        if (depth_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU depth target texture could not be created.");
-        }
-    }
-
-    GPU::Backend::BufferHandle index_backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
-    std::unique_ptr<EasyGpuBufferGuard> expanded_index_buffer_guard;
-    if (draw.indexed != 0 && index_buffer != nullptr) {
-        if (index_buffer_is_uint16) {
-            std::vector<uint32_t> expanded(draw.count);
-            const auto first_index_byte_offset = static_cast<size_t>(draw.first_index) * sizeof(uint16_t);
-            for (uint32_t i = 0; i < draw.count; ++i) {
-                expanded[i] = read_u16_unaligned(index_buffer->bytes.data() + first_index_byte_offset +
-                                                  static_cast<size_t>(i) * sizeof(uint16_t));
-            }
-
-            GPU::Backend::BufferDesc desc;
-            desc.sizeInBytes = expanded.size() * sizeof(uint32_t);
-            desc.mode = GPU::Backend::BufferMode::Read;
-            desc.initialData = expanded.data();
-            index_backend_buffer = backend->CreateBuffer(desc);
-            if (index_backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend failed to create expanded index buffer.");
-            }
-            expanded_index_buffer_guard = std::make_unique<EasyGpuBufferGuard>(*backend, index_backend_buffer);
-        } else {
-            index_backend_buffer = ensure_easygpu_buffer(*index_buffer, *backend);
-        }
-    }
-
-    GPU::Backend::PipelineHandle backend_pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
-    const uint32_t push_constant_size = static_cast<uint32_t>(graphics_push_constant_total_size(pipeline.push_constant_layout));
-    const auto pipeline_result = get_or_create_graphics_pipeline_variant(
-        pipeline,
-        *backend,
-        topology,
-        sample_count,
-        targets,
-        depth,
-        pipeline.vertex_shader_source,
-        pipeline.fragment_shader_source,
-        pipeline.resource_layout,
-        push_constant_size,
-        &backend_pipeline);
-    if (pipeline_result != FE_OK) {
-        return pipeline_result;
-    }
-
-    const bool has_depth_attachment = depth_texture != GPU::Backend::INVALID_TEXTURE_HANDLE;
-    const auto depth_load_op = static_cast<GraphicsDepthLoadOp>(draw.depth_load_op);
-    bool clear_depth = false;
-    switch (depth_load_op) {
-    case GraphicsDepthLoadOp::Default:
-        clear_depth = has_depth_attachment;
-        break;
-    case GraphicsDepthLoadOp::Load:
-        if (draw.clear_depth != 0) {
-            return fail(FE_ERROR_INVALID_ARGUMENT,
-                        "GraphicsDrawDesc cannot specify ClearDepth when DepthLoadOp is Load.");
-        }
-        clear_depth = false;
-        break;
-    case GraphicsDepthLoadOp::Clear:
-        clear_depth = has_depth_attachment;
-        break;
-    default:
-        return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc depth load op contains an unsupported value.");
-    }
-    if (draw.clear_depth != 0) {
-        clear_depth = has_depth_attachment;
-    }
-    const auto color_load_op = static_cast<GraphicsColorLoadOp>(draw.color_load_op);
-    GPU::Backend::AttachmentLoadOp backend_color_load_op = GPU::Backend::AttachmentLoadOp::Default;
-    bool clear_color = false;
-    switch (color_load_op) {
-    case GraphicsColorLoadOp::Default:
-        clear_color = draw.clear_color != 0 || sample_count != GPU::Backend::SampleCount::X1;
-        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Default;
-        break;
-    case GraphicsColorLoadOp::Load:
-        if (draw.clear_color != 0) {
-            return fail(FE_ERROR_INVALID_ARGUMENT,
-                        "GraphicsDrawDesc cannot specify ClearColor when ColorLoadOp is Load.");
-        }
-        clear_color = false;
-        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Load;
-        break;
-    case GraphicsColorLoadOp::Clear:
-        clear_color = true;
-        backend_color_load_op = GPU::Backend::AttachmentLoadOp::Clear;
-        break;
-    case GraphicsColorLoadOp::DontCare:
-        if (draw.clear_color != 0) {
-            return fail(FE_ERROR_INVALID_ARGUMENT,
-                        "GraphicsDrawDesc cannot specify ClearColor when ColorLoadOp is DontCare.");
-        }
-        clear_color = false;
-        backend_color_load_op = GPU::Backend::AttachmentLoadOp::DontCare;
-        break;
-    default:
-        return fail(FE_ERROR_INVALID_ARGUMENT, "GraphicsDrawDesc color load op contains an unsupported value.");
-    }
-    GPU::Backend::RenderPassBeginDesc render_pass;
-    render_pass.colorAttachment = target_textures.front();
-    render_pass.colorAttachments = target_textures;
-    render_pass.depthAttachment = depth_texture;
-    render_pass.sampleCount = sample_count;
-    render_pass.clearColorFlag = clear_color;
-    render_pass.colorLoadOp = backend_color_load_op;
-    render_pass.clearColor[0] = draw.clear_color != 0 ? draw.clear_color_r : 0.0f;
-    render_pass.clearColor[1] = draw.clear_color != 0 ? draw.clear_color_g : 0.0f;
-    render_pass.clearColor[2] = draw.clear_color != 0 ? draw.clear_color_b : 0.0f;
-    render_pass.clearColor[3] = draw.clear_color != 0 ? draw.clear_color_a : 1.0f;
-    render_pass.clearDepthFlag = has_depth_attachment && clear_depth;
-    render_pass.clearDepth = draw.clear_depth != 0
-                                 ? std::clamp(draw.clear_depth_value, 0.0f, 1.0f)
-                                 : 1.0f;
-
-    std::vector<GPU::Backend::ResourceBinding> bindings;
-    for (const auto& resource : pipeline.resource_layout.entries) {
-        if (resource.kind == kIrResourceKindBuffer) {
-            const auto bound_buffer = pipeline.buffers.find(resource.source_binding);
-            if (bound_buffer == pipeline.buffers.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Generated graphics shader references an unbound buffer.");
-            }
-
-            const auto buffer_it = g_buffers.find(bound_buffer->second);
-            if (buffer_it == g_buffers.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid buffer resource.");
-            }
-
-            GPU::Backend::ResourceBinding binding;
-            binding.binding = resource.backend_binding;
-            binding.type = GPU::Backend::BindingType::Buffer;
-            binding.buffer = ensure_easygpu_buffer(buffer_it->second, *backend);
-            binding.readOnly = true;
-            bindings.push_back(binding);
-            continue;
-        }
-
-        if (resource.kind == kIrResourceKindTexture2D) {
-            GPU::Backend::SamplerDesc sampler_desc;
-            const auto sampler_validation = validate_graphics_sampler_binding(pipeline, resource, &sampler_desc);
-            if (sampler_validation != FE_OK) {
-                return sampler_validation;
-            }
-
-            const auto bound_texture = pipeline.textures.find(resource.source_binding);
-            if (bound_texture == pipeline.textures.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Generated graphics shader references an unbound sampled texture.");
-            }
-
-            auto texture_it = g_textures.find(bound_texture->second);
-            if (texture_it == g_textures.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw references an invalid sampled texture.");
-            }
-
-            GPU::Backend::PixelFormat texture_format = GPU::Backend::PixelFormat::RGBA8;
-            if (!easygpu_backend_pixel_format(texture_it->second.pixel_format, &texture_format)) {
-                return fail(FE_ERROR_UNSUPPORTED, "Generated graphics shader sampled texture format is not supported.");
-            }
-
-            const auto sampled_backend_texture = ensure_easygpu_texture(texture_it->second, *backend);
-            if (sampled_backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU sampled texture could not be created.");
-            }
-
-            GPU::Backend::ResourceBinding binding;
-            binding.binding = resource.backend_binding;
-            binding.type = GPU::Backend::BindingType::Sampler;
-            binding.texture = sampled_backend_texture;
-            binding.format = texture_format;
-            binding.readOnly = true;
-            binding.sampler = sampler_desc;
-            bindings.push_back(binding);
-        }
-    }
-
-    backend->BindPipeline(backend_pipeline);
-    backend->BindVertexBuffer(vertex_buffer, stride);
-
-    if (!bindings.empty()) {
-        trace_graphics_step("bind resources");
-        backend->BindResources(bindings.data(), static_cast<uint32_t>(bindings.size()));
-    }
-
-    if (push_constant_size != 0) {
-        if (pipeline.push_constants.size() < push_constant_size) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Generated graphics pipeline push constants are not fully bound.");
-        }
-        trace_graphics_step("set push constants");
-        backend->SetUniformData(backend_pipeline, pipeline.push_constants.data(), push_constant_size);
-    }
-
-    trace_graphics_step("begin rendering");
-    backend->BeginRendering(render_pass);
-    const uint32_t viewport_x = draw.viewport_enabled ? draw.viewport_x : 0u;
-    const uint32_t viewport_y = draw.viewport_enabled ? draw.viewport_y : 0u;
-    const uint32_t viewport_width = draw.viewport_enabled ? draw.viewport_width : target.width;
-    const uint32_t viewport_height = draw.viewport_enabled ? draw.viewport_height : target.height;
-    const uint32_t scissor_x = draw.scissor_enabled ? draw.scissor_x : 0u;
-    const uint32_t scissor_y = draw.scissor_enabled ? draw.scissor_y : 0u;
-    const uint32_t scissor_width = draw.scissor_enabled ? draw.scissor_width : target.width;
-    const uint32_t scissor_height = draw.scissor_enabled ? draw.scissor_height : target.height;
-    backend->SetViewport(viewport_x, viewport_y, viewport_width, viewport_height);
-    backend->SetScissor(scissor_x, scissor_y, scissor_width, scissor_height);
-    if (!bindings.empty()) {
-        trace_graphics_step("bind resources in render pass");
-        backend->BindResources(bindings.data(), static_cast<uint32_t>(bindings.size()));
-    }
-
-    if (draw.indexed != 0) {
-        trace_graphics_step("draw indexed");
-        backend->BindIndexBuffer(index_backend_buffer);
-        const uint32_t first_index = index_buffer_is_uint16 ? 0u : draw.first_index;
-        backend->DrawIndexed(draw.count, instance_count, first_index, draw.vertex_offset, draw.first_instance);
-    } else {
-        trace_graphics_step("draw");
-        backend->Draw(draw.count, instance_count, draw.first_vertex, draw.first_instance);
-    }
-    trace_graphics_step("end rendering");
-    backend->EndRendering();
-    if (draw.wait != 0) {
-        trace_graphics_step("finish");
-        backend->Finish();
-    }
-
-    for (auto* color_target : targets) {
-        color_target->device_dirty = true;
-        color_target->host_dirty = false;
-        color_target->mipmaps_dirty = color_target->mipmaps_requested && color_target->mip_levels > 1;
-    }
-    if (depth != nullptr) {
-        depth->device_dirty = true;
-        depth->host_dirty = false;
-        depth->mipmaps_dirty = depth->mipmaps_requested && depth->mip_levels > 1;
-    }
-    return ok();
-}
-
-FeResult rasterize_graphics_pipeline(GraphicsPipelineState& pipeline, FeTextureHandle color_target,
-                                     FeTextureHandle depth_target, FeBufferHandle index_buffer_handle,
-                                     uint32_t count, bool indexed) {
-    if (pipeline.topology != 0) {
-        return fail(FE_ERROR_UNSUPPORTED, "Graphics rasterization currently supports TriangleList topology.");
-    }
-    if (pipeline.sample_count != 1) {
-        return fail(FE_ERROR_UNSUPPORTED, "Graphics rasterization currently supports SampleCount.X1.");
-    }
-    if (count < 3) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires at least three vertices or indices.");
-    }
-
-    auto target_it = g_textures.find(color_target);
-    if (target_it == g_textures.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid color target handle.");
-    }
-    if (depth_target != 0) {
-        const auto depth_it = g_textures.find(depth_target);
-        if (depth_it == g_textures.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid depth target handle.");
-        }
-        if (depth_it->second.width != target_it->second.width || depth_it->second.height != target_it->second.height) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Depth target dimensions must match the color target.");
-        }
-    }
-
-    const FeBufferHandle vertex_handle = infer_graphics_vertex_buffer(pipeline);
-    const auto vertex_it = g_buffers.find(vertex_handle);
-    if (vertex_it == g_buffers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Graphics draw requires a bound vertex buffer.");
-    }
-
-    uint32_t stride = pipeline.vertex_stride;
-    if (stride == 0) {
-        stride = vertex_it->second.stride != 0 ? vertex_it->second.stride : static_cast<uint32_t>(sizeof(float) * 4);
-    }
-    if (stride < sizeof(float) * 2) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw requires a vertex stride large enough for float2 positions.");
-    }
-
-    std::array<uint32_t, 3> indices{0, 1, 2};
-    if (indexed) {
-        if (index_buffer_handle == 0) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw requires an explicit index buffer.");
-        }
-
-        const auto index_it = g_buffers.find(index_buffer_handle);
-        if (index_it == g_buffers.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Graphics indexed draw references an invalid index buffer.");
-        }
-        if (index_it->second.bytes.size() >= sizeof(uint32_t) * 3) {
-            indices = {
-                read_u32_unaligned(index_it->second.bytes.data()),
-                read_u32_unaligned(index_it->second.bytes.data() + 4),
-                read_u32_unaligned(index_it->second.bytes.data() + 8)};
-        } else if (index_it->second.bytes.size() >= sizeof(uint16_t) * 3) {
-            indices = {
-                static_cast<uint32_t>(read_u16_unaligned(index_it->second.bytes.data())),
-                static_cast<uint32_t>(read_u16_unaligned(index_it->second.bytes.data() + 2)),
-                static_cast<uint32_t>(read_u16_unaligned(index_it->second.bytes.data() + 4))};
-        } else {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Index buffer is too small for an indexed triangle draw.");
-        }
-    }
-
-    std::array<GraphicsVertex2D, 3> vertices{};
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        if (!read_graphics_vertex(vertex_it->second, stride, indices[i], &vertices[i])) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Vertex buffer is too small for the requested triangle draw.");
-        }
-    }
-
-    auto color = graphics_color_from_sampled_texture(pipeline);
-    const auto result = rasterize_graphics_triangle(target_it->second, vertices, color);
-    if (result != FE_OK) {
-        return result;
-    }
-    target_it->second.host_dirty = true;
-    target_it->second.device_dirty = false;
-    return ok();
-}
 
 bool profiler_enabled_locked() {
     return g_profiler_enabled;
@@ -12127,43 +4789,43 @@ FeResult write_string(const std::string& value, char* buffer, size_t buffer_size
 }
 
 #if FEATHER_BUILD_WINDOW
-FeWindowEvent to_fe_window_event(const GPU::Window::WindowEvent& source) {
+FeWindowEvent to_fe_window_event(const Feather::Window::Event& source) {
     FeWindowEvent target{};
     std::visit(
         [&](const auto& event) {
             using EventT = std::decay_t<decltype(event)>;
-            if constexpr (std::is_same_v<EventT, GPU::Window::WindowResizeEvent>) {
+            if constexpr (std::is_same_v<EventT, Feather::Window::ResizeEvent>) {
                 target.kind = kWindowEventResize;
                 target.width = event.width;
                 target.height = event.height;
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::WindowCloseEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::CloseEvent>) {
                 target.kind = kWindowEventClose;
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::KeyEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::KeyEvent>) {
                 target.kind = kWindowEventKey;
                 target.key = static_cast<uint32_t>(static_cast<int32_t>(event.key));
                 target.pressed = event.pressed ? 1u : 0u;
                 target.modifiers = static_cast<uint32_t>(event.modifiers);
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::CharInputEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::CharInputEvent>) {
                 target.kind = kWindowEventCharInput;
                 target.codepoint = event.codepoint;
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::MouseButtonEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::MouseButtonEvent>) {
                 target.kind = kWindowEventMouseButton;
                 target.mouse_button = static_cast<uint32_t>(event.button);
                 target.pressed = event.pressed ? 1u : 0u;
                 target.x = event.x;
                 target.y = event.y;
                 target.modifiers = static_cast<uint32_t>(event.modifiers);
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::MouseMoveEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::MouseMoveEvent>) {
                 target.kind = kWindowEventMouseMove;
                 target.x = event.x;
                 target.y = event.y;
                 target.dx = event.dx;
                 target.dy = event.dy;
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::MouseScrollEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::MouseScrollEvent>) {
                 target.kind = kWindowEventMouseScroll;
                 target.scroll_x = event.dx;
                 target.scroll_y = event.dy;
-            } else if constexpr (std::is_same_v<EventT, GPU::Window::WindowFocusEvent>) {
+            } else if constexpr (std::is_same_v<EventT, Feather::Window::FocusEvent>) {
                 target.kind = kWindowEventFocus;
                 target.pressed = event.focused ? 1u : 0u;
             }
@@ -12179,16 +4841,6 @@ FeResult prepare_texture_pixels_locked(TextureState& texture, std::vector<uint32
     }
     if (texture.pixel_format != 3 && texture.pixel_format != 4 && texture.pixel_format != 10) {
         return fail(FE_ERROR_UNSUPPORTED, "Texture presenter currently supports Rgba8, Bgra8, and Rgba32Float textures.");
-    }
-
-    if (texture.device_dirty) {
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE,
-                        "EasyGPU backend is unavailable for texture presentation readback.");
-        }
-
-        download_easygpu_texture(texture, *backend);
     }
 
     const auto pixel_count = static_cast<size_t>(texture.width) * texture.height;
@@ -12232,16 +4884,6 @@ FeResult prepare_texture_pixels_locked(TextureState& texture, std::vector<uint32
     return ok();
 }
 
-FeResult present_texture_cpu_locked(GPU::Window::TexturePresenter& presenter, TextureState& texture) {
-    std::vector<uint32_t> converted;
-    const uint32_t* pixels = nullptr;
-    const auto result = prepare_texture_pixels_locked(texture, &converted, &pixels);
-    if (result != FE_OK) return result;
-    presenter.Present(pixels, texture.width, texture.height);
-    return ok();
-}
-
-#if FEATHER_HAS_LUISA
 void trace_present_submission(const char* path, std::chrono::steady_clock::time_point start,
                               Feather::Luisa::NativeTextureHandleKind handle_kind =
                                   Feather::Luisa::NativeTextureHandleKind::Unknown) {
@@ -12300,7 +4942,6 @@ void destroy_native_presenter_locked(FeTexturePresenterHandle handle, TexturePre
     presenter.native_contexts.clear();
 }
 #endif
-#endif
 
 template <typename Func> FeResult protect(Func&& func) {
     try {
@@ -12312,14 +4953,14 @@ template <typename Func> FeResult protect(Func&& func) {
         if (message.find("backend") != std::string::npos || message.find("Backend") != std::string::npos ||
             message.find("Vulkan") != std::string::npos || message.find("OpenGL") != std::string::npos ||
             message.find("GPU context") != std::string::npos || message.find("Context not initialized") != std::string::npos) {
-            const auto decorated = "EasyGPU backend unavailable: " + message;
+            const auto decorated = "GPU backend unavailable: " + message;
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, decorated.c_str());
         }
 
         if (message.find("shader") != std::string::npos || message.find("Shader") != std::string::npos ||
             message.find("SPIR") != std::string::npos || message.find("GLSL") != std::string::npos ||
             message.find("pipeline") != std::string::npos || message.find("Pipeline") != std::string::npos) {
-            const auto decorated = "EasyGPU shader compilation failed: " + message;
+            const auto decorated = "GPU shader compilation failed: " + message;
             return fail(FE_ERROR_SHADER_COMPILE_FAILED, decorated.c_str());
         }
 
@@ -12416,13 +5057,22 @@ FE_API FeResult fe_context_create(const char* backend_name, uint32_t device_inde
 
 FE_API FeResult fe_context_initialize(FeContextHandle context) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            if (g_contexts.find(context) == g_contexts.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-            }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!context_exists_locked(context)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
-        if (context == kDefaultContext) (void)require_backend();
+        Feather::Luisa::DispatchInputs dispatch;
+        std::string error;
+        if (!configure_luisa_dispatch_locked(context, &dispatch, &error)) {
+            return fail(FE_ERROR_INVALID_HANDLE, error);
+        }
+        Feather::Luisa::DeviceInfo selected;
+        const auto device_index = dispatch.device_index == UINT32_MAX ? 0u : dispatch.device_index;
+        if (!Feather::Luisa::ValidateDevice(dispatch.runtime_directory, dispatch.backend_name,
+                                            device_index, &selected, &error)) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                        error.empty() ? "Luisa device initialization failed." : error);
+        }
         return ok();
     });
 }
@@ -12433,15 +5083,11 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
         if (g_contexts.find(context) == g_contexts.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
-#if FEATHER_HAS_LUISA
         Feather::Luisa::Shutdown(context);
-#endif
         std::erase_if(g_fences, [context](const auto& entry) { return entry.second.context == context; });
         std::erase_if(g_streams, [context](const auto& entry) { return entry.second.context == context; });
         for (auto it = g_pipelines.begin(); it != g_pipelines.end();) {
             if (it->second.context == context) {
-                // Explicit contexts never create EasyGPU pipeline objects.
-                it->second.backend_cache.clear();
                 it = g_pipelines.erase(it);
             } else {
                 ++it;
@@ -12449,7 +5095,6 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
         }
         for (auto it = g_kernels.begin(); it != g_kernels.end();) {
             if (it->second.context == context) {
-                erase_compute_kernel_cache(it->first);
                 it->second.ad_gradients.clear();
                 it = g_kernels.erase(it);
             } else {
@@ -12462,13 +5107,11 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
         g_contexts.erase(context);
         return ok();
     }
-#if FEATHER_HAS_LUISA
     try {
         Feather::Luisa::Shutdown();
     } catch (...) {
         return fail(FE_ERROR_UNKNOWN, "Luisa runtime shutdown failed.");
     }
-#endif
     return ok();
 }
 
@@ -12503,14 +5146,7 @@ FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeDeviceInfo
 }
 
 FE_API FeResult fe_runtime_flush_caches(void) {
-    return protect([&] {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend != nullptr) {
-            backend->FlushPipelineCache();
-        }
-        return ok();
-    });
+    return ok();
 }
 
 FE_API FeResult fe_runtime_shutdown(void) {
@@ -12541,67 +5177,57 @@ FE_API FeResult fe_runtime_process_exit(void) {
 
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (out_backend == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "out_backend must not be null.");
         }
-        auto& runtime_context = GPU::Runtime::Context::GetInstance();
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        std::lock_guard<std::mutex> lock(g_mutex);
+        Feather::Luisa::DispatchInputs dispatch;
+        std::string error;
+        if (!context_exists_locked(context) || !configure_luisa_dispatch_locked(context, &dispatch, &error)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
-
-        *out_backend = map_backend_type(runtime_context.GetBackendType());
-        if (*out_backend == 0) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend type is unavailable.");
+        if (dispatch.backend_name != "vk") {
+            *out_backend = 0u;
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "The legacy backend-type ABI cannot represent this Luisa backend.");
         }
-
+        *out_backend = 2u;
         return ok();
     });
 }
 
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps) {
     return protect([&] {
-        if (context != kDefaultContext) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
         if (out_caps == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "out_caps must not be null.");
         }
-        auto& runtime_context = GPU::Runtime::Context::GetInstance();
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        std::lock_guard<std::mutex> lock(g_mutex);
+        Feather::Luisa::DispatchInputs dispatch;
+        std::string error;
+        if (!context_exists_locked(context) || !configure_luisa_dispatch_locked(context, &dispatch, &error)) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
-
-        const auto caps = backend->GetCaps();
-        int max_x = 0;
-        int max_y = 0;
-        int max_z = 0;
-        runtime_context.GetMaxWorkGroupSize(max_x, max_y, max_z);
+        if (dispatch.backend_name != "vk") {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "The legacy capability ABI cannot represent this Luisa backend.");
+        }
 #if FEATHER_BUILD_WINDOW
         constexpr uint32_t supports_window = 1u;
 #else
         constexpr uint32_t supports_window = 0u;
 #endif
         *out_caps = FeBackendCaps{
-            map_backend_type(runtime_context.GetBackendType()),
-            static_cast<uint32_t>(std::max(max_x, 0)),
-            static_cast<uint32_t>(std::max(max_y, 0)),
-            static_cast<uint32_t>(std::max(max_z, 0)),
-            caps.supportsGraphics ? 1u : 0u,
-            0u,
-            0u,
+            2u,
+            1u,
+            1u,
+            1u,
+            1u,
+            1u,
+            1u,
             supports_window,
-            caps.supportsDepthClamp ? 1u : 0u,
-            caps.supportsNonFillPolygonMode ? 1u : 0u
+            1u,
+            1u
         };
-        if (out_caps->backend_type == 0) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend type is unavailable.");
-        }
-
         return ok();
     });
 }
@@ -12773,34 +5399,18 @@ FE_API FeResult fe_window_create(const FeWindowDesc* desc, FeWindowHandle* out_w
             return fail(FE_ERROR_INVALID_ARGUMENT, "Window dimensions must be positive.");
         }
 
-        const auto* compute_graphics = std::getenv("FEATHER_GRAPHICS_COMPUTE");
-        auto native_presentation = compute_graphics != nullptr && compute_graphics[0] != '\0' &&
-                                   std::strcmp(compute_graphics, "0") != 0 && desc->visible != 0u;
-#if FEATHER_HAS_LUISA
-        native_presentation = native_presentation && configured_luisa_presentation_backend_locked();
-#else
-        native_presentation = false;
-#endif
-        if (!native_presentation) {
-            auto* backend = require_backend();
-            if (backend == nullptr || backend->GetType() != GPU::Backend::BackendType::Vulkan) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
-                            "Feather window support requires the EasyGPU Vulkan backend in this build.");
-            }
-        }
-
-        GPU::Window::WindowConfig config;
+        Feather::Window::Config config;
         config.width = desc->width;
         config.height = desc->height;
         config.title = desc->title == nullptr ? "Feather" : desc->title;
         config.resizable = desc->resizable != 0;
         config.visible = desc->visible != 0;
         config.vsync = desc->vsync != 0;
-        config.highDPI = desc->high_dpi != 0;
-        config.centerOnCreate = desc->center_on_create != 0;
+        config.high_dpi = desc->high_dpi != 0;
+        config.center_on_create = desc->center_on_create != 0;
 
         WindowState state;
-        state.window = std::make_unique<Feather::WindowHost>(config, native_presentation);
+        state.window = std::make_unique<Feather::WindowHost>(config);
 
         std::lock_guard<std::mutex> lock(g_mutex);
         const auto handle = next_handle();
@@ -12937,7 +5547,7 @@ FE_API FeResult fe_window_poll_event(FeWindowHandle window, FeWindowEvent* out_e
         if (it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
         }
-        GPU::Window::WindowEvent event;
+        Feather::Window::Event event;
         if (!it->second.window->PollEvent(event)) {
             *out_has_event = false;
             *out_event = FeWindowEvent{};
@@ -13028,7 +5638,7 @@ FE_API FeResult fe_window_is_key_down(FeWindowHandle window, uint32_t key, bool*
         if (it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
         }
-        *out_is_down = it->second.window->IsKeyDown(static_cast<GPU::Window::Key>(static_cast<int32_t>(key)));
+        *out_is_down = it->second.window->IsKeyDown(static_cast<Feather::Window::Key>(static_cast<int32_t>(key)));
         return ok();
 #else
         (void)window;
@@ -13050,7 +5660,7 @@ FE_API FeResult fe_window_is_mouse_down(FeWindowHandle window, uint32_t mouse_bu
         if (it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
         }
-        *out_is_down = it->second.window->IsMouseDown(static_cast<GPU::Window::MouseButton>(mouse_button));
+        *out_is_down = it->second.window->IsMouseDown(static_cast<Feather::Window::MouseButton>(mouse_button));
         return ok();
 #else
         (void)window;
@@ -13121,18 +5731,10 @@ FE_API FeResult fe_window_present_pixels(FeWindowHandle window, const uint32_t* 
         if (it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
         }
-        if (it->second.window->SupportsNativePresentation()) {
-#if FEATHER_HAS_LUISA
-            const auto result = present_host_pixels_locked(
-                kDefaultContext, window, *it->second.window, pixels, width, height);
-            if (result == FE_OK) it->second.native_contexts.emplace(kDefaultContext);
-            return result;
-#else
-            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
-#endif
-        }
-        it->second.window->Present(pixels, width, height);
-        return ok();
+        const auto result = present_host_pixels_locked(
+            kDefaultContext, window, *it->second.window, pixels, width, height);
+        if (result == FE_OK) it->second.native_contexts.emplace(kDefaultContext);
+        return result;
 #else
         (void)window;
         (void)pixels;
@@ -13157,9 +5759,6 @@ FE_API FeResult fe_texture_presenter_create(FeWindowHandle window, FeTexturePres
 
         TexturePresenterState state;
         state.window_handle = window;
-        if (auto* easy_gpu_window = window_it->second.window->EasyGpuWindow(); easy_gpu_window != nullptr) {
-            state.presenter = std::make_unique<GPU::Window::TexturePresenter>(*easy_gpu_window);
-        }
         const auto handle = next_handle();
         g_texture_presenters.emplace(handle, std::move(state));
         *out_presenter = handle;
@@ -13216,10 +5815,8 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             return fail(FE_ERROR_INVALID_HANDLE, "Texture presenter window is no longer available.");
         }
         auto& texture_state = texture_it->second;
-        const auto native_presentation = window_it->second.window->SupportsNativePresentation();
 
-#if FEATHER_HAS_LUISA
-        if (native_presentation && mode != 1u) {
+        if (mode != 1u && texture_state.luisa_uploaded) {
             Feather::Luisa::NativeTextureInfo native_texture;
             std::string error;
             const auto start = std::chrono::steady_clock::now();
@@ -13239,9 +5836,8 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             }
         }
 
-        // Keep cross-runtime presentation portable: Luisa completes readback into a bounded ring
-        // while EasyGPU presents the newest completed frame. This avoids synchronizing the Luisa
-        // stream in the current frame and works for Metal, Vulkan, and DX backends alike.
+        // When the selected backend cannot create a swapchain for the native window,
+        // retain the bounded asynchronous readback ring and upload through Luisa.
         auto& async = presenter_it->second.async_textures[texture];
         if (async == nullptr) async = std::make_shared<AsyncTexturePresentation>();
         std::shared_ptr<AsyncPresentationFrame> newest;
@@ -13261,7 +5857,6 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
                 }
             }
             texture_state.host_dirty = true;
-            texture_state.device_dirty = false;
             texture_state.luisa_dirty = presented_revision != texture_state.content_revision;
             texture_state.mipmaps_dirty = texture_state.mipmaps_requested && texture_state.mip_levels > 1u;
             async->has_presented_frame = true;
@@ -13277,7 +5872,6 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             }
             texture_state.luisa_dirty = false;
             texture_state.host_dirty = true;
-            texture_state.device_dirty = false;
             texture_state.mipmaps_dirty = texture_state.mipmaps_requested && texture_state.mip_levels > 1u;
             async->last_scheduled_revision = texture_state.content_revision;
             async->has_presented_frame = true;
@@ -13306,56 +5900,15 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
                 trace_graphics_step("presenter queued async Luisa frame");
             }
         }
-#endif
-
-        if (native_presentation) {
-#if FEATHER_HAS_LUISA
-            std::vector<uint32_t> converted;
-            const uint32_t* pixels = nullptr;
-            const auto prepared = prepare_texture_pixels_locked(texture_state, &converted, &pixels);
-            if (prepared != FE_OK) return prepared;
-            const auto result = present_host_pixels_locked(
-                texture_state.context, presenter, *window_it->second.window,
-                pixels, texture_state.width, texture_state.height);
-            if (result == FE_OK) presenter_it->second.native_contexts.emplace(texture_state.context);
-            return result;
-#else
-            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
-#endif
-        }
-
-        if (mode != 1) {
-            GPU::Runtime::AutoInitContext();
-            GPU::Runtime::Context::GetInstance().MakeCurrent();
-            auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend != nullptr) {
-                try {
-                    if (texture_it->second.host_dirty) {
-                        trace_graphics_step("presenter uploads completed texture");
-                    }
-                    const auto backend_texture = ensure_easygpu_texture(texture_it->second, *backend);
-                    if (backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
-                        if (presenter_it->second.presenter->PresentTextureHandle(backend_texture)) {
-                            trace_graphics_step("presenter direct present");
-                            return ok();
-                        }
-                        if (mode == 2) {
-                            return fail(FE_ERROR_UNSUPPORTED,
-                                        "Direct texture presentation is unavailable for this window/backend.");
-                        }
-                    }
-                } catch (...) {
-                    if (mode == 2) {
-                        throw;
-                    }
-                }
-            } else if (mode == 2) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
-                            "EasyGPU backend is unavailable for direct texture presentation.");
-            }
-        }
-
-        return present_texture_cpu_locked(*presenter_it->second.presenter, texture_state);
+        std::vector<uint32_t> converted;
+        const uint32_t* pixels = nullptr;
+        const auto prepared = prepare_texture_pixels_locked(texture_state, &converted, &pixels);
+        if (prepared != FE_OK) return prepared;
+        const auto result = present_host_pixels_locked(
+            texture_state.context, presenter, *window_it->second.window,
+            pixels, texture_state.width, texture_state.height);
+        if (result == FE_OK) presenter_it->second.native_contexts.emplace(texture_state.context);
+        return result;
 #else
         (void)presenter;
         (void)texture;
@@ -13381,18 +5934,10 @@ FE_API FeResult fe_texture_presenter_present_pixels(FeTexturePresenterHandle pre
         if (window_it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Texture presenter window is no longer available.");
         }
-        if (window_it->second.window->SupportsNativePresentation()) {
-#if FEATHER_HAS_LUISA
-            const auto result = present_host_pixels_locked(
-                kDefaultContext, presenter, *window_it->second.window, pixels, width, height);
-            if (result == FE_OK) presenter_it->second.native_contexts.emplace(kDefaultContext);
-            return result;
-#else
-            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
-#endif
-        }
-        presenter_it->second.presenter->Present(pixels, width, height);
-        return ok();
+        const auto result = present_host_pixels_locked(
+            kDefaultContext, presenter, *window_it->second.window, pixels, width, height);
+        if (result == FE_OK) presenter_it->second.native_contexts.emplace(kDefaultContext);
+        return result;
 #else
         (void)presenter;
         (void)pixels;
@@ -13443,19 +5988,10 @@ FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer) {
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string error;
         if (!synchronize_luisa_context_locked(it->second.context, &error)) {
             return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
         }
-#endif
-
-        if (it->second.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
-            if (auto* backend = GPU::Runtime::Context::GetBackend(); backend != nullptr) {
-                backend->DestroyBuffer(it->second.backend_buffer);
-            }
-        }
-
         g_buffers.erase(it);
         return ok();
     });
@@ -13474,15 +6010,12 @@ FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_
         if (offset + size > it->second.bytes.size()) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Upload range exceeds buffer size.");
         }
-#if FEATHER_HAS_LUISA
         std::string error;
         if (!synchronize_luisa_context_locked(it->second.context, &error)) {
             return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
         }
-#endif
         std::memcpy(it->second.bytes.data() + offset, data, static_cast<size_t>(size));
         it->second.host_dirty = true;
-        it->second.device_dirty = false;
         it->second.luisa_uploaded = false;
         ++it->second.content_revision;
         return ok();
@@ -13502,21 +6035,10 @@ FE_API FeResult fe_buffer_download(FeBufferHandle buffer, uint64_t offset, uint6
         if (offset + size > it->second.bytes.size()) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Download range exceeds buffer size.");
         }
-#if FEATHER_HAS_LUISA
         std::string error;
         if (!synchronize_luisa_context_locked(it->second.context, &error)) {
             return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
         }
-#endif
-        if (it->second.device_dirty) {
-            auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend == nullptr) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for buffer download.");
-            }
-
-            download_easygpu_buffer(it->second, *backend);
-        }
-
         std::memcpy(out_data, it->second.bytes.data() + offset, static_cast<size_t>(size));
         return ok();
     });
@@ -13532,21 +6054,10 @@ FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t, void** out_ptr) {
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string error;
         if (!synchronize_luisa_context_locked(it->second.context, &error)) {
             return fail(FE_ERROR_UNKNOWN, error.empty() ? "Luisa resource synchronization failed." : error);
         }
-#endif
-        if (it->second.device_dirty) {
-            auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend == nullptr) {
-                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for buffer mapping.");
-            }
-
-            download_easygpu_buffer(it->second, *backend);
-        }
-
         *out_ptr = it->second.bytes.data();
         it->second.host_dirty = true;
         it->second.luisa_uploaded = false;
@@ -13635,21 +6146,11 @@ FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string synchronization_error;
         if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
             return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
                                                                         : synchronization_error);
         }
-#endif
-
-        // Destroy the backend GPU texture if one was created.
-        if (it->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
-            if (auto* backend = GPU::Runtime::Context::GetBackend(); backend != nullptr) {
-                backend->DestroyTexture(it->second.backend_texture);
-            }
-        }
-
         g_textures.erase(it);
         return ok();
     });
@@ -13666,7 +6167,6 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string synchronization_error;
         if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
             return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
@@ -13681,7 +6181,6 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
             }
             it->second.luisa_dirty = false;
         }
-#endif
         trace_graphics_step("upload texture2d");
         const auto pixel = pixel_size(it->second.pixel_format);
         if (it->second.depth != 1 || x + width > it->second.width || y + height > it->second.height) {
@@ -13694,7 +6193,6 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
                         static_cast<size_t>(width) * pixel);
         }
         it->second.host_dirty = true;
-        it->second.device_dirty = false;
         it->second.luisa_uploaded = false;
         it->second.mipmaps_dirty = it->second.mipmaps_requested && it->second.mip_levels > 1;
         return ok();
@@ -13714,7 +6212,6 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
         }
 
         // If the device has newer data, download it first.
-#if FEATHER_HAS_LUISA
         std::string synchronization_error;
         if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
             return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
@@ -13728,13 +6225,6 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
                             error.empty() ? "Luisa texture download failed." : error);
             }
             it->second.luisa_dirty = false;
-        }
-#endif
-        if (it->second.device_dirty) {
-            auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend != nullptr) {
-                download_easygpu_texture(it->second, *backend);
-            }
         }
         const auto pixel = pixel_size(it->second.pixel_format);
         if (it->second.depth != 1 || x + width > it->second.width || y + height > it->second.height) {
@@ -13762,14 +6252,20 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string synchronization_error;
         if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
             return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
                                                                         : synchronization_error);
         }
-#endif
-
+        if (it->second.luisa_dirty) {
+            std::string error;
+            if (!Feather::Luisa::DownloadResidentTexture(
+                    it->second.context, texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            error.empty() ? "Luisa 3D texture upload could not preserve resident data." : error);
+            }
+            it->second.luisa_dirty = false;
+        }
         const auto pixel = pixel_size(it->second.pixel_format);
         if (x + width > it->second.width || y + height > it->second.height || z + depth > it->second.depth) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture upload range exceeds texture dimensions.");
@@ -13786,7 +6282,6 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
         }
 
         it->second.host_dirty = true;
-        it->second.device_dirty = false;
         it->second.luisa_uploaded = false;
         it->second.mipmaps_dirty = it->second.mipmaps_requested && it->second.mip_levels > 1;
         return ok();
@@ -13805,21 +6300,20 @@ FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint3
         if (it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
-#if FEATHER_HAS_LUISA
         std::string synchronization_error;
         if (!synchronize_luisa_context_locked(it->second.context, &synchronization_error)) {
             return fail(FE_ERROR_UNKNOWN, synchronization_error.empty() ? "Luisa resource synchronization failed."
                                                                         : synchronization_error);
         }
-#endif
-
-        if (it->second.device_dirty) {
-            auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend != nullptr) {
-                download_easygpu_texture(it->second, *backend);
+        if (it->second.luisa_dirty) {
+            std::string error;
+            if (!Feather::Luisa::DownloadResidentTexture(
+                    it->second.context, texture, it->second.bytes.data(), it->second.bytes.size(), &error)) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            error.empty() ? "Luisa 3D texture download failed." : error);
             }
+            it->second.luisa_dirty = false;
         }
-
         const auto pixel = pixel_size(it->second.pixel_format);
         if (x + width > it->second.width || y + height > it->second.height || z + depth > it->second.depth) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture download range exceeds texture dimensions.");
@@ -13864,19 +6358,6 @@ FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture) {
         state.mipmaps_requested = true;
         state.mipmaps_dirty = true;
         state.luisa_uploaded = false;
-
-        GPU::Runtime::AutoInitContext();
-        GPU::Runtime::Context::GetInstance().MakeCurrent();
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for mipmap generation.");
-        }
-
-        const auto backend_texture = ensure_easygpu_texture(state, *backend);
-        if (backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU texture could not be created for mipmap generation.");
-        }
-
         return ok();
     });
 }
@@ -13943,8 +6424,7 @@ FE_API FeResult fe_sampler_create(FeContextHandle context, const FeSamplerDesc* 
         if (desc == nullptr || out_sampler == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Sampler descriptor and output handle are required.");
         }
-        GPU::Backend::SamplerDesc mapped_sampler;
-        if (!map_sampler_desc(*desc, &mapped_sampler)) {
+        if (!validate_sampler_desc(*desc)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Sampler descriptor contains an unsupported enum value.");
         }
 
@@ -13992,9 +6472,7 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
         state.debug_name = copy_debug_name(desc->debug_name, "Kernel");
         state.auto_diff = desc->auto_diff;
         state.bounds_check = desc->bounds_check;
-        state.execution_backend = context == kDefaultContext
-                                      ? FE_EXECUTION_BACKEND_EASYGPU
-                                      : FE_EXECUTION_BACKEND_LUISA;
+        state.execution_backend = FE_EXECUTION_BACKEND_LUISA;
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!context_exists_locked(context)) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
@@ -14019,7 +6497,6 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
         }
-        erase_compute_kernel_cache(kernel);
         release_ad_gradient_buffers(it->second);
         g_kernels.erase(it);
         return ok();
@@ -14079,13 +6556,12 @@ FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t 
     if (it == g_kernels.end()) {
         return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
     }
-    if (backend != FE_EXECUTION_BACKEND_EASYGPU && backend != FE_EXECUTION_BACKEND_LUISA) {
+    if (backend != FE_EXECUTION_BACKEND_LEGACY && backend != FE_EXECUTION_BACKEND_LUISA) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Unknown kernel execution backend.");
     }
-    if (it->second.context != kDefaultContext && backend != FE_EXECUTION_BACKEND_LUISA) {
-        return fail(FE_ERROR_UNSUPPORTED, "Explicit GPU contexts execute through their selected Luisa device.");
-    }
-    it->second.execution_backend = static_cast<FeExecutionBackend>(backend);
+    // Preserve the stage-2 ABI value accepted by the managed compatibility
+    // layer while making both entry points execute on the context's LC device.
+    it->second.execution_backend = FE_EXECUTION_BACKEND_LUISA;
     return ok();
 }
 
@@ -14100,10 +6576,6 @@ FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* 
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
         }
         auto& kernel_state = it->second;
-        if (size > kernel_state.push_constants.capacity()) {
-            erase_compute_kernel_cache(kernel);
-        }
-
         kernel_state.push_constants.resize(static_cast<size_t>(size));
         if (size != 0) {
             std::memcpy(kernel_state.push_constants.data(), data, static_cast<size_t>(size));
@@ -14140,33 +6612,10 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         FeResult result = FE_OK;
 
         it->second.last_dispatch_path = FE_DISPATCH_PATH_NONE;
-        if (it->second.execution_backend == FE_EXECUTION_BACKEND_LUISA) {
-            const auto fence_key = wait ? 0u : next_handle();
-            result = dispatch_luisa_kernel(kernel, it->second, group_x, group_y, group_z, logical_x, logical_y,
-                                           logical_z, wait, 0u, fence_key);
-            it->second.last_dispatch_path =
-                result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
-        // Use the AD dispatch path for AutoDiff kernels, which sets up the GradientTape
-        // and generates the backward pass after the forward dispatch.
-        } else if (it->second.auto_diff) {
-            if (try_dispatch_easygpu_ad_kernel(it->second, group_x, group_y, group_z, wait)) {
-                it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
-            } else {
-                it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
-                result = g_last_result == FE_OK ? fail(FE_ERROR_UNSUPPORTED, "AD dispatch failed.") : g_last_result;
-            }
-        } else if (try_dispatch_easygpu_buffer_kernel(kernel, it->second, group_x, group_y, group_z, wait)) {
-            it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
-        } else if (has_typed_section7_semantics(it->second)) {
-            it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
-            result = g_last_error.empty()
-                         ? fail(FE_ERROR_UNSUPPORTED, "Typed EasyGPU dispatch rejected the section 7 kernel.")
-                         : FE_ERROR_UNSUPPORTED;
-        } else {
-            result = dispatch_simple_buffer_assignment(it->second, group_x, group_y, group_z);
-            it->second.last_dispatch_path =
-                result == FE_OK ? FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK : FE_DISPATCH_PATH_REJECTED;
-        }
+        const auto fence_key = wait ? 0u : next_handle();
+        result = dispatch_luisa_kernel(kernel, it->second, group_x, group_y, group_z, logical_x, logical_y,
+                                       logical_z, wait, 0u, fence_key);
+        it->second.last_dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
 
         if (should_profile && result == FE_OK) {
             const auto elapsed =
@@ -14219,48 +6668,26 @@ FE_API FeResult fe_kernel_dispatch_stream(FeKernelHandle kernel, FeStreamHandle 
 
 FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size, size_t* out_required_size) {
     return protect([&] {
-        KernelState state;
-        {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            const auto it = g_kernels.find(kernel);
-            if (it == g_kernels.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-            }
-
-            state = it->second;
-        }
-
-        std::string source;
-        const auto result = build_easygpu_kernel_source(state, &source);
-        if (result != FE_OK) {
-            return result;
-        }
-
-        return write_string(source, buffer, buffer_size, out_required_size);
+        (void)buffer;
+        (void)buffer_size;
+        (void)out_required_size;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_kernels.find(kernel) == g_kernels.end())
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        return fail(FE_ERROR_UNSUPPORTED, "GLSL inspection is unavailable on the Luisa-only runtime.");
     });
 }
 
 FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                              size_t* out_required_size) {
     return protect([&] {
-        KernelState state;
-        {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            const auto it = g_kernels.find(kernel);
-            if (it == g_kernels.end()) {
-                return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-            }
-
-            state = it->second;
-        }
-
-        std::string source;
-        if (!try_build_easygpu_optimized_kernel_source(state, &source)) {
-            return fail(FE_ERROR_UNSUPPORTED,
-                        "Kernel IR is not supported by EasyGPU optimized GLSL inspection on this backend.");
-        }
-
-        return write_string(source, buffer, buffer_size, out_required_size);
+        (void)buffer;
+        (void)buffer_size;
+        (void)out_required_size;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_kernels.find(kernel) == g_kernels.end())
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        return fail(FE_ERROR_UNSUPPORTED, "Optimized GLSL inspection is unavailable on the Luisa-only runtime.");
     });
 }
 
@@ -14318,7 +6745,7 @@ FE_API FeResult fe_kernel_get_ad_gradient_info(FeKernelHandle kernel, uint32_t i
         copy_fixed_c_string(out_info->name, sizeof(out_info->name), gradient.name);
         copy_fixed_c_string(out_info->resource_name, sizeof(out_info->resource_name), gradient.resource_name);
         copy_fixed_c_string(out_info->element_type, sizeof(out_info->element_type), gradient.element_type);
-        copy_fixed_c_string(out_info->easygpu_name, sizeof(out_info->easygpu_name), gradient.easygpu_name);
+        copy_fixed_c_string(out_info->native_name, sizeof(out_info->native_name), gradient.native_name);
         out_info->source_binding = gradient.source_binding;
         out_info->gradient_binding = gradient.gradient_binding;
         out_info->element_count = gradient.element_count;
@@ -14345,33 +6772,17 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
             return fail(FE_ERROR_INVALID_ARGUMENT, "AD gradient index is out of range.");
         }
 
-        auto& gradient = it->second.ad_gradients[index];
+        const auto& gradient = it->second.ad_gradients[index];
         if (offset > gradient.byte_size || size > gradient.byte_size - offset) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "AD gradient read range exceeds gradient buffer size.");
         }
         if (size == 0) {
             return ok();
         }
-        if (!gradient.host_bytes.empty()) {
-            std::memcpy(out_data, gradient.host_bytes.data() + static_cast<size_t>(offset), static_cast<size_t>(size));
-            return ok();
-        }
-        if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
+        if (gradient.host_bytes.size() < gradient.byte_size) {
             return fail(FE_ERROR_INVALID_HANDLE, "AD gradient buffer is not available.");
         }
-
-        GPU::Runtime::AutoInitContext();
-        GPU::Runtime::Context::GetInstance().MakeCurrent();
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD gradient readback.");
-        }
-
-        backend->DownloadBuffer(
-            gradient.backend_buffer,
-            static_cast<size_t>(offset),
-            static_cast<size_t>(size),
-            out_data);
+        std::memcpy(out_data, gradient.host_bytes.data() + static_cast<size_t>(offset), static_cast<size_t>(size));
         return ok();
     });
 }
@@ -14397,44 +6808,24 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
                         "Cannot reduce a gradient into a buffer from a different GPU context.");
         }
 
-        if (destination_size == 0) {
-            return ok();
-        }
-        if (kernel_it->second.context != kDefaultContext) {
-            return fail(FE_ERROR_UNSUPPORTED,
-                        "Device-side AD gradient reduction is not yet available on explicit GPU contexts.");
-        }
-
-        GPU::Runtime::AutoInitContext();
-        GPU::Runtime::Context::GetInstance().MakeCurrent();
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD gradient reduction.");
-        }
-
-        auto& gradient = kernel_it->second.ad_gradients[index];
-        if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE && !gradient.host_bytes.empty()) {
-            GPU::Backend::BufferDesc desc;
-            desc.sizeInBytes = gradient.host_bytes.size();
-            desc.mode = GPU::Backend::BufferMode::ReadWrite;
-            desc.initialData = gradient.host_bytes.data();
-            gradient.backend_buffer = backend->CreateBuffer(desc);
-            if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
-                return fail(FE_ERROR_OUT_OF_MEMORY, "EasyGPU failed to stage Luisa AD gradients for device reduction.");
-            }
-        }
-
+        if (destination_size == 0) return ok();
+        const auto& gradient = kernel_it->second.ad_gradients[index];
+        Feather::Luisa::DispatchInputs dispatch{};
         std::string error;
-        if (!dispatch_ad_gradient_reduce_to_buffer(
-                gradient,
-                destination_it->second,
-                destination_offset,
-                destination_size,
-                *backend,
-                &error)) {
-            return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "AD gradient could not be reduced to the destination buffer." : error.c_str());
+        if (!configure_luisa_dispatch_locked(kernel_it->second.context, &dispatch, &error))
+            return fail(FE_ERROR_INVALID_HANDLE, error);
+        if (!Feather::Luisa::ReduceAdGradient(
+                dispatch.context_key, dispatch.runtime_directory, dispatch.backend_name,
+                dispatch.device_index, gradient.host_bytes, gradient.element_count,
+                std::max(gradient.component_count, 1u), destination,
+                &destination_it->second.bytes, destination_offset, destination_size,
+                !destination_it->second.luisa_uploaded, &error)) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        error.empty() ? "AD gradient could not be reduced to the destination buffer." : error);
         }
-
+        destination_it->second.host_dirty = false;
+        destination_it->second.luisa_uploaded = true;
+        ++destination_it->second.content_revision;
         return ok();
     });
 }
@@ -14479,42 +6870,36 @@ FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, con
         if (fragment_validation != FE_OK) {
             return fail(fragment_validation, "Graphics pipeline fragment IR failed Feather IR validation.");
         }
-        if (desc->color_attachment_count == 0 || desc->color_attachment_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
+        if (desc->color_attachment_count == 0 || desc->color_attachment_count > kMaximumColorAttachments) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline color attachment count must be between 1 and 8.");
         }
         if (desc->color_blend_attachment_count != 0 &&
             desc->color_blend_attachment_count != desc->color_attachment_count) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline color blend attachment count must match color attachment count.");
         }
-        GPU::Backend::CompareOp unused_compare;
-        GPU::Backend::StencilFaceState unused_face;
-        GPU::Backend::BlendFactor unused_factor;
-        GPU::Backend::BlendOp unused_blend_op;
-        GPU::Backend::CullMode unused_cull;
-        GPU::Backend::FrontFace unused_front_face;
-        GPU::Backend::PolygonMode unused_polygon_mode;
-        GPU::Backend::ColorAttachmentBlendState unused_attachment_blend;
-        GraphicsPipelineState validation_state;
-        validation_state.cull_mode = desc->cull_mode;
-        validation_state.front_face = desc->front_face;
-        validation_state.polygon_mode = desc->polygon_mode;
-        if (!map_graphics_compare_op(desc->depth_compare, &unused_compare) ||
-            !map_graphics_stencil_face(desc->stencil_front, &unused_face) ||
-            !map_graphics_stencil_face(desc->stencil_back, &unused_face) ||
-            !map_graphics_blend_factor(desc->blend_src_color, &unused_factor) ||
-            !map_graphics_blend_factor(desc->blend_dst_color, &unused_factor) ||
-            !map_graphics_blend_factor(desc->blend_src_alpha, &unused_factor) ||
-            !map_graphics_blend_factor(desc->blend_dst_alpha, &unused_factor) ||
-            !map_graphics_blend_op(desc->blend_color_op, &unused_blend_op) ||
-            !map_graphics_blend_op(desc->blend_alpha_op, &unused_blend_op) ||
-            !map_graphics_raster_state(validation_state, &unused_cull, &unused_front_face, &unused_polygon_mode)) {
+        const auto valid_stencil_face = [](const FeGraphicsStencilFaceDesc& face) noexcept {
+            return face.fail_op <= 7u && face.pass_op <= 7u &&
+                   face.depth_fail_op <= 7u && face.compare_op <= 7u;
+        };
+        const auto valid_blend_attachment = [](const FeGraphicsColorBlendAttachmentDesc& blend) noexcept {
+            return blend.src_color <= 9u && blend.dst_color <= 9u &&
+                   blend.src_alpha <= 9u && blend.dst_alpha <= 9u &&
+                   blend.color_op <= 4u && blend.alpha_op <= 4u &&
+                   (blend.write_mask & ~15u) == 0u;
+        };
+        if (desc->depth_compare > 7u || !valid_stencil_face(desc->stencil_front) ||
+            !valid_stencil_face(desc->stencil_back) || desc->blend_src_color > 9u ||
+            desc->blend_dst_color > 9u || desc->blend_src_alpha > 9u ||
+            desc->blend_dst_alpha > 9u || desc->blend_color_op > 4u ||
+            desc->blend_alpha_op > 4u || desc->cull_mode > 3u ||
+            desc->front_face > 1u || desc->polygon_mode > 2u) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline descriptor contains an unsupported state enum value.");
         }
         if ((desc->blend_write_mask & ~15u) != 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline blend write mask contains unsupported bits.");
         }
         for (uint32_t i = 0; i < desc->color_blend_attachment_count; ++i) {
-            if (!map_graphics_color_blend_attachment(desc->color_blend_attachments[i], &unused_attachment_blend)) {
+            if (!valid_blend_attachment(desc->color_blend_attachments[i])) {
                 return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics pipeline color blend attachment descriptor contains an unsupported value.");
             }
         }
@@ -14591,7 +6976,6 @@ FE_API FeResult fe_graphics_pipeline_destroy(FeGraphicsPipelineHandle pipeline) 
         if (it == g_pipelines.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
         }
-        destroy_graphics_pipeline_cache(it->second);
         g_pipelines.erase(it);
         return ok();
     });
@@ -14707,8 +7091,8 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
         if (desc == nullptr || desc->color_targets == nullptr || desc->color_target_count == 0) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw descriptor requires at least one color target.");
         }
-        if (desc->color_target_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw color target count exceeds EasyGPU limits.");
+        if (desc->color_target_count > kMaximumColorAttachments) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw color target count exceeds Feather limits.");
         }
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_pipelines.find(pipeline);
@@ -14756,22 +7140,13 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
 
         const auto should_profile = profiler_enabled_locked();
         const auto start = std::chrono::steady_clock::now();
-        FeResult result = FE_ERROR_UNSUPPORTED;
-        FeDispatchPath dispatch_path = FE_DISPATCH_PATH_REJECTED;
-        const auto* compute_raster = std::getenv("FEATHER_GRAPHICS_COMPUTE");
 #if FEATHER_HAS_LUISA
-        if (it->second.context != kDefaultContext ||
-            (compute_raster != nullptr && compute_raster[0] != '\0' && std::strcmp(compute_raster, "0") != 0)) {
-            result = draw_graphics_pipeline_compute_raster(it->second, *desc);
-            dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
-        } else
+        const auto result = draw_graphics_pipeline_compute_raster(it->second, *desc);
 #endif
-        {
-            result = draw_graphics_pipeline_easygpu(it->second, *desc);
-            dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_TYPED_EASYGPU : FE_DISPATCH_PATH_REJECTED;
-        }
-
-        it->second.last_dispatch_path = dispatch_path;
+#if !FEATHER_HAS_LUISA
+        const auto result = fail(FE_ERROR_BACKEND_UNAVAILABLE, "Feather was built without LuisaCompute.");
+#endif
+        it->second.last_dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_LUISA : FE_DISPATCH_PATH_REJECTED;
         if (should_profile && result == FE_OK) {
             const auto elapsed =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();

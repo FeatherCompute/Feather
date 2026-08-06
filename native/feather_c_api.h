@@ -47,7 +47,7 @@ typedef enum FeResult {
 
 typedef enum FeDispatchPath {
     FE_DISPATCH_PATH_NONE = 0,
-    FE_DISPATCH_PATH_TYPED_EASYGPU = 1,
+    FE_DISPATCH_PATH_LEGACY = 1,
     FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK = 2,
     FE_DISPATCH_PATH_GRAPHICS_FALLBACK = 3,
     FE_DISPATCH_PATH_REJECTED = 4,
@@ -55,7 +55,7 @@ typedef enum FeDispatchPath {
 } FeDispatchPath;
 
 typedef enum FeExecutionBackend {
-    FE_EXECUTION_BACKEND_EASYGPU = 0,
+    FE_EXECUTION_BACKEND_LEGACY = 0,
     FE_EXECUTION_BACKEND_LUISA = 1
 } FeExecutionBackend;
 
@@ -265,7 +265,7 @@ typedef struct FeADGradientInfo {
     char name[128];
     char resource_name[128];
     char element_type[64];
-    char easygpu_name[64];
+    char native_name[64];
     uint32_t source_binding;
     uint32_t gradient_binding;
     uint32_t element_count;

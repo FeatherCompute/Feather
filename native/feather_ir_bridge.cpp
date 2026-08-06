@@ -75,7 +75,7 @@ bool validate_instruction_structure(const unsigned char* instructions, uint32_t 
         }
 
         // The IR stream is linear, so a tiny block stack preserves enough structure for native validation
-        // before the full EasyGPU block/function builder is linked in.
+        // before a complete block/function builder is linked in.
         if (opcode == kOpcodeBeginBlock) {
             block_stack.push_back(pending_block_kind);
             pending_block_kind = kBlockKindGeneric;

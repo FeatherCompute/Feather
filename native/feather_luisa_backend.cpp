@@ -70,8 +70,8 @@ constexpr uint8_t kAccessReadWrite = 3;
 void ensure_luisa_spirv_optimization_preset() noexcept {
     static std::once_flag once;
     std::call_once(once, [] {
-        // EasyGPU's production Ultra preset is stronger than SPIRV-Tools' maintained
-        // -O recipe. LC 0.9.0 has no Ultra enum, so use its strongest stable `full`
+        // LC 0.9.0 has no high-level optimization enum, so use SPIRV-Tools'
+        // strongest stable `full`
         // recipe by default while preserving an explicit caller override.
         if (std::getenv("LUISA_SPIRV_OPT_PASSES") != nullptr) return;
 #if defined(_WIN32)
@@ -325,6 +325,7 @@ using TileFillShader = Shader1D<ByteBuffer, Buffer<uint32_t>, Buffer<uint32_t>,
                                 uint32_t, uint32_t, uint32_t, uint32_t>;
 using MsaaResolveShader = Shader2D<Image<float>, Image<float>, Image<float>, Image<float>, Image<float>>;
 using MsaaClearShader = Shader2D<Image<float>, Image<float>, Image<float>, Image<float>, float4>;
+using AdGradientReduceShader = Shader1D<ByteBuffer, ByteBuffer, uint32_t, uint32_t, uint32_t>;
 
 constexpr auto kMaximumClippedVertices = 12u;
 constexpr auto kClippedPrimitiveStride = 16u;
@@ -507,6 +508,7 @@ private:
     std::unique_ptr<IndirectDispatchBuffer> tile_fill_dispatch_buffer_;
     std::unique_ptr<MsaaResolveShader> msaa_resolve_shader_;
     std::unique_ptr<MsaaClearShader> msaa_clear_shader_;
+    std::unique_ptr<AdGradientReduceShader> ad_gradient_reduce_shader_;
 
 public:
     RuntimeState() = default;
@@ -1019,6 +1021,61 @@ public:
         if (created != nullptr)
             *created = true;
         return result;
+    }
+
+    bool reduce_ad_gradient(std::span<const unsigned char> gradient, uint32_t element_count,
+                            uint32_t component_count, uint64_t destination_key,
+                            std::vector<unsigned char>* destination, uint64_t destination_offset,
+                            uint64_t destination_size, bool upload_destination,
+                            std::string* error) {
+        const auto scalar_slots = static_cast<uint64_t>(element_count) * component_count;
+        if (destination == nullptr || scalar_slots == 0u || gradient.size() % sizeof(float) != 0u ||
+            destination_offset % sizeof(float) != 0u) {
+            if (error != nullptr) *error = "AD gradient reduction has an invalid scalar layout";
+            return false;
+        }
+        const auto total_scalars = gradient.size() / sizeof(float);
+        if (total_scalars % scalar_slots != 0u || scalar_slots > UINT32_MAX ||
+            total_scalars / scalar_slots > UINT32_MAX ||
+            destination_size != scalar_slots * sizeof(float) ||
+            destination_offset > destination->size() ||
+            destination_size > destination->size() - destination_offset) {
+            if (error != nullptr) *error = "AD gradient cannot be reduced to the requested destination range";
+            return false;
+        }
+        bool destination_created = false;
+        auto* destination_buffer = resident_buffer(destination_key, destination->size(), &destination_created);
+        if (destination_buffer == nullptr) {
+            if (error != nullptr) *error = "Luisa AD reduction destination buffer is unavailable";
+            return false;
+        }
+        if (ad_gradient_reduce_shader_ == nullptr) {
+            auto shader = device_->compile<1>([](ByteBufferVar source, ByteBufferVar target,
+                                                 UInt slots, UInt dispatch_count,
+                                                 UInt destination_byte_offset) noexcept {
+                const auto slot = dispatch_id().x;
+                $if (slot < slots) {
+                    Float sum = 0.0f;
+                    $for (index, dispatch_count) {
+                        sum += source.read<float>((index * slots + slot) * 4u);
+                    };
+                    target.write(destination_byte_offset + slot * 4u, sum);
+                };
+            });
+            ad_gradient_reduce_shader_ = std::make_unique<AdGradientReduceShader>(std::move(shader));
+        }
+        auto source_buffer = device_->create_byte_buffer(gradient.size());
+        if (destination_created || upload_destination)
+            *stream_ << destination_buffer->copy_from(destination->data());
+        *stream_ << source_buffer.copy_from(gradient.data())
+                 << (*ad_gradient_reduce_shader_)(source_buffer, *destination_buffer,
+                                                  static_cast<uint32_t>(scalar_slots),
+                                                  static_cast<uint32_t>(total_scalars / scalar_slots),
+                                                  static_cast<uint32_t>(destination_offset))
+                        .dispatch(static_cast<uint32_t>(scalar_slots))
+                 << destination_buffer->copy_to(destination->data())
+                 << luisa::compute::synchronize();
+        return true;
     }
 
     RuntimeTexture* resident_texture(uint64_t key, uint8_t kind, PixelStorage storage, uint3 size, uint32_t mip_levels,
@@ -2070,12 +2127,6 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
     }
     if (!cache_hit && ad_inputs != nullptr) {
-        xir_to_ast_normalize_module(xir_module.get());
-        auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
-        if (destructured.error_count != 0u) {
-            if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
-            return false;
-        }
         auto inlined =
             inline_all_pass_run_on_module(xir_module.get(), InlineOptions{.allow_autodiff_scope_in_caller = true});
         if (inlined.skipped_recursive_callable_count != 0u ||
@@ -2083,6 +2134,12 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             inlined.skipped_constrained_call_count != 0u ||
             inlined.rejected_malformed_call_count != 0u) {
             if (error != nullptr) *error = "Luisa could not inline the complete FEIR callable graph before autodiff";
+            return false;
+        }
+        xir_to_ast_normalize_module(xir_module.get());
+        auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
+        if (destructured.error_count != 0u) {
+            if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
             return false;
         }
         static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
@@ -2270,6 +2327,21 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
         }
     }
     return true;
+}
+
+bool ReduceAdGradient(uint64_t context_key, std::string_view runtime_directory,
+                      std::string_view backend_name, uint32_t device_index,
+                      std::span<const unsigned char> gradient, uint32_t element_count,
+                      uint32_t component_count, uint64_t destination_key,
+                      std::vector<unsigned char>* destination, uint64_t destination_offset,
+                      uint64_t destination_size, bool upload_destination,
+                      std::string* error) {
+    if (error != nullptr) error->clear();
+    auto& state = runtime_registry().prepare(
+        context_key, runtime_directory, backend_name, device_index);
+    return state.reduce_ad_gradient(gradient, element_count, component_count,
+                                    destination_key, destination, destination_offset,
+                                    destination_size, upload_destination, error);
 }
 
 bool PrepareGraphicsFragment(const TypedIR::Module& module,

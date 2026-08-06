@@ -4,11 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
-
-#include <IR/Module.h>
 
 namespace Feather::TypedIR {
 
@@ -18,7 +15,8 @@ struct ResourceInfo {
     uint8_t access = 0;
     std::string name;
     std::string element_type;
-    GPU::Runtime::PixelFormat texture_format = GPU::Runtime::PixelFormat::RGBA8;
+    uint32_t element_count = 0;
+    uint32_t texture_format = 3u;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t depth = 1;
@@ -82,8 +80,5 @@ struct LoweringInputs {
     std::vector<std::vector<unsigned char>> push_constant_storage;
     bool dynamic_push_constants = false;
 };
-
-std::unique_ptr<GPU::IR::Module> TryLowerToEasyGpuModule(
-    const Module& typed, const LoweringInputs& inputs, std::string* error = nullptr);
 
 } // namespace Feather::TypedIR
