@@ -187,6 +187,8 @@ struct BufferState {
     GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
     bool host_dirty = false;
     bool device_dirty = false;
+    bool luisa_uploaded = false;
+    uint64_t content_revision = 1u;
 };
 
 template <size_t N> struct FloatVectorValue {
@@ -207,6 +209,8 @@ struct TextureState {
     bool mipmaps_requested = false;
     bool mipmaps_dirty = false;
     bool luisa_dirty = false;
+    bool luisa_uploaded = false;
+    uint64_t content_revision = 1u;
 };
 
 struct SamplerState {
@@ -530,9 +534,33 @@ struct GraphicsPipelineState {
     GraphicsResourceLayout resource_layout;
     std::vector<GraphicsPushConstantLayoutEntry> push_constant_layout;
     std::vector<GraphicsPipelineCacheEntry> backend_cache;
+    uint64_t compute_raster_index_cache_key = 0u;
+    uint32_t compute_raster_maximum_vertex = 0u;
+    std::vector<uint32_t> compute_raster_indices;
 };
 
 #if FEATHER_BUILD_WINDOW
+enum : uint32_t {
+    kPresentationFrameFree = 0u,
+    kPresentationFramePending = 1u,
+    kPresentationFrameReady = 2u,
+};
+
+struct AsyncPresentationFrame {
+    std::vector<unsigned char> bytes;
+    std::atomic<uint32_t> state{kPresentationFrameFree};
+    uint64_t revision = 0u;
+};
+
+struct AsyncTexturePresentation {
+    std::array<std::shared_ptr<AsyncPresentationFrame>, 3u> frames{
+        std::make_shared<AsyncPresentationFrame>(),
+        std::make_shared<AsyncPresentationFrame>(),
+        std::make_shared<AsyncPresentationFrame>()};
+    uint64_t last_scheduled_revision = 0u;
+    bool has_presented_frame = false;
+};
+
 struct WindowState {
     std::unique_ptr<GPU::Window::AppWindow> window;
 };
@@ -540,6 +568,7 @@ struct WindowState {
 struct TexturePresenterState {
     FeWindowHandle window_handle = 0;
     std::unique_ptr<GPU::Window::TexturePresenter> presenter;
+    std::unordered_map<FeTextureHandle, std::shared_ptr<AsyncTexturePresentation>> async_textures;
 };
 #endif
 
@@ -4887,6 +4916,7 @@ void download_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend
 
     backend.DownloadBuffer(buffer.backend_buffer, 0, buffer.bytes.size(), buffer.bytes.data());
     buffer.device_dirty = false;
+    buffer.luisa_uploaded = false;
 }
 
 GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::Backend::Backend& backend) {
@@ -5004,6 +5034,8 @@ void mark_easygpu_writable_buffers_dirty(const KernelState& kernel, const GPU::K
         if (buffer != g_buffers.end()) {
             buffer->second.device_dirty = true;
             buffer->second.host_dirty = false;
+            buffer->second.luisa_uploaded = false;
+            ++buffer->second.content_revision;
         }
     }
 }
@@ -5717,6 +5749,8 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         auto buffer = g_buffers.find(bound->second);
         buffer->second.host_dirty = true;
         buffer->second.device_dirty = false;
+        buffer->second.luisa_uploaded = false;
+        ++buffer->second.content_revision;
     }
     for (const auto& resource : lowering.resources) {
         if (resource.kind != kIrResourceKindTexture2D && resource.kind != kIrResourceKindTexture3D) continue;
@@ -6387,6 +6421,8 @@ bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferStat
 
     destination.device_dirty = true;
     destination.host_dirty = false;
+    destination.luisa_uploaded = false;
+    ++destination.content_revision;
     return true;
 }
 
@@ -10532,6 +10568,8 @@ uint64_t luisa_graphics_shader_cache_key(
     mix(lowering.logical_z);
     mix(lowering.graphics_vertex_count);
     mix(lowering.graphics_first_instance);
+    mix(lowering.graphics_sample_count);
+    mix(lowering.graphics_sample_index);
     for (const auto& resource : lowering.resources) {
         mix(resource.binding);
         mix(resource.kind);
@@ -10557,8 +10595,11 @@ uint64_t luisa_graphics_shader_cache_key(
     for (const auto& push : lowering.push_constants) {
         mix(push.binding);
         mix(push.size);
-        const auto* bytes = static_cast<const unsigned char*>(push.data);
-        for (size_t i = 0u; bytes != nullptr && i < push.size; ++i) mix(bytes[i]);
+        mix(push.alignment);
+        if (!lowering.dynamic_push_constants) {
+            const auto* bytes = static_cast<const unsigned char*>(push.data);
+            for (size_t i = 0u; bytes != nullptr && i < push.size; ++i) mix(bytes[i]);
+        }
     }
     for (const auto& buffer : buffers) {
         mix(buffer.binding);
@@ -10580,11 +10621,27 @@ uint64_t luisa_graphics_shader_cache_key(
     return key == 0u ? 1u : key;
 }
 
+uint64_t luisa_graphics_execution_cache_key(const Feather::TypedIR::LoweringInputs& lowering) {
+    uint64_t key = 1469598103934665603ull;
+    const auto mix = [&](uint64_t value) {
+        key ^= value;
+        key *= 1099511628211ull;
+    };
+    for (const auto& push : lowering.push_constants) {
+        mix(push.binding);
+        mix(push.size);
+        const auto* bytes = static_cast<const unsigned char*>(push.data);
+        for (size_t i = 0u; bytes != nullptr && i < push.size; ++i) mix(bytes[i]);
+    }
+    return key == 0u ? 1u : key;
+}
+
 FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, uint32_t vertex_count,
                                         uint32_t instance_count, uint32_t first_instance,
                                         std::vector<unsigned char>* output, uint32_t* output_stride,
-                                        uint64_t* output_resident_key) {
-    if (output == nullptr || output_stride == nullptr || output_resident_key == nullptr) {
+                                        uint64_t* output_resident_key, bool* output_reused) {
+    if (output == nullptr || output_stride == nullptr || output_resident_key == nullptr ||
+        output_reused == nullptr) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex stage output is missing.");
     }
     ParsedIr parsed;
@@ -10618,6 +10675,7 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
         !bind_luisa_graphics_push_constants(parsed, pipeline, &lowering)) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster could not bind vertex-stage FEIR resources.");
     }
+    lowering.dynamic_push_constants = true;
     uint32_t output_binding = 0u;
     for (const auto& resource : lowering.resources) {
         if (resource.binding == UINT32_MAX) {
@@ -10650,7 +10708,8 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
             if (native == g_buffers.end()) {
                 return fail(FE_ERROR_INVALID_HANDLE, "Compute raster vertex stage is missing a buffer.");
             }
-            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes});
+            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes,
+                               bound->second, !native->second.luisa_uploaded, false});
         } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
             const auto bound = pipeline.textures.find(resource.binding);
             const auto native = bound == pipeline.textures.end() ? g_textures.end() : g_textures.find(bound->second);
@@ -10659,7 +10718,9 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
             }
             textures.push_back({resource.binding, resource.kind, resource.access,
                                 native->second.width, native->second.height, native->second.depth,
-                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes});
+                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes,
+                                bound->second, !native->second.luisa_uploaded, false,
+                                native->second.mipmaps_requested});
         }
     }
     output->assign(static_cast<size_t>(invocation_count) * *output_stride, 0u);
@@ -10682,12 +10743,27 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
             : std::string{Feather::Luisa::DefaultBackendName},
         Feather::Luisa::RuntimeDirectory()};
     dispatch.shader_cache_key = shader_cache_key;
+    dispatch.execution_cache_key = luisa_graphics_execution_cache_key(lowering);
+    dispatch.reuse_if_inputs_clean = true;
+    dispatch.execution_skipped = output_reused;
     const auto* profile_stages = std::getenv("FEATHER_RASTER_PROFILE_STAGES");
     dispatch.synchronize = profile_stages != nullptr && profile_stages[0] != '\0' &&
                            std::strcmp(profile_stages, "0") != 0;
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster vertex FEIR dispatch failed." : error);
+    }
+    for (const auto& binding : textures) {
+        if (binding.resident_key == 0u) continue;
+        if (const auto texture = g_textures.find(binding.resident_key); texture != g_textures.end()) {
+            texture->second.luisa_uploaded = true;
+        }
+    }
+    for (const auto& binding : buffers) {
+        if (binding.resident_key == 0u || !binding.upload) continue;
+        if (const auto buffer = g_buffers.find(binding.resident_key); buffer != g_buffers.end()) {
+            buffer->second.luisa_uploaded = true;
+        }
     }
     return ok();
 }
@@ -10697,8 +10773,11 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                                           std::vector<unsigned char>* varyings,
                                           std::vector<unsigned char>* coverage,
                                           uint64_t varying_resident_key, uint64_t coverage_resident_key,
-                                          const FeTextureHandle* target_handles) {
-    if (targets.empty() || varyings == nullptr || coverage == nullptr) {
+                                          const FeTextureHandle* target_handles, uint32_t sample_count,
+                                          const std::array<float, 4u>& clear_color,
+                                          std::vector<uint64_t>* fused_callable_keys = nullptr) {
+    const auto prepare_fused = fused_callable_keys != nullptr;
+    if (targets.empty() || (!prepare_fused && (varyings == nullptr || coverage == nullptr))) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster fragment inputs are missing.");
     }
     ParsedIr parsed;
@@ -10720,13 +10799,18 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
         return fail(FE_ERROR_UNSUPPORTED,
                     "Compute raster fragment stage requires float varyings and dense float4 color outputs.");
     }
+    if (prepare_fused && (targets.size() != 1u || return_fields[0] != UINT32_MAX)) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "Fused compute raster currently requires one float4 color output.");
+    }
     const auto& first_target = *targets.front();
     const auto pixel_count = static_cast<size_t>(first_target.width) * first_target.height;
-    if (varyings->size() != pixel_count * varying_stride ||
-        coverage->size() != pixel_count * sizeof(float)) {
+    if ((sample_count != 1u && sample_count != 4u) ||
+        (!prepare_fused &&
+         (varyings->size() != pixel_count * sample_count * varying_stride ||
+          coverage->size() != pixel_count * sample_count * sizeof(float)))) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster fragment buffers have inconsistent dimensions.");
     }
-
     KernelState adapter;
     adapter.ir = pipeline.fragment_ir;
     adapter.push_constants = pipeline.push_constants;
@@ -10748,10 +10832,14 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
         }
         synthetic_binding = std::max(synthetic_binding, resource.binding + 1u);
     }
-    const auto input_binding = synthetic_binding++;
-    const auto coverage_binding = synthetic_binding++;
-    lowering.stage_input_binding = input_binding;
-    lowering.stage_coverage_binding = coverage_binding;
+    auto input_binding = UINT32_MAX;
+    auto coverage_binding = UINT32_MAX;
+    if (!prepare_fused) {
+        input_binding = synthetic_binding++;
+        coverage_binding = synthetic_binding++;
+        lowering.stage_input_binding = input_binding;
+        lowering.stage_coverage_binding = coverage_binding;
+    }
     lowering.bounds_check = true;
     lowering.logical_x = static_cast<int32_t>(first_target.width);
     lowering.logical_y = static_cast<int32_t>(first_target.height);
@@ -10759,13 +10847,15 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
     lowering.group_x = 1;
     lowering.group_y = 1;
     lowering.group_z = 1;
-    lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
-        input_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_input", varying_type});
-    lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
-        coverage_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_coverage", "float"});
+    if (!prepare_fused) {
+        lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
+            input_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_input", varying_type});
+        lowering.resources.push_back(Feather::TypedIR::ResourceInfo{
+            coverage_binding, kIrResourceKindBuffer, 1u, "__feather_fragment_coverage", "float"});
+    }
     std::vector<uint32_t> output_bindings;
     output_bindings.reserve(targets.size());
-    for (uint32_t i = 0u; i < targets.size(); ++i) {
+    if (!prepare_fused) for (uint32_t i = 0u; i < targets.size(); ++i) {
         const auto output_binding = synthetic_binding++;
         output_bindings.push_back(output_binding);
         Feather::TypedIR::ResourceInfo output_resource;
@@ -10786,7 +10876,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                 blend.blend_enable != 0u, blend.src_color, blend.dst_color, blend.color_op,
                 blend.src_alpha, blend.dst_alpha, blend.alpha_op, blend.write_mask}});
     }
-    lowering.stage_output_binding = output_bindings.front();
+    if (!prepare_fused) lowering.stage_output_binding = output_bindings.front();
 
     std::vector<Feather::Luisa::HostBufferBinding> buffers;
     std::vector<Feather::Luisa::HostTextureBinding> textures;
@@ -10801,7 +10891,8 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
             if (native == g_buffers.end()) {
                 return fail(FE_ERROR_INVALID_HANDLE, "Compute raster fragment stage is missing a buffer.");
             }
-            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes});
+            buffers.push_back({resource.binding, resource.access, native->second.stride, &native->second.bytes,
+                               bound->second, !native->second.luisa_uploaded, false});
         } else if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
             const auto bound = pipeline.textures.find(resource.binding);
             const auto native = bound == pipeline.textures.end() ? g_textures.end() : g_textures.find(bound->second);
@@ -10810,36 +10901,138 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
             }
             textures.push_back({resource.binding, resource.kind, resource.access,
                                 native->second.width, native->second.height, native->second.depth,
-                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes});
+                                native->second.mip_levels, native->second.pixel_format, &native->second.bytes,
+                                bound->second, !native->second.luisa_uploaded, false,
+                                native->second.mipmaps_requested});
         }
     }
-    buffers.push_back({input_binding, 1u, varying_stride, varyings,
-                       varying_resident_key, false, false});
-    buffers.push_back({coverage_binding, 1u, sizeof(float), coverage,
-                       coverage_resident_key, false, false});
-    for (uint32_t i = 0u; i < targets.size(); ++i) {
+    if (!prepare_fused) {
+        buffers.push_back({input_binding, 1u, varying_stride, varyings,
+                           varying_resident_key, false, false});
+        buffers.push_back({coverage_binding, 1u, sizeof(float), coverage,
+                           coverage_resident_key, false, false});
+    }
+    const auto output_texture_offset = textures.size();
+    const auto sample_texture_key = [](uint64_t target, uint32_t sample) {
+        auto key = target ^ (0x6d73616173616d70ull +
+                             static_cast<uint64_t>(sample + 1u) * 0x9e3779b97f4a7c15ull);
+        return key == 0u ? static_cast<uint64_t>(sample + 1u) : key;
+    };
+    if (!prepare_fused) for (uint32_t i = 0u; i < targets.size(); ++i) {
         textures.push_back({output_bindings[i], kIrResourceKindTexture2D, 3u,
                             targets[i]->width, targets[i]->height, targets[i]->depth,
                             targets[i]->mip_levels, targets[i]->pixel_format, &targets[i]->bytes,
-                            target_handles[i], !targets[i]->luisa_dirty, false});
+                            sample_count == 1u ? target_handles[i]
+                                               : sample_texture_key(target_handles[i], 0u),
+                            sample_count == 1u ? !targets[i]->luisa_uploaded : false,
+                            false, false});
     }
 
     const auto* backend_value = std::getenv("FEATHER_LUISA_BACKEND");
-    const auto shader_cache_key = luisa_graphics_shader_cache_key(
-        pipeline.fragment_ir, lowering, buffers, textures, 0x667261676d656e74ull);
-    Feather::Luisa::DispatchInputs dispatch{
-        1u, 1u, 1u, first_target.width, first_target.height, 1u, 0u,
-        backend_value != nullptr && backend_value[0] != '\0'
-            ? backend_value
-            : std::string{Feather::Luisa::DefaultBackendName},
-        Feather::Luisa::RuntimeDirectory()};
-    dispatch.shader_cache_key = shader_cache_key;
-    std::string error;
-    if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures,
-                                  dispatch, nullptr, {}, &error)) {
-        return fail(FE_ERROR_UNSUPPORTED,
-                    error.empty() ? "Compute raster fragment FEIR dispatch failed." : error);
+    if (prepare_fused) fused_callable_keys->clear();
+    if (sample_count > 1u && !prepare_fused) {
+        for (uint32_t target_index = 0u; target_index < targets.size(); ++target_index) {
+            std::array<uint64_t, 4u> sample_keys{};
+            for (uint32_t sample = 0u; sample < sample_count; ++sample) {
+                sample_keys[sample] = sample_texture_key(target_handles[target_index], sample);
+            }
+            Feather::Luisa::HostTextureBinding target_binding{
+                output_bindings[target_index], kIrResourceKindTexture2D, 3u,
+                targets[target_index]->width, targets[target_index]->height,
+                targets[target_index]->depth, targets[target_index]->mip_levels,
+                targets[target_index]->pixel_format, &targets[target_index]->bytes,
+                target_handles[target_index], false, false, false};
+            std::string error;
+            if (!Feather::Luisa::ClearMultisampleTexture(
+                    sample_keys, target_binding, clear_color, &error)) {
+                return fail(FE_ERROR_UNSUPPORTED,
+                            error.empty() ? "Compute raster multisample clear failed." : error);
+            }
+        }
     }
+    const auto fragment_variant_count = prepare_fused ? 1u : sample_count;
+    for (uint32_t sample = 0u; sample < fragment_variant_count; ++sample) {
+        if (!prepare_fused && sample_count > 1u) {
+            for (uint32_t i = 0u; i < targets.size(); ++i) {
+                auto& output = textures[output_texture_offset + i];
+                output.resident_key = sample_texture_key(target_handles[i], sample);
+                output.upload = false;
+            }
+        }
+        lowering.graphics_sample_count = sample_count;
+        lowering.graphics_sample_index = sample;
+        const auto shader_cache_key = luisa_graphics_shader_cache_key(
+            pipeline.fragment_ir, lowering, buffers, textures,
+            prepare_fused ? 0x6675736564667261ull : 0x667261676d656e74ull);
+        Feather::Luisa::DispatchInputs dispatch{
+            1u, 1u, 1u, first_target.width, first_target.height, 1u, 0u,
+            backend_value != nullptr && backend_value[0] != '\0'
+                ? backend_value
+                : std::string{Feather::Luisa::DefaultBackendName},
+            Feather::Luisa::RuntimeDirectory()};
+        dispatch.shader_cache_key = shader_cache_key;
+        dispatch.synchronize = sample_count == 1u;
+        std::string error;
+        const auto dispatched = prepare_fused
+            ? Feather::Luisa::PrepareGraphicsFragment(
+                  parsed.typed_module, lowering, buffers, textures,
+                  dispatch, shader_cache_key, &error)
+            : Feather::Luisa::Dispatch(
+                  parsed.typed_module, lowering, buffers, textures,
+                  dispatch, nullptr, {}, &error);
+        if (!dispatched) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        error.empty()
+                            ? (prepare_fused
+                                   ? "Compute raster fused fragment preparation failed."
+                                   : "Compute raster fragment FEIR dispatch failed.")
+                            : error);
+        }
+        if (prepare_fused) fused_callable_keys->push_back(shader_cache_key);
+        for (size_t i = 0u; i < output_texture_offset; ++i) textures[i].upload = false;
+    }
+    for (const auto& binding : pipeline.textures) {
+        if (const auto texture = g_textures.find(binding.second); texture != g_textures.end()) {
+            texture->second.luisa_uploaded = true;
+        }
+    }
+    for (const auto& binding : pipeline.buffers) {
+        if (const auto buffer = g_buffers.find(binding.second); buffer != g_buffers.end()) {
+            buffer->second.luisa_uploaded = true;
+        }
+    }
+    if (prepare_fused) return ok();
+    if (sample_count > 1u) {
+        for (uint32_t target_index = 0u; target_index < targets.size(); ++target_index) {
+            std::array<uint64_t, 4u> sample_keys{};
+            for (uint32_t sample = 0u; sample < sample_count; ++sample) {
+                sample_keys[sample] = sample_texture_key(target_handles[target_index], sample);
+            }
+            Feather::Luisa::HostTextureBinding target_binding{
+                output_bindings[target_index], kIrResourceKindTexture2D, 3u,
+                targets[target_index]->width, targets[target_index]->height,
+                targets[target_index]->depth, targets[target_index]->mip_levels,
+                targets[target_index]->pixel_format, &targets[target_index]->bytes,
+                target_handles[target_index], false, false, false};
+            std::string error;
+            if (!Feather::Luisa::ResolveMultisampleTexture(
+                    sample_keys, target_binding, target_index + 1u == targets.size(), &error)) {
+                return fail(FE_ERROR_UNSUPPORTED,
+                            error.empty() ? "Compute raster multisample resolve failed." : error);
+            }
+        }
+    }
+    for (auto* target : targets) target->luisa_uploaded = true;
+    return ok();
+}
+
+FeResult finish_fused_graphics_fragment_stage(
+    const std::vector<TextureState*>& targets,
+    const FeTextureHandle* target_handles,
+    uint32_t sample_count) {
+    static_cast<void>(target_handles);
+    static_cast<void>(sample_count);
+    for (auto* target : targets) target->luisa_uploaded = true;
     return ok();
 }
 
@@ -10851,6 +11044,7 @@ bool clear_compute_raster_color(TextureState& target, float red, float green, fl
             std::memcpy(target.bytes.data() + i * sizeof(color), color.data(), sizeof(color));
         }
         target.luisa_dirty = false;
+        target.luisa_uploaded = false;
         return true;
     }
     if (target.pixel_format != 3u && target.pixel_format != 4u) return false;
@@ -10864,6 +11058,7 @@ bool clear_compute_raster_color(TextureState& target, float red, float green, fl
         std::memcpy(target.bytes.data() + i * color.size(), color.data(), color.size());
     }
     target.luisa_dirty = false;
+    target.luisa_uploaded = false;
     return true;
 }
 
@@ -10882,18 +11077,57 @@ std::pair<uint64_t, uint64_t> compute_raster_scratch_keys(
     mix(height);
     mix(draw.count);
     mix(draw.depth_target);
+    mix(pipeline.sample_count);
     for (uint32_t i = 0u; i < draw.color_target_count; ++i) mix(draw.color_targets[i]);
     const auto varying_key = key == 0u ? 1u : key;
     mix(0x636f766572616765ull);
     return {varying_key, key == 0u ? 2u : key};
 }
 
+uint64_t compute_raster_geometry_cache_key(
+    uint64_t vertex_resident_key, FeBufferHandle index_buffer, uint64_t index_revision,
+    const Feather::Luisa::RasterDispatchInputs& raster, uint32_t target_width,
+    uint32_t target_height, const FeGraphicsDrawDesc& draw) {
+    uint64_t key = 1469598103934665603ull;
+    const auto mix = [&](uint64_t value) {
+        key ^= value;
+        key *= 1099511628211ull;
+    };
+    mix(0x67656f6d65747279ull);
+    mix(vertex_resident_key);
+    mix(index_buffer);
+    mix(index_revision);
+    mix(draw.indexed);
+    mix(draw.first_vertex);
+    mix(draw.first_index);
+    mix(static_cast<uint32_t>(draw.vertex_offset));
+    mix(draw.first_instance);
+    mix(draw.instance_count);
+    mix(raster.vertex_count);
+    mix(raster.vertices_per_instance);
+    mix(raster.vertex_domain);
+    mix(raster.viewport_x);
+    mix(raster.viewport_y);
+    mix(raster.viewport_width);
+    mix(raster.viewport_height);
+    mix(raster.scissor_x);
+    mix(raster.scissor_y);
+    mix(raster.scissor_width);
+    mix(raster.scissor_height);
+    mix(raster.cull_mode);
+    mix(raster.front_face);
+    mix(raster.depth_clamp);
+    mix(target_width);
+    mix(target_height);
+    return key == 0u ? 1u : key;
+}
+
 FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, const FeGraphicsDrawDesc& draw) {
     trace_graphics_step("compute draw begin");
     if (pipeline.topology != 0u || draw.color_target_count != pipeline.color_attachment_count ||
-        pipeline.sample_count != 1u) {
+        (pipeline.sample_count != 1u && pipeline.sample_count != 4u)) {
         return fail(FE_ERROR_UNSUPPORTED,
-                    "compute raster supports matching color targets and single-sample triangle lists");
+                    "compute raster supports matching color targets and 1x/4x triangle lists");
     }
     if (draw.count < 3u || draw.count % 3u != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster triangle lists require a multiple of three vertices.");
@@ -10947,16 +11181,33 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex buffer has an invalid stride.");
     }
     const auto vertex_capacity = vertex_it->second.bytes.size() / stride;
-    std::vector<uint32_t> raster_indices(draw.count);
-    uint32_t maximum_vertex = 0u;
+    uint64_t raster_index_cache_key = 1469598103934665603ull;
+    const auto mix_index_key = [&](uint64_t value) {
+        raster_index_cache_key ^= value;
+        raster_index_cache_key *= 1099511628211ull;
+    };
+    mix_index_key(draw.indexed);
+    mix_index_key(draw.count);
+    mix_index_key(draw.first_vertex);
+    mix_index_key(draw.first_index);
+    mix_index_key(static_cast<uint32_t>(draw.vertex_offset));
+    mix_index_key(draw.index_buffer);
+    mix_index_key(vertex_capacity);
+    uint64_t index_revision = 0u;
+    const BufferState* index_state = nullptr;
+    uint32_t index_stride = 0u;
     if (draw.indexed != 0u) {
         const auto index_it = g_buffers.find(draw.index_buffer);
         if (draw.index_buffer == 0u || index_it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Compute raster indexed draw requires a valid index buffer.");
         }
-        const auto index_stride = index_it->second.stride != 0u
-                                      ? index_it->second.stride
-                                      : static_cast<uint32_t>(sizeof(uint32_t));
+        index_state = &index_it->second;
+        index_stride = index_state->stride != 0u
+                           ? index_state->stride
+                           : static_cast<uint32_t>(sizeof(uint32_t));
+        index_revision = index_it->second.content_revision;
+        mix_index_key(index_revision);
+        mix_index_key(index_stride);
         if (index_stride != sizeof(uint16_t) && index_stride != sizeof(uint32_t)) {
             return fail(FE_ERROR_UNSUPPORTED, "Compute raster indices must be ushort or uint.");
         }
@@ -10965,28 +11216,43 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
             index_it->second.bytes.size() < static_cast<size_t>(required_indices) * index_stride) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster index buffer is too small.");
         }
-        for (uint32_t i = 0u; i < draw.count; ++i) {
-            const auto offset = static_cast<size_t>(draw.first_index + i) * index_stride;
-            const auto index = index_stride == sizeof(uint16_t)
-                                   ? static_cast<uint32_t>(read_u16_unaligned(index_it->second.bytes.data() + offset))
-                                   : read_u32_unaligned(index_it->second.bytes.data() + offset);
-            const auto shifted = static_cast<int64_t>(index) + draw.vertex_offset;
-            if (shifted < 0 || static_cast<uint64_t>(shifted) >= vertex_capacity) {
-                return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster index references a vertex out of range.");
-            }
-            raster_indices[i] = static_cast<uint32_t>(shifted);
-            maximum_vertex = std::max(maximum_vertex, raster_indices[i]);
-        }
     } else {
         const auto required_vertices = static_cast<uint64_t>(draw.first_vertex) + draw.count;
         if (required_vertices > vertex_capacity) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster vertex buffer is too small.");
         }
-        for (uint32_t i = 0u; i < draw.count; ++i) {
-            raster_indices[i] = draw.first_vertex + i;
-        }
-        maximum_vertex = raster_indices.back();
     }
+    if (raster_index_cache_key == 0u) raster_index_cache_key = 1u;
+    if (pipeline.compute_raster_index_cache_key != raster_index_cache_key ||
+        pipeline.compute_raster_indices.size() != draw.count) {
+        pipeline.compute_raster_indices.resize(draw.count);
+        pipeline.compute_raster_maximum_vertex = 0u;
+        if (draw.indexed != 0u) {
+            for (uint32_t i = 0u; i < draw.count; ++i) {
+                const auto offset = static_cast<size_t>(draw.first_index + i) * index_stride;
+                const auto index = index_stride == sizeof(uint16_t)
+                                       ? static_cast<uint32_t>(
+                                             read_u16_unaligned(index_state->bytes.data() + offset))
+                                       : read_u32_unaligned(index_state->bytes.data() + offset);
+                const auto shifted = static_cast<int64_t>(index) + draw.vertex_offset;
+                if (shifted < 0 || static_cast<uint64_t>(shifted) >= vertex_capacity) {
+                    return fail(FE_ERROR_INVALID_ARGUMENT,
+                                "Compute raster index references a vertex out of range.");
+                }
+                pipeline.compute_raster_indices[i] = static_cast<uint32_t>(shifted);
+                pipeline.compute_raster_maximum_vertex = std::max(
+                    pipeline.compute_raster_maximum_vertex, pipeline.compute_raster_indices[i]);
+            }
+        } else {
+            for (uint32_t i = 0u; i < draw.count; ++i) {
+                pipeline.compute_raster_indices[i] = draw.first_vertex + i;
+            }
+            pipeline.compute_raster_maximum_vertex = pipeline.compute_raster_indices.back();
+        }
+        pipeline.compute_raster_index_cache_key = raster_index_cache_key;
+    }
+    const auto& raster_indices = pipeline.compute_raster_indices;
+    const auto maximum_vertex = pipeline.compute_raster_maximum_vertex;
     const auto backend_value = std::getenv("FEATHER_LUISA_BACKEND");
     Feather::Luisa::DispatchInputs dispatch{
         1u, 1u, 1u, target.width, target.height, 1u, 0u,
@@ -10997,11 +11263,12 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     std::vector<unsigned char> all_transformed_vertices;
     uint32_t transformed_stride = 0u;
     uint64_t vertex_resident_key = 0u;
+    bool vertex_reused = false;
     const auto vertex_domain = maximum_vertex + 1u;
     trace_graphics_step("compute setup complete");
     const auto vertex_result = dispatch_graphics_vertex_stage(
         pipeline, vertex_domain, instance_count, draw.first_instance,
-        &all_transformed_vertices, &transformed_stride, &vertex_resident_key);
+        &all_transformed_vertices, &transformed_stride, &vertex_resident_key, &vertex_reused);
     if (vertex_result != FE_OK) return vertex_result;
     trace_graphics_step("compute vertex complete");
     const auto raster_vertex_count = static_cast<uint64_t>(draw.count) * instance_count;
@@ -11014,7 +11281,8 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         vertex_resident_key, false, false};
     Feather::Luisa::HostTextureBinding target_binding{
         0u, 2u, 3u, target.width, target.height, target.depth,
-        target.mip_levels, target.pixel_format, &target.bytes};
+        target.mip_levels, target.pixel_format, &target.bytes,
+        draw.color_targets[0], false, false, false};
     const auto [varying_resident_key, coverage_resident_key] = compute_raster_scratch_keys(
         pipeline, draw, transformed_stride, target.width, target.height);
     Feather::Luisa::HostTextureBinding depth_binding{};
@@ -11037,7 +11305,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     } else if (pipeline.depth_test != 0u || pipeline.depth_write != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster depth state requires a depth target.");
     }
-    const auto clear_color = draw.clear_color != 0u ||
+    const auto clear_color = draw.clear_color != 0u || pipeline.sample_count > 1u ||
                              draw.color_load_op == static_cast<uint32_t>(GraphicsColorLoadOp::Clear);
     const auto clear_depth = depth_binding_ptr != nullptr &&
                              (draw.clear_depth != 0u ||
@@ -11081,7 +11349,17 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         draw.clear_color != 0u ? draw.clear_color_b : 0.0f,
         draw.clear_color != 0u ? draw.clear_color_a : 1.0f,
         draw.count,
-        vertex_domain};
+        vertex_domain,
+        pipeline.sample_count,
+        std::all_of(
+            pipeline.color_blend_attachments.begin(),
+            pipeline.color_blend_attachments.begin() + pipeline.color_attachment_count,
+            [](const auto& blend) { return blend.blend_enable == 0u && blend.write_mask == 0x0fu; })
+            ? 1u
+            : 0u};
+    const auto geometry_cache_key = compute_raster_geometry_cache_key(
+        vertex_resident_key, draw.index_buffer, index_revision, raster,
+        target.width, target.height, draw);
     if (clear_color) {
         for (auto* color_target : color_targets) {
             if (!clear_compute_raster_color(
@@ -11093,17 +11371,49 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     }
     std::vector<unsigned char> fragment_varyings;
     std::vector<unsigned char> fragment_coverage;
+    const auto fuse_fragment = raster.vertex_count >= 512u && depth_binding_ptr != nullptr &&
+                               pipeline.sample_count == 4u && draw.color_target_count == 1u &&
+                               raster.polygon_mode == 0u && raster.depth_test != 0u &&
+                               raster.depth_write != 0u && raster.depth_compare == 1u &&
+                               raster.stencil_test == 0u && raster.opaque_fragment != 0u;
+    std::vector<uint64_t> fragment_callable_keys;
+    std::array<uint64_t, 4u> fragment_target_keys{};
+    if (fuse_fragment) {
+        for (uint32_t sample = 0u; sample < fragment_target_keys.size(); ++sample) {
+            auto key = draw.color_targets[0] ^
+                       (0x6d73616173616d70ull +
+                        static_cast<uint64_t>(sample + 1u) * 0x9e3779b97f4a7c15ull);
+            fragment_target_keys[sample] = key == 0u ? static_cast<uint64_t>(sample + 1u) : key;
+        }
+        const auto prepare_result = dispatch_graphics_fragment_stage(
+            pipeline, color_targets, nullptr, nullptr,
+            varying_resident_key, coverage_resident_key,
+            draw.color_targets, pipeline.sample_count,
+            {raster.clear_color_r, raster.clear_color_g,
+             raster.clear_color_b, raster.clear_color_a},
+            &fragment_callable_keys);
+        if (prepare_result != FE_OK) return prepare_result;
+        trace_graphics_step("compute fragment prepared");
+    }
     std::string error;
     if (!Feather::Luisa::DispatchVerticalRaster(
             vertex_binding, target_binding, raster_indices, depth_binding_ptr, raster, dispatch,
             varying_resident_key, coverage_resident_key,
+            geometry_cache_key, !vertex_reused,
+            fragment_callable_keys,
+            fuse_fragment ? std::span<const uint64_t>{fragment_target_keys} : std::span<const uint64_t>{},
             &fragment_varyings, &fragment_coverage, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster dispatch failed." : error);
     }
     trace_graphics_step("compute raster complete");
-    const auto fragment_result = dispatch_graphics_fragment_stage(
-        pipeline, color_targets, &fragment_varyings, &fragment_coverage,
-        varying_resident_key, coverage_resident_key, draw.color_targets);
+    const auto fragment_result = fuse_fragment
+        ? finish_fused_graphics_fragment_stage(
+              color_targets, draw.color_targets, pipeline.sample_count)
+        : dispatch_graphics_fragment_stage(
+              pipeline, color_targets, &fragment_varyings, &fragment_coverage,
+              varying_resident_key, coverage_resident_key, draw.color_targets, pipeline.sample_count,
+              {raster.clear_color_r, raster.clear_color_g,
+               raster.clear_color_b, raster.clear_color_a});
     if (fragment_result != FE_OK) return fragment_result;
     trace_graphics_step("compute fragment complete");
     for (auto* color_target : color_targets) {
@@ -11111,6 +11421,8 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         color_target->device_dirty = false;
         color_target->mipmaps_dirty = false;
         color_target->luisa_dirty = true;
+        color_target->luisa_uploaded = true;
+        ++color_target->content_revision;
     }
     if (depth_it != g_textures.end()) {
         depth_it->second.host_dirty = true;
@@ -12381,15 +12693,90 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
 
+#if FEATHER_HAS_LUISA
+        // Keep cross-runtime presentation portable: Luisa completes readback into a bounded ring
+        // while EasyGPU presents the newest completed frame. This avoids synchronizing the Luisa
+        // stream in the current frame and works for Metal, Vulkan, and DX backends alike.
+        auto& async = presenter_it->second.async_textures[texture];
+        if (async == nullptr) async = std::make_shared<AsyncTexturePresentation>();
+        auto& texture_state = texture_it->second;
+        std::shared_ptr<AsyncPresentationFrame> newest;
+        for (const auto& frame : async->frames) {
+            if (frame->state.load(std::memory_order_acquire) == kPresentationFrameReady &&
+                (newest == nullptr || frame->revision > newest->revision)) {
+                newest = frame;
+            }
+        }
+        if (newest != nullptr) {
+            const auto presented_revision = newest->revision;
+            texture_state.bytes.swap(newest->bytes);
+            for (const auto& frame : async->frames) {
+                if (frame->state.load(std::memory_order_acquire) == kPresentationFrameReady &&
+                    frame->revision <= presented_revision) {
+                    frame->state.store(kPresentationFrameFree, std::memory_order_release);
+                }
+            }
+            texture_state.host_dirty = true;
+            texture_state.device_dirty = false;
+            texture_state.luisa_dirty = presented_revision != texture_state.content_revision;
+            texture_state.mipmaps_dirty = texture_state.mipmaps_requested && texture_state.mip_levels > 1u;
+            async->has_presented_frame = true;
+            trace_graphics_step("presenter consumed async Luisa frame");
+        }
+
+        if (texture_state.luisa_dirty && !async->has_presented_frame) {
+            std::string error;
+            if (!Feather::Luisa::DownloadResidentTexture(
+                    texture, texture_state.bytes.data(), texture_state.bytes.size(), &error)) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            error.empty() ? "Luisa texture presentation download failed." : error);
+            }
+            texture_state.luisa_dirty = false;
+            texture_state.host_dirty = true;
+            texture_state.device_dirty = false;
+            texture_state.mipmaps_dirty = texture_state.mipmaps_requested && texture_state.mip_levels > 1u;
+            async->last_scheduled_revision = texture_state.content_revision;
+            async->has_presented_frame = true;
+            trace_graphics_step("presenter synchronized first Luisa frame");
+        } else if (texture_state.luisa_dirty &&
+                   texture_state.content_revision > async->last_scheduled_revision) {
+            const auto frame = std::find_if(async->frames.begin(), async->frames.end(), [](const auto& candidate) {
+                return candidate->state.load(std::memory_order_acquire) == kPresentationFrameFree;
+            });
+            if (frame != async->frames.end()) {
+                (*frame)->bytes.resize(texture_state.bytes.size());
+                (*frame)->revision = texture_state.content_revision;
+                (*frame)->state.store(kPresentationFramePending, std::memory_order_release);
+                std::string error;
+                if (!Feather::Luisa::DownloadResidentTextureAsync(
+                        texture, (*frame)->bytes.data(), (*frame)->bytes.size(),
+                        [frame = *frame] {
+                            frame->state.store(kPresentationFrameReady, std::memory_order_release);
+                        },
+                        &error)) {
+                    (*frame)->state.store(kPresentationFrameFree, std::memory_order_release);
+                    return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                                error.empty() ? "Luisa texture presentation queue failed." : error);
+                }
+                async->last_scheduled_revision = texture_state.content_revision;
+                trace_graphics_step("presenter queued async Luisa frame");
+            }
+        }
+#endif
+
         if (mode != 1) {
             GPU::Runtime::AutoInitContext();
             GPU::Runtime::Context::GetInstance().MakeCurrent();
             auto* backend = GPU::Runtime::Context::GetBackend();
             if (backend != nullptr) {
                 try {
+                    if (texture_it->second.host_dirty) {
+                        trace_graphics_step("presenter uploads completed texture");
+                    }
                     const auto backend_texture = ensure_easygpu_texture(texture_it->second, *backend);
                     if (backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
                         if (presenter_it->second.presenter->PresentTextureHandle(backend_texture)) {
+                            trace_graphics_step("presenter direct present");
                             return ok();
                         }
                         if (mode == 2) {
@@ -12509,6 +12896,8 @@ FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_
         std::memcpy(it->second.bytes.data() + offset, data, static_cast<size_t>(size));
         it->second.host_dirty = true;
         it->second.device_dirty = false;
+        it->second.luisa_uploaded = false;
+        ++it->second.content_revision;
         return ok();
     });
 }
@@ -12561,6 +12950,8 @@ FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t, void** out_ptr) {
 
         *out_ptr = it->second.bytes.data();
         it->second.host_dirty = true;
+        it->second.luisa_uploaded = false;
+        ++it->second.content_revision;
         return ok();
     });
 }
@@ -12691,6 +13082,7 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
         }
         it->second.host_dirty = true;
         it->second.device_dirty = false;
+        it->second.luisa_uploaded = false;
         it->second.mipmaps_dirty = it->second.mipmaps_requested && it->second.mip_levels > 1;
         return ok();
     });
@@ -12770,6 +13162,7 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
 
         it->second.host_dirty = true;
         it->second.device_dirty = false;
+        it->second.luisa_uploaded = false;
         it->second.mipmaps_dirty = it->second.mipmaps_requested && it->second.mip_levels > 1;
         return ok();
     });
@@ -12838,6 +13231,7 @@ FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture) {
 
         state.mipmaps_requested = true;
         state.mipmaps_dirty = true;
+        state.luisa_uploaded = false;
 
         GPU::Runtime::AutoInitContext();
         GPU::Runtime::Context::GetInstance().MakeCurrent();

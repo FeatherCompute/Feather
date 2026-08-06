@@ -74,10 +74,13 @@ struct LoweringInputs {
     uint32_t stage_coverage_binding = NoIndex;
     uint32_t graphics_vertex_count = 0;
     uint32_t graphics_first_instance = 0;
+    uint32_t graphics_sample_count = 1;
+    uint32_t graphics_sample_index = 0;
     std::vector<GraphicsColorTargetInfo> graphics_color_targets;
     std::vector<ResourceInfo> resources;
     std::vector<PushConstantInfo> push_constants;
     std::vector<std::vector<unsigned char>> push_constant_storage;
+    bool dynamic_push_constants = false;
 };
 
 std::unique_ptr<GPU::IR::Module> TryLowerToEasyGpuModule(

@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -42,6 +44,7 @@ struct HostTextureBinding {
     uint64_t resident_key = 0;
     bool upload = true;
     bool download = true;
+    bool generate_mipmaps = false;
 };
 
 struct DispatchInputs {
@@ -55,6 +58,9 @@ struct DispatchInputs {
     std::string backend_name = std::string{DefaultBackendName};
     std::string runtime_directory;
     bool synchronize = true;
+    bool reuse_if_inputs_clean = false;
+    bool* execution_skipped = nullptr;
+    uint64_t execution_cache_key = 0;
 };
 
 struct RasterDispatchInputs {
@@ -96,6 +102,8 @@ struct RasterDispatchInputs {
     float clear_color_a = 1.0f;
     uint32_t vertices_per_instance = 3;
     uint32_t vertex_domain = 3;
+    uint32_t sample_count = 1;
+    uint32_t opaque_fragment = 0;
 };
 
 struct AdGradientBinding {
@@ -118,17 +126,41 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
               std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
 
+bool PrepareGraphicsFragment(const TypedIR::Module& module,
+                             const TypedIR::LoweringInputs& lowering,
+                             std::span<HostBufferBinding> buffers,
+                             std::span<HostTextureBinding> textures,
+                             const DispatchInputs& dispatch,
+                             uint64_t callable_cache_key,
+                             std::string* error = nullptr);
+
 // Experimental compute triangle assembly/raster stage between generated graphics FEIR stages.
 bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding target,
                             std::span<const uint32_t> vertex_indices,
                             HostTextureBinding* depth, const RasterDispatchInputs& raster,
                             const DispatchInputs& dispatch,
                             uint64_t varying_resident_key, uint64_t coverage_resident_key,
+                            uint64_t geometry_cache_key, bool rebuild_geometry,
+                            std::span<const uint64_t> fragment_callable_keys,
+                            std::span<const uint64_t> fragment_target_keys,
                             std::vector<unsigned char>* fragment_varyings,
                             std::vector<unsigned char>* fragment_coverage,
                             std::string* error = nullptr);
 
 bool DownloadResidentTexture(uint64_t resident_key, void* destination, size_t size,
+                             std::string* error = nullptr);
+
+bool DownloadResidentTextureAsync(uint64_t resident_key, void* destination, size_t size,
+                                  std::function<void()> completion,
+                                  std::string* error = nullptr);
+
+bool ResolveMultisampleTexture(std::span<const uint64_t> sample_keys,
+                               const HostTextureBinding& target,
+                               bool synchronize, std::string* error = nullptr);
+
+bool ClearMultisampleTexture(std::span<const uint64_t> sample_keys,
+                             const HostTextureBinding& target,
+                             const std::array<float, 4u>& color,
                              std::string* error = nullptr);
 
 } // namespace Feather::Luisa

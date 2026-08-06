@@ -123,6 +123,7 @@ class Lowerer {
             return fail("Luisa XIR supports at most 1024 threads per group"), nullptr;
 
         kernel_ = xir_module_.create_kernel();
+        function_ = kernel_;
         kernel_->set_name(std::string{string(entry.name_id)});
         logical_groups_per_block_ = static_cast<uint32_t>(32u / std::gcd<uint64_t>(group_threads, 32u));
         if (group_threads * logical_groups_per_block_ > 1024u)
@@ -152,6 +153,34 @@ class Lowerer {
         }
         if (!builder_.is_insertion_point_terminator()) builder_.return_void();
         return kernel_;
+    }
+
+    GraphicsFragmentXir lower_graphics_fragment() {
+        if (module_.entry_function >= module_.functions.size()) {
+            fail("FEIR fragment entry function is missing");
+            return {};
+        }
+        const auto& entry = module_.functions[module_.entry_function];
+        if (entry.kind != kFunctionFragment || entry.body_statement_index >= module_.statements.size()) {
+            fail("fused Luisa raster requires a fragment FEIR entry");
+            return {};
+        }
+        auto* return_type = type(entry.return_type_id);
+        if (return_type == nullptr) {
+            fail("fused fragment return type is unsupported");
+            return {};
+        }
+        fragment_callable_ = xir_module_.create_callable(return_type);
+        function_ = fragment_callable_;
+        fragment_callable_->set_name(std::string{string(entry.name_id)} + "_fused_raster");
+        if (!register_resources() || !stage_callables() || !lower_callable_bodies() ||
+            !register_fused_fragment_stage(entry)) {
+            return {};
+        }
+        builder_.set_insertion_point(fragment_callable_->create_body_block());
+        if (!bind_fused_fragment_parameters(entry) || !lower_statement(entry.body_statement_index)) return {};
+        if (!builder_.is_insertion_point_terminator()) builder_.return_void();
+        return {fragment_callable_, fragment_parameter_type_, return_type};
     }
 
   private:
@@ -356,7 +385,7 @@ class Lowerer {
     bool register_resources() {
         struct_visiting_.resize(module_.structs.size());
         for (const auto& source : inputs_.resources) {
-            if (source.kind == kResourcePushConstant) continue;
+            if (source.kind == kResourcePushConstant && !inputs_.dynamic_push_constants) continue;
             if (source.kind == kResourceSampler) {
                 if (source.sampler_min_filter > 1u || source.sampler_mag_filter > 1u ||
                     source.sampler_mipmap_mode > 1u || source.sampler_address_u > 3u ||
@@ -375,13 +404,14 @@ class Lowerer {
                 continue;
             }
             const auto texture = source.kind == kResourceTexture2D || source.kind == kResourceTexture3D;
-            if (source.kind != kResourceBuffer && !texture)
+            const auto push_constant = source.kind == kResourcePushConstant;
+            if (source.kind != kResourceBuffer && !texture && !push_constant)
                 return fail("Luisa XIR received an unsupported forward resource");
             auto* element = texture ? Type::vector(Type::of<float>(), 4u) : type_from_name(source.element_type);
             if (element == nullptr) return fail("Luisa cannot resolve FEIR resource element type '" + source.element_type + "'");
             auto* resource_type = texture ? Type::texture(Type::of<float>(), source.kind == kResourceTexture2D ? 2u : 3u)
                                           : Type::buffer(element);
-            auto* argument = kernel_->create_resource_argument(resource_type);
+            auto* argument = function_->create_resource_argument(resource_type);
             resources_.emplace(source.name, Resource{argument, element, source.binding, source.kind, source.access});
             if (!texture && buffer_layouts_ != nullptr) {
                 auto source_type = TypedIR::NoIndex;
@@ -459,6 +489,23 @@ class Lowerer {
         return true;
     }
 
+    bool register_fused_fragment_stage(const TypedIR::Function& entry) {
+        if (entry.parameter_count != 1u || entry.first_parameter == TypedIR::NoIndex ||
+            entry.first_parameter >= module_.parameters.size()) {
+            return fail("fused fragment stage requires one varying parameter");
+        }
+        const auto& parameter = module_.parameters[entry.first_parameter];
+        fragment_parameter_type_ = type(parameter.type_id);
+        if (parameter.direction != 0u || fragment_parameter_type_ == nullptr) {
+            return fail("fused fragment varying parameter metadata is invalid");
+        }
+        fragment_parameter_argument_ = fragment_callable_->create_value_argument(fragment_parameter_type_);
+        for (auto& argument : fragment_neighbor_arguments_) {
+            argument = fragment_callable_->create_value_argument(fragment_parameter_type_);
+        }
+        return true;
+    }
+
     bool bind_graphics_stage_parameters(const TypedIR::Function& entry) {
         if (entry.kind != kFunctionFragment) return true;
         const auto& parameter = module_.parameters[entry.first_parameter];
@@ -473,6 +520,13 @@ class Lowerer {
         auto* width = extract(xir_module_.create_dispatch_size(), Type::of<uint32_t>(), {index_constant(0u)});
         auto* row = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {y, width});
         auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {row, x});
+        if (inputs_.graphics_sample_count > 1u) {
+            index = builder_.call(
+                Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD,
+                {builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL,
+                               {index, index_constant(inputs_.graphics_sample_count)}),
+                 index_constant(inputs_.graphics_sample_index)});
+        }
         auto* value = builder_.call(parameter_type, ResourceReadOp::BUFFER_READ, {stage_input_->argument, index});
         auto* local = builder_.alloca_local(parameter_type);
         builder_.store(local, value);
@@ -493,6 +547,17 @@ class Lowerer {
         return true;
     }
 
+    bool bind_fused_fragment_parameters(const TypedIR::Function& entry) {
+        const auto& parameter = module_.parameters[entry.first_parameter];
+        const auto name = std::string{string(parameter.name_id)};
+        if (name.empty()) return fail("fused fragment varying parameter name is missing");
+        auto* local = builder_.alloca_local(fragment_parameter_type_);
+        builder_.store(local, fragment_parameter_argument_);
+        locals_.emplace(name, local);
+        fragment_parameter_name_ = name;
+        return true;
+    }
+
     bool register_ad_resources() {
         if (ad_inputs_ == nullptr) return true;
         if (ad_inputs_->loss_name.empty() || ad_inputs_->parameters.empty())
@@ -505,7 +570,7 @@ class Lowerer {
                 parameter.element_count == 0u ||
                 (!source->second.element_type->is_float() && !source->second.element_type->is_vector()))
                 return fail("Luisa AD parameter must identify a non-empty float buffer");
-            auto* gradient = kernel_->create_resource_argument(Type::buffer(source->second.element_type));
+            auto* gradient = function_->create_resource_argument(Type::buffer(source->second.element_type));
             ad_resources_.emplace(parameter.source_binding,
                                   AdResource{&source->second, gradient, parameter.element_count});
             if (ad_gradient_layouts_ != nullptr)
@@ -1156,6 +1221,15 @@ class Lowerer {
     }
 
     Value* lower_push_constant(const TypedIR::Expression& expression, const Type* result_type) {
+        if (inputs_.dynamic_push_constants) {
+            auto* resource = resource_by_binding(expression.op);
+            if (resource == nullptr || resource->kind != kResourcePushConstant ||
+                resource->element_type != result_type) {
+                return fail("FEIR dynamic push constant has the wrong resource layout"), nullptr;
+            }
+            return builder_.call(result_type, ResourceReadOp::BUFFER_READ,
+                                 {resource->argument, index_constant(0u)});
+        }
         const TypedIR::PushConstantInfo* found = nullptr;
         for (const auto& push : inputs_.push_constants) if (push.binding == expression.op) found = &push;
         if (found == nullptr || found->data == nullptr || found->size < result_type->size())
@@ -1274,6 +1348,30 @@ class Lowerer {
     }
 
     Value* lower_fragment_derivative(uint32_t expression_id, const Type* result_type, bool along_x) {
+        if (fragment_callable_ != nullptr) {
+            if (fragment_parameter_name_.empty() || fragment_parameter_type_ == nullptr) {
+                return fail("fused fragment derivatives require a varying parameter"), nullptr;
+            }
+            auto evaluate = [&](Value* varying) -> Value* {
+                auto* temporary = builder_.alloca_local(fragment_parameter_type_);
+                builder_.store(temporary, varying);
+                auto found = locals_.find(fragment_parameter_name_);
+                if (found == locals_.end()) return nullptr;
+                auto* saved = found->second;
+                found->second = temporary;
+                auto* value = lower_expression(expression_id);
+                found->second = saved;
+                return value;
+            };
+            const auto offset = along_x ? 0u : 2u;
+            auto* first = evaluate(fragment_neighbor_arguments_[offset]);
+            auto* second = evaluate(fragment_neighbor_arguments_[offset + 1u]);
+            if (first == nullptr || second == nullptr || first->type() != result_type ||
+                second->type() != result_type) {
+                return fail("fused fragment derivative expression has an unsupported type"), nullptr;
+            }
+            return builder_.call(result_type, ArithmeticOp::BINARY_SUB, {second, first});
+        }
         if (stage_input_ == nullptr || fragment_parameter_name_.empty() || fragment_parameter_type_ == nullptr) {
             return fail("fragment derivatives require a varying input"), nullptr;
         }
@@ -1296,6 +1394,13 @@ class Lowerer {
         auto evaluate = [&](Value* sample_x, Value* sample_y) -> Value* {
             auto* row = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL, {sample_y, width});
             auto* index = builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD, {row, sample_x});
+            if (inputs_.graphics_sample_count > 1u) {
+                index = builder_.call(
+                    Type::of<uint32_t>(), ArithmeticOp::BINARY_ADD,
+                    {builder_.call(Type::of<uint32_t>(), ArithmeticOp::BINARY_MUL,
+                                   {index, index_constant(inputs_.graphics_sample_count)}),
+                     index_constant(inputs_.graphics_sample_index)});
+            }
             auto* varying = builder_.call(fragment_parameter_type_, ResourceReadOp::BUFFER_READ,
                                           {stage_input_->argument, index});
             auto* temporary = builder_.alloca_local(fragment_parameter_type_);
@@ -1640,12 +1745,15 @@ class Lowerer {
                 auto* value = lower_expression(statement.a);
                 if (value == nullptr) return false;
                 if (stage_output_ != nullptr) {
-                    auto* dispatch = xir_module_.create_dispatch_id();
                     if (!stage_color_outputs_.empty()) {
-                        auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
-                        auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
-                        auto* coordinate = builder_.call(
-                            Type::vector(Type::of<uint32_t>(), 2u), ArithmeticOp::AGGREGATE, {x, y});
+                        Value* coordinate = fragment_coordinate_argument_;
+                        if (coordinate == nullptr) {
+                            auto* dispatch = xir_module_.create_dispatch_id();
+                            auto* x = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
+                            auto* y = extract(dispatch, Type::of<uint32_t>(), {index_constant(1u)});
+                            coordinate = builder_.call(
+                                Type::vector(Type::of<uint32_t>(), 2u), ArithmeticOp::AGGREGATE, {x, y});
+                        }
                         for (const auto& output : stage_color_outputs_) {
                             auto* source = output.return_field == TypedIR::NoIndex
                                                ? value
@@ -1660,6 +1768,7 @@ class Lowerer {
                                           {output.resource->argument, coordinate, source});
                         }
                     } else {
+                        auto* dispatch = xir_module_.create_dispatch_id();
                         auto* index = extract(dispatch, Type::of<uint32_t>(), {index_constant(0u)});
                         builder_.call(ResourceWriteOp::BUFFER_WRITE, {stage_output_->argument, index, value});
                     }
@@ -1741,6 +1850,8 @@ class Lowerer {
     std::vector<AdGradientLayout>* ad_gradient_layouts_ = nullptr;
     std::string* error_ = nullptr;
     KernelFunction* kernel_ = nullptr;
+    FunctionDefinition* function_ = nullptr;
+    CallableFunction* fragment_callable_ = nullptr;
     XIRBuilder builder_;
     std::unordered_map<uint32_t, const Type*> types_;
     std::unordered_map<uint32_t, const Type*> struct_types_;
@@ -1762,6 +1873,9 @@ class Lowerer {
     Resource* stage_coverage_ = nullptr;
     std::string fragment_parameter_name_;
     const Type* fragment_parameter_type_ = nullptr;
+    ValueArgument* fragment_parameter_argument_ = nullptr;
+    std::array<ValueArgument*, 4u> fragment_neighbor_arguments_{};
+    ValueArgument* fragment_coordinate_argument_ = nullptr;
     uint32_t logical_groups_per_block_ = 1u;
 };
 
@@ -1775,6 +1889,16 @@ KernelFunction* LowerToXir(const TypedIR::Module& module, const TypedIR::Lowerin
     if (buffer_layouts != nullptr) buffer_layouts->clear();
     if (ad_gradient_layouts != nullptr) ad_gradient_layouts->clear();
     return Lowerer{module, inputs, xir_module, buffer_layouts, ad_inputs, ad_gradient_layouts, error}.lower();
+}
+
+GraphicsFragmentXir LowerGraphicsFragmentToXir(
+    const TypedIR::Module& module, const TypedIR::LoweringInputs& inputs,
+    xir::Module& xir_module, std::vector<BufferLayout>* buffer_layouts,
+    std::string* error) {
+    if (error != nullptr) error->clear();
+    if (buffer_layouts != nullptr) buffer_layouts->clear();
+    return Lowerer{module, inputs, xir_module, buffer_layouts, nullptr, nullptr, error}
+        .lower_graphics_fragment();
 }
 
 } // namespace Feather::Luisa

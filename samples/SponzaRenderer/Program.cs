@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using Feather;
 using Feather.Graphics;
 using Feather.Math;
@@ -28,17 +29,17 @@ Console.WriteLine($"Loading {objPath}");
 var materials = new MaterialLibrary();
 var mesh = ObjMesh.Load(objPath, baseDirectory, materials);
 var atlas = TextureAtlas.Build(materials, AtlasSize, AtlasGrid, AtlasGutter);
-var vertices = mesh.Flatten(materials, atlas);
+var geometry = mesh.BuildGeometry(materials, atlas);
 var center = mesh.Center;
 var radius = mesh.Radius;
 
 Console.WriteLine($"Positions: {mesh.PositionCount:N0}  Triangles: {mesh.TriangleCount:N0}");
 Console.WriteLine($"Materials: {materials.Count:N0}  Atlas textures: {atlas.LoadedTextureCount:N0}");
-Console.WriteLine($"Vertices: {vertices.Length:N0}  Center: {center}  Radius: {radius:N2}");
+Console.WriteLine($"Vertices: {geometry.Vertices.Length:N0}  Indices: {geometry.Indices.Length:N0}  Center: {center}  Radius: {radius:N2}");
 
 if (options.CapturePath is not null)
 {
-    RenderCapture(options.CapturePath, vertices, atlas, center);
+    RenderCapture(options.CapturePath, geometry, atlas, center, options.Benchmark);
     return;
 }
 
@@ -53,7 +54,7 @@ using var window = GpuWindow.Create(new()
 using var presenter = window.CreateTexturePresenter();
 using var color = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(window.Width, window.Height, PixelFormat.Rgba8);
 using var depth = GPU.CreateDepthTexture2D(window.Width, window.Height);
-using var scene = SponzaGpuScene.Create(vertices, atlas, MsaaSamples);
+using var scene = SponzaGpuScene.Create(geometry, atlas, MsaaSamples);
 
 var projection = MatrixMath.PerspectiveVk(FieldOfViewDegrees, (float)window.Width / window.Height, NearPlane, FarPlane);
 var model = MatrixMath.Translation(-center * ModelScale) * MatrixMath.Scale(ModelScale);
@@ -121,18 +122,36 @@ while (window.IsOpen)
     presenter.Present(color);
 }
 
-static void RenderCapture(string path, SponzaVertex[] vertices, TextureAtlas atlas, float3 center)
+static void RenderCapture(string path, SponzaGeometry geometry, TextureAtlas atlas, float3 center, bool benchmark)
 {
     using var color = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(WindowWidth, WindowHeight, PixelFormat.Rgba8);
     using var depth = GPU.CreateDepthTexture2D(WindowWidth, WindowHeight);
-    using var scene = SponzaGpuScene.Create(vertices, atlas, MsaaSamples);
+    using var scene = SponzaGpuScene.Create(geometry, atlas, MsaaSamples);
 
     var projection = MatrixMath.PerspectiveVk(FieldOfViewDegrees, (float)WindowWidth / WindowHeight, NearPlane, FarPlane);
     var model = MatrixMath.Translation(-center * ModelScale) * MatrixMath.Scale(ModelScale);
     var camera = new Camera(new float3(0.0f, 2.0f, 5.0f), 0.0f, -0.2f);
     var mvp = projection * MatrixMath.CameraView(camera.Position, camera.Yaw, camera.Pitch) * model;
 
-    scene.Draw(color, depth, mvp);
+    if (benchmark)
+    {
+        scene.Draw(color, depth, mvp);
+        var timings = new double[5];
+        for (var i = 0; i < timings.Length; i++)
+        {
+            var start = Stopwatch.GetTimestamp();
+            scene.Draw(color, depth, mvp);
+            timings[i] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        }
+
+        var ordered = timings.Order().ToArray();
+        Console.WriteLine($"Draw timings (ms): {string.Join(", ", timings.Select(value => value.ToString("F3", CultureInfo.InvariantCulture)))}");
+        Console.WriteLine($"Draw median: {ordered[ordered.Length / 2]:F3} ms");
+    }
+    else
+    {
+        scene.Draw(color, depth, mvp);
+    }
     var directory = Path.GetDirectoryName(Path.GetFullPath(path));
     if (!string.IsNullOrWhiteSpace(directory))
     {
@@ -204,32 +223,33 @@ static string FindSponzaDirectory()
 file sealed class SponzaGpuScene : IDisposable
 {
     private readonly GpuBuffer<SponzaVertex> vertexBuffer;
+    private readonly GpuBuffer<uint> indexBuffer;
     private readonly GpuTexture2D<Rgba32, float4> texture;
     private readonly SamplerState sampler;
     private readonly GpuGraphicsPipeline<SponzaVertexShader, SponzaFragmentShader, SponzaVaryings> pipeline;
-    private readonly uint vertexCount;
 
     private SponzaGpuScene(
         GpuBuffer<SponzaVertex> vertexBuffer,
+        GpuBuffer<uint> indexBuffer,
         GpuTexture2D<Rgba32, float4> texture,
         SamplerState sampler,
         GpuGraphicsPipeline<SponzaVertexShader, SponzaFragmentShader, SponzaVaryings> pipeline,
-        int atlasMipLevels,
-        uint vertexCount)
+        int atlasMipLevels)
     {
         this.vertexBuffer = vertexBuffer;
+        this.indexBuffer = indexBuffer;
         this.texture = texture;
         this.sampler = sampler;
         this.pipeline = pipeline;
         AtlasMipLevels = atlasMipLevels;
-        this.vertexCount = vertexCount;
     }
 
     public int AtlasMipLevels { get; }
 
-    public static SponzaGpuScene Create(SponzaVertex[] vertices, TextureAtlas atlas, SampleCount sampleCount)
+    public static SponzaGpuScene Create(SponzaGeometry geometry, TextureAtlas atlas, SampleCount sampleCount)
     {
-        var vertexBuffer = GPU.CreateBuffer<SponzaVertex>(vertices, BufferAccess.ReadOnly);
+        var vertexBuffer = GPU.CreateBuffer<SponzaVertex>(geometry.Vertices, BufferAccess.ReadOnly);
+        var indexBuffer = GPU.CreateBuffer<uint>(geometry.Indices, BufferAccess.ReadOnly);
         var atlasMipLevels = CalculateMipLevelCount(atlas.Width, atlas.Height);
         var texture = GPU.CreateTexture2D<Rgba32, float4>(
             atlas.Width,
@@ -249,7 +269,7 @@ file sealed class SponzaGpuScene : IDisposable
 
         texture.Upload(atlas.Pixels);
         texture.GenerateMipmaps();
-        return new SponzaGpuScene(vertexBuffer, texture, sampler, pipeline, atlasMipLevels, (uint)vertices.Length);
+        return new SponzaGpuScene(vertexBuffer, indexBuffer, texture, sampler, pipeline, atlasMipLevels);
     }
 
     public void Draw<TPixel, TValue, TDepthPixel, TDepthValue>(
@@ -261,12 +281,12 @@ file sealed class SponzaGpuScene : IDisposable
         where TDepthPixel : unmanaged
         where TDepthValue : unmanaged
     {
-        pipeline.Draw(
+        pipeline.DrawIndexed(
             new SponzaVertexShader(vertexBuffer.AsReadOnly(), new Uniform<float4x4>(mvp)),
             new SponzaFragmentShader(texture.AsSampled(), sampler),
-            color,
+            [color],
             depth,
-            vertexCount,
+            indexBuffer,
             new GraphicsDrawDesc { DepthLoadOp = GraphicsDepthLoadOp.Clear, ClearDepth = 1.0f });
     }
 
@@ -275,6 +295,7 @@ file sealed class SponzaGpuScene : IDisposable
         pipeline.Dispose();
         sampler.Dispose();
         texture.Dispose();
+        indexBuffer.Dispose();
         vertexBuffer.Dispose();
     }
 
@@ -292,12 +313,13 @@ file sealed class SponzaGpuScene : IDisposable
     }
 }
 
-file readonly record struct SponzaOptions(string? SponzaDirectory, string? CapturePath)
+file readonly record struct SponzaOptions(string? SponzaDirectory, string? CapturePath, bool Benchmark)
 {
     public static SponzaOptions Parse(string[] args)
     {
         string? directory = null;
         string? capture = null;
+        var benchmark = false;
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
@@ -318,10 +340,16 @@ file readonly record struct SponzaOptions(string? SponzaDirectory, string? Captu
                 continue;
             }
 
+            if (arg == "--benchmark")
+            {
+                benchmark = true;
+                continue;
+            }
+
             directory ??= arg;
         }
 
-        return new SponzaOptions(directory, capture);
+        return new SponzaOptions(directory, capture, benchmark);
     }
 }
 
@@ -612,6 +640,8 @@ file sealed class TextureAtlas
     }
 }
 
+file readonly record struct SponzaGeometry(SponzaVertex[] Vertices, uint[] Indices);
+
 file sealed class ObjMesh
 {
     private readonly List<float3> positions = [];
@@ -704,15 +734,26 @@ file sealed class ObjMesh
         return mesh;
     }
 
-    public SponzaVertex[] Flatten(MaterialLibrary materials, TextureAtlas atlas)
+    public SponzaGeometry BuildGeometry(MaterialLibrary materials, TextureAtlas atlas)
     {
-        var result = new List<SponzaVertex>(TriangleCount * 3);
+        var vertices = new List<SponzaVertex>(positions.Count);
+        var indices = new List<uint>(TriangleCount * 3);
+        var vertexLookup = new Dictionary<GeometryVertexKey, uint>();
         foreach (var group in groups)
         {
             var material = materials.Find(group.MaterialName);
-            var atlasTransform = atlas.GetUvTransform(material?.AtlasSlot ?? 0);
+            var atlasSlot = material?.AtlasSlot ?? 0;
+            var atlasTransform = atlas.GetUvTransform(atlasSlot);
             for (var i = 0; i < group.PositionIndices.Count; i++)
             {
+                var key = new GeometryVertexKey(
+                    group.PositionIndices[i], group.NormalIndices[i], group.UvIndices[i], atlasSlot);
+                if (vertexLookup.TryGetValue(key, out var existing))
+                {
+                    indices.Add(existing);
+                    continue;
+                }
+
                 var position = positions[group.PositionIndices[i]];
                 var normal = group.NormalIndices[i] >= 0 && group.NormalIndices[i] < normals.Count
                     ? normals[group.NormalIndices[i]]
@@ -720,14 +761,17 @@ file sealed class ObjMesh
                 var uv = group.UvIndices[i] >= 0 && group.UvIndices[i] < uvs.Count
                     ? uvs[group.UvIndices[i]]
                     : float2.Zero;
-                result.Add(new SponzaVertex
+                var index = checked((uint)vertices.Count);
+                vertices.Add(new SponzaVertex
                 {
                     Position = position, Normal = normal, Uv = uv, AtlasTransform = atlasTransform
                 });
+                vertexLookup.Add(key, index);
+                indices.Add(index);
             }
         }
 
-        return [.. result];
+        return new SponzaGeometry([.. vertices], [.. indices]);
     }
 
     private void AddFace(FaceGroup group, ReadOnlySpan<string> faceVertices)
@@ -797,6 +841,7 @@ file sealed class ObjMesh
     }
 
     private readonly record struct VertexIndex(int Position, int Uv, int Normal);
+    private readonly record struct GeometryVertexKey(int Position, int Normal, int Uv, int AtlasSlot);
 }
 
 file struct Camera(float3 position, float yaw, float pitch)

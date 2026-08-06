@@ -33,6 +33,12 @@ struct AdGradientLayout {
     const luisa::compute::Type* device_type = nullptr;
 };
 
+struct GraphicsFragmentXir {
+    luisa::compute::xir::CallableFunction* function = nullptr;
+    const luisa::compute::Type* varying_type = nullptr;
+    const luisa::compute::Type* return_type = nullptr;
+};
+
 luisa::compute::xir::KernelFunction* LowerToXir(
     const TypedIR::Module& module,
     const TypedIR::LoweringInputs& inputs,
@@ -40,6 +46,13 @@ luisa::compute::xir::KernelFunction* LowerToXir(
     std::vector<BufferLayout>* buffer_layouts,
     const AdInputs* ad_inputs = nullptr,
     std::vector<AdGradientLayout>* ad_gradient_layouts = nullptr,
+    std::string* error = nullptr);
+
+GraphicsFragmentXir LowerGraphicsFragmentToXir(
+    const TypedIR::Module& module,
+    const TypedIR::LoweringInputs& inputs,
+    luisa::compute::xir::Module& xir_module,
+    std::vector<BufferLayout>* buffer_layouts,
     std::string* error = nullptr);
 
 } // namespace Feather::Luisa
