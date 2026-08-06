@@ -18,8 +18,8 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <FeatherPackRepositoryDocs Condition="'$(FeatherPackRepositoryDocs)' == ''">true</FeatherPackRepositoryDocs>
     <PackageReadmeFile Condition="'$(FeatherPackRepositoryDocs)' == 'true'">README.md</PackageReadmeFile>
-    <PackageTags>gpu;compute;graphics;roslyn;easygpu;luisa;vulkan;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend. Adds the LuisaCompute Vulkan XIR execution backend for compute kernels and autodiff while retaining EasyGPU as the default backend. Raster graphics continue to execute through EasyGPU because the pinned LuisaCompute release has no XIR raster entry point.</PackageReleaseNotes>
+    <PackageTags>gpu;compute;graphics;roslyn;luisa;metal;vulkan;autodiff</PackageTags>
+    <PackageReleaseNotes>FeatherCompute now uses LuisaCompute as its sole runtime for compute, automatic differentiation, neural networks, compute rasterization, and presentation.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true' and '$(FeatherPackRepositoryDocs)' == 'true'">

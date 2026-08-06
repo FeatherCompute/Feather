@@ -46,38 +46,6 @@ public sealed class GpuContext : IDisposable
         return new GpuStream(this, stream);
     }
 
-    public BackendType BackendType
-    {
-        get
-        {
-            ThrowIfDisposed();
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_backend_type(Handle, out var backend));
-            return (BackendType)backend;
-        }
-    }
-
-    /// <summary>
-    /// Gets the active EasyGPU backend capabilities reported by the native runtime.
-    /// </summary>
-    public BackendCaps Caps
-    {
-        get
-        {
-            ThrowIfDisposed();
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_caps(Handle, out var caps));
-            return new BackendCaps(
-                (BackendType)caps.BackendType,
-                caps.MaxWorkGroupSizeX,
-                caps.MaxWorkGroupSizeY,
-                caps.MaxWorkGroupSizeZ,
-                caps.SupportsGraphics != 0,
-                caps.SupportsAD != 0,
-                caps.SupportsNN != 0,
-                caps.SupportsDepthClamp != 0,
-                caps.SupportsNonFillPolygonMode != 0);
-        }
-    }
-
     public static GpuContext GetDefault()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var handle));
@@ -113,24 +81,3 @@ public sealed class GpuContext : IDisposable
         return Handle.RawValue == other.Handle.RawValue;
     }
 }
-
-public enum BackendType : uint
-{
-    Unavailable,
-    OpenGL,
-    Vulkan
-}
-
-/// <summary>
-/// Describes native EasyGPU backend limits and feature flags.
-/// </summary>
-public readonly record struct BackendCaps(
-    BackendType BackendType,
-    uint MaxWorkGroupSizeX,
-    uint MaxWorkGroupSizeY,
-    uint MaxWorkGroupSizeZ,
-    bool SupportsGraphics,
-    bool SupportsAD,
-    bool SupportsNN,
-    bool SupportsDepthClamp,
-    bool SupportsNonFillPolygonMode);

@@ -6,7 +6,7 @@ using Feather.Math;
 namespace Feather.Interop;
 
 /// <summary>
-/// Provides helpers for byte offsets that follow EasyGPU's GPU layout rules.
+/// Provides helpers for byte offsets that follow Feather's std430 GPU layout rules.
 /// </summary>
 public static class GpuValueLayout
 {
@@ -27,7 +27,7 @@ public static class GpuValueLayout
 }
 
 /// <summary>
-/// Describes the EasyGPU-compatible byte layout for a managed GPU value type.
+/// Describes the std430-compatible byte layout for a managed GPU value type.
 /// </summary>
 /// <typeparam name="T">The unmanaged managed value type.</typeparam>
 public static class GpuValueLayout<T>
@@ -41,7 +41,7 @@ public static class GpuValueLayout<T>
     public static int CpuSizeInBytes => Layout.CpuSizeInBytes;
 
     /// <summary>
-    /// Gets the byte stride used for <typeparamref name="T"/> inside an EasyGPU <c>layout(std430)</c> buffer array.
+    /// Gets the byte stride used for <typeparamref name="T"/> inside a <c>layout(std430)</c> buffer array.
     /// </summary>
     public static int BufferElementStride => Layout.BufferElementStride;
 
@@ -56,12 +56,12 @@ public static class GpuValueLayout<T>
     public static int Alignment => Layout.Alignment;
 
     /// <summary>
-    /// Gets a value indicating whether buffer upload/download must convert between CPU and EasyGPU layout.
+    /// Gets a value indicating whether buffer upload/download must convert between CPU and GPU layout.
     /// </summary>
     public static bool RequiresBufferRepacking => BufferElementStride != CpuSizeInBytes || Layout.RequiresBufferRepacking;
 
     /// <summary>
-    /// Packs CPU values into the EasyGPU buffer-array layout.
+    /// Packs CPU values into the GPU buffer-array layout.
     /// </summary>
     /// <param name="source">The source CPU values.</param>
     /// <param name="destination">The destination GPU byte span.</param>
@@ -70,14 +70,14 @@ public static class GpuValueLayout<T>
         var required = checked(source.Length * BufferElementStride);
         if (destination.Length < required)
         {
-            throw new ArgumentException("Destination span is too small for the EasyGPU buffer layout.", nameof(destination));
+            throw new ArgumentException("Destination span is too small for the GPU buffer layout.", nameof(destination));
         }
 
         Layout.PackBuffer(source, destination[..required]);
     }
 
     /// <summary>
-    /// Unpacks EasyGPU buffer-array bytes into CPU values.
+    /// Unpacks GPU buffer-array bytes into CPU values.
     /// </summary>
     /// <param name="source">The source GPU byte span.</param>
     /// <param name="destination">The destination CPU values.</param>
@@ -86,14 +86,14 @@ public static class GpuValueLayout<T>
         var required = checked(destination.Length * BufferElementStride);
         if (source.Length < required)
         {
-            throw new ArgumentException("Source span is too small for the EasyGPU buffer layout.", nameof(source));
+            throw new ArgumentException("Source span is too small for the GPU buffer layout.", nameof(source));
         }
 
         Layout.UnpackBuffer(source[..required], destination);
     }
 
     /// <summary>
-    /// Packs one CPU value into its EasyGPU struct-field or push-constant layout.
+    /// Packs one CPU value into its GPU struct-field or push-constant layout.
     /// </summary>
     /// <param name="value">The source CPU value.</param>
     /// <param name="destination">The destination GPU byte span.</param>
@@ -101,14 +101,14 @@ public static class GpuValueLayout<T>
     {
         if (destination.Length < FieldSizeInBytes)
         {
-            throw new ArgumentException("Destination span is too small for the EasyGPU value layout.", nameof(destination));
+            throw new ArgumentException("Destination span is too small for the GPU value layout.", nameof(destination));
         }
 
         Layout.PackValue(in value, destination[..FieldSizeInBytes]);
     }
 
     /// <summary>
-    /// Unpacks one EasyGPU struct-field or push-constant value into CPU layout.
+    /// Unpacks one GPU struct-field or push-constant value into CPU layout.
     /// </summary>
     /// <param name="source">The source GPU byte span.</param>
     /// <returns>The unpacked CPU value.</returns>
@@ -116,7 +116,7 @@ public static class GpuValueLayout<T>
     {
         if (source.Length < FieldSizeInBytes)
         {
-            throw new ArgumentException("Source span is too small for the EasyGPU value layout.", nameof(source));
+            throw new ArgumentException("Source span is too small for the GPU value layout.", nameof(source));
         }
 
         return Layout.UnpackValue(source[..FieldSizeInBytes]);
@@ -124,7 +124,7 @@ public static class GpuValueLayout<T>
 
     private static IGpuValueLayout<T> CreateLayout()
     {
-        if (EasyGpuBuiltinLayout<T>.TryCreate(out var builtin))
+        if (GpuBuiltinLayout<T>.TryCreate(out var builtin))
         {
             return builtin;
         }
@@ -201,7 +201,7 @@ internal sealed class BlittableGpuValueLayout<T> : IGpuValueLayout<T>
             return;
         }
 
-        // EasyGPU Runtime/Buffer.h writes arrays using Std430Converter<T>::GetGPULayoutSize().
+        // Feather's native ABI stores buffer arrays with their std430 element stride.
         // For vec3/ivec3 this means a 12-byte CPU payload in a 16-byte array slot.
         destination.Clear();
         for (var i = 0; i < source.Length; i++)
@@ -282,7 +282,7 @@ internal sealed class GpuStructValueLayout<T> : IGpuValueLayout<T>
     }
 }
 
-internal static class EasyGpuBuiltinLayout<T>
+internal static class GpuBuiltinLayout<T>
     where T : unmanaged
 {
     public static bool TryCreate(out IGpuValueLayout<T> layout)
@@ -290,8 +290,7 @@ internal static class EasyGpuBuiltinLayout<T>
         var type = typeof(T);
         var cpuSize = Unsafe.SizeOf<T>();
 
-        // These sizes mirror EasyGPU/include/Utility/Meta/Std430Layout.h for buffer arrays
-        // and EasyGPU/include/Utility/Meta/StructMeta.h for fields and push constants.
+        // These sizes implement the std430 array and struct-field rules used by Feather IR.
         if (type == typeof(float) || type == typeof(int) || type == typeof(uint))
         {
             layout = new BlittableGpuValueLayout<T>(cpuSize, 4, 4, 4);

@@ -6,7 +6,7 @@
     <IsPackable>true</IsPackable>
     <PackageId>FeatherCompute.Native</PackageId>
     <Title>FeatherCompute.Native</Title>
-    <Description>SafeHandle and P/Invoke bindings for the Feather EasyGPU C ABI.</Description>
+    <Description>SafeHandle and P/Invoke bindings for the Feather native LuisaCompute ABI.</Description>
   </PropertyGroup>
 
 </Project>

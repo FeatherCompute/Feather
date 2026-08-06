@@ -12,7 +12,7 @@ namespace Feather.Math;
 /// produces an image that looks plausible and compares wrongly.
 /// </para>
 /// <para>
-/// Everything here targets the Vulkan viewport EasyGPU presents: clip Y points down, and clip depth
+/// Everything here targets Feather's Vulkan-style viewport: clip Y points down, and clip depth
 /// runs 0 at the near plane to 1 at the far one. That is deliberately not OpenGL's -1..1, and it is the
 /// same space <c>RenderCamera.ViewProjection</c> arrives in, so a matrix from this class and one from
 /// the host can be compared and mixed. The view half is right-handed and looks down -Z, which is the

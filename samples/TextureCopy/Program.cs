@@ -7,9 +7,6 @@ const int Width = 4;
 const int Height = 4;
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<TextureCopyKernel>(glsl =>
-    glsl.Contains("imageLoad", StringComparison.Ordinal) &&
-    glsl.Contains("imageStore", StringComparison.Ordinal));
 
 // Create a simple 4x4 texture with RGBA pixel data.
 var pixels = new Rgba32[]
@@ -85,30 +82,12 @@ public readonly partial record struct Rgba32(byte R, byte G, byte B, byte A);
 internal static class SampleProof
 {
     /// <summary>
-    /// Prints the active backend and workgroup limits reported by EasyGPU.
+    /// Prints the selected Luisa device.
     /// </summary>
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    /// <summary>
-    /// Verifies the generated source comes from the EasyGPU GLSL bridge.
-    /// </summary>
-    public static void AssertEasyGpuGlsl<TKernel>(Func<string, bool>? extraCheck = null)
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal) ||
-            (extraCheck is not null && !extraCheck(glsl)))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce EasyGPU GLSL.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     /// <summary>

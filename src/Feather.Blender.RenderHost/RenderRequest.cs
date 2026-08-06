@@ -211,7 +211,7 @@ internal static class MatrixProtocol
             return matrix;
         }
 
-        // Blender exposes an OpenGL-style matrix (Y up, depth -W..W). EasyGPU's
+        // Blender exposes an OpenGL-style matrix (Y up, depth -W..W). Feather's
         // Vulkan viewport is Y down with depth 0..W.
         var blenderToVulkan = new float4x4(
             new float4(1.0f, 0.0f, 0.0f, 0.0f),

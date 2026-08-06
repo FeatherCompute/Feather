@@ -787,7 +787,7 @@ internal static class FeatherIrWriter
         writer.Write((uint)assignments.Count);
         foreach (var assignment in assignments)
         {
-            // Binding-based records let the native EasyGPU bridge consume semantic assignment data
+            // Binding-based records let the native lowering consume semantic assignment data
             // without parsing the transitional ASSIGN1 operand string.
             writer.Write(assignment.InstructionIndex);
             writer.Write(assignment.DestinationBinding);
@@ -820,7 +820,7 @@ internal static class FeatherIrWriter
 
         foreach (var node in section.Nodes)
         {
-            // Expression records are child-index based so the EasyGPU bridge can build a typed
+            // Expression records are child-index based so the native lowering can build a typed
             // expression graph directly from Roslyn semantic lowering.
             writer.Write(node.Kind);
             writer.Write(node.Operation);

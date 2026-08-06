@@ -73,9 +73,9 @@ public sealed class ShaderLibraryAttribute : Attribute;
 /// <item>Kernel-local callables may be static or instance methods defined inside the kernel or shader struct.</item>
 /// <item>Reusable callables must be static methods on a source-available type marked with <see cref="ShaderLibraryAttribute"/>.</item>
 /// <item>The generator builds a call graph and emits each callable exactly once, even when referenced from multiple call sites.</item>
-/// <item>Recursion is not supported by current EasyGPU backends and will produce a diagnostic.</item>
+/// <item>Recursion is not supported by the current generated-kernel pipeline and will produce a diagnostic.</item>
 /// <item>Parameters may be scalars, vectors, matrices, structs, or resource references where the backend allows.</item>
-/// <item><c>ref</c> / <c>inout</c> parameters are accepted only where EasyGPU supports writable arguments.</item>
+/// <item><c>ref</c> / <c>inout</c> parameters are accepted only where the generated IR supports writable arguments.</item>
 /// </list>
 /// </remarks>
 [AttributeUsage(AttributeTargets.Method)]

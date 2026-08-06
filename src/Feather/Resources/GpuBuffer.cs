@@ -4,7 +4,7 @@ using Feather.Interop;
 namespace Feather.Resources;
 
 /// <summary>
-/// Owns a typed EasyGPU storage buffer.
+/// Owns a typed GPU storage buffer.
 /// </summary>
 /// <typeparam name="T">The unmanaged shader element type.</typeparam>
 public sealed class GpuBuffer<T> : IDisposable
@@ -39,7 +39,7 @@ public sealed class GpuBuffer<T> : IDisposable
     public BufferAccess Access { get; }
 
     /// <summary>
-    /// Gets the EasyGPU std430 array stride for one element.
+    /// Gets the std430 array stride for one element.
     /// </summary>
     internal int ElementStride => GpuValueLayout<T>.BufferElementStride;
 

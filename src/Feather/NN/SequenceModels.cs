@@ -22,7 +22,7 @@ public sealed class PositionalEmbedding : Module
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(embeddingSize);
         BlockSize = blockSize;
         EmbeddingSize = embeddingSize;
-        Weight = ParameterInitializers.XavierParameterEasyGpuReference(
+        Weight = ParameterInitializers.XavierParameterDeterministic(
             "weight",
             new TensorShape(blockSize, embeddingSize),
             blockSize,
@@ -106,7 +106,7 @@ public sealed class SelfAttention : Module
         var projectionSize = embeddingSize * embeddingSize;
         for (var layer = 0; layer < 4; layer++)
         {
-            var layerValues = ParameterInitializers.XavierUniformEasyGpuReference(
+            var layerValues = ParameterInitializers.XavierUniformDeterministic(
                 projectionSize,
                 embeddingSize,
                 embeddingSize,
@@ -223,8 +223,8 @@ public sealed class TransformerBlock : Module
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MlpSize);
 
         Attention = new SelfAttention(embeddingSize, headCount, seed);
-        Fc1 = ParameterInitializers.XavierParameterEasyGpuReference("fc1", new TensorShape(MlpSize, embeddingSize), embeddingSize, MlpSize, seed + 10);
-        Fc2 = ParameterInitializers.XavierParameterEasyGpuReference("fc2", new TensorShape(embeddingSize, MlpSize), MlpSize, embeddingSize, seed + 11);
+        Fc1 = ParameterInitializers.XavierParameterDeterministic("fc1", new TensorShape(MlpSize, embeddingSize), embeddingSize, MlpSize, seed + 10);
+        Fc2 = ParameterInitializers.XavierParameterDeterministic("fc2", new TensorShape(embeddingSize, MlpSize), MlpSize, embeddingSize, seed + 11);
 
         parameters.AddRange(Attention.Parameters);
         parameters.Add(Fc1);
@@ -351,10 +351,10 @@ public sealed class GptLanguageModel : Module
         HeadCount = headCount;
 
         TokenEmbedding = new Embedding(vocabularySize, embeddingSize);
-        TokenEmbedding.Weight.Value.Buffer.Upload(ParameterInitializers.XavierUniformEasyGpuReference(vocabularySize * embeddingSize, vocabularySize, embeddingSize, seed));
+        TokenEmbedding.Weight.Value.Buffer.Upload(ParameterInitializers.XavierUniformDeterministic(vocabularySize * embeddingSize, vocabularySize, embeddingSize, seed));
         PositionalEmbedding = new PositionalEmbedding(blockSize, embeddingSize, seed + 81);
         Block = new TransformerBlock(blockSize, embeddingSize, headCount, seed: seed + 414);
-        LmHead = ParameterInitializers.XavierParameterEasyGpuReference("lmHead", new TensorShape(vocabularySize, embeddingSize), vocabularySize, embeddingSize, seed + 747);
+        LmHead = ParameterInitializers.XavierParameterDeterministic("lmHead", new TensorShape(vocabularySize, embeddingSize), vocabularySize, embeddingSize, seed + 747);
 
         TokenEmbedding.QualifyParameters("tokenEmbedding");
         PositionalEmbedding.QualifyParameters("positionEmbedding");

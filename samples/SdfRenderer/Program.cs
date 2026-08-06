@@ -12,7 +12,6 @@ ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(samplesPerPixel, 1);
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<SdfRendererKernel>();
 
 using var seedBuffer = GPU.CreateBuffer<int>(CreateSeeds(width, height), BufferAccess.ReadWrite);
 using var accumBuffer = GPU.CreateBuffer<float4>(CreateZeroPixels(width, height), BufferAccess.ReadWrite);
@@ -88,7 +87,7 @@ static float4[] CreateZeroPixels(int width, int height)
     => new float4[checked(width * height)];
 
 /// <summary>
-/// Ports EasyGPU's SDF path tracing example to Feather's C# kernel DSL.
+/// Implements an SDF path tracer with Feather's C# kernel DSL.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(DefaultThreadGroupSizes.XY)]
@@ -436,25 +435,8 @@ internal static class SampleProof
 {
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    public static void AssertEasyGpuGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            !glsl.Contains("normalize", StringComparison.Ordinal) ||
-            !glsl.Contains("cross", StringComparison.Ordinal) ||
-            !glsl.Contains("for", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce the expected EasyGPU SDF GLSL.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     public static void AssertLuisa(DispatchPath path)

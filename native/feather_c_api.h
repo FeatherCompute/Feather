@@ -47,30 +47,9 @@ typedef enum FeResult {
 
 typedef enum FeDispatchPath {
     FE_DISPATCH_PATH_NONE = 0,
-    FE_DISPATCH_PATH_LEGACY = 1,
-    FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK = 2,
-    FE_DISPATCH_PATH_GRAPHICS_FALLBACK = 3,
-    FE_DISPATCH_PATH_REJECTED = 4,
-    FE_DISPATCH_PATH_LUISA = 5
+    FE_DISPATCH_PATH_REJECTED = 1,
+    FE_DISPATCH_PATH_LUISA = 2
 } FeDispatchPath;
-
-typedef enum FeExecutionBackend {
-    FE_EXECUTION_BACKEND_LEGACY = 0,
-    FE_EXECUTION_BACKEND_LUISA = 1
-} FeExecutionBackend;
-
-typedef struct FeBackendCaps {
-    uint32_t backend_type;
-    uint32_t max_work_group_size_x;
-    uint32_t max_work_group_size_y;
-    uint32_t max_work_group_size_z;
-    uint32_t supports_graphics;
-    uint32_t supports_ad;
-    uint32_t supports_nn;
-    uint32_t supports_window;
-    uint32_t supports_depth_clamp;
-    uint32_t supports_non_fill_polygon_mode;
-} FeBackendCaps;
 
 typedef enum FeCapabilitySupport {
     FE_CAPABILITY_UNKNOWN = 0,
@@ -282,8 +261,6 @@ FE_API FeResult fe_context_create(const char* backend_name, uint32_t device_inde
 FE_API FeResult fe_context_initialize(FeContextHandle context);
 FE_API FeResult fe_context_shutdown(FeContextHandle context);
 FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeDeviceInfo* out_info);
-FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
-FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
 FE_API FeResult fe_stream_create(FeContextHandle context, FeStreamHandle* out_stream);
 FE_API FeResult fe_stream_destroy(FeStreamHandle stream);
 FE_API FeResult fe_stream_synchronize(FeStreamHandle stream);
@@ -354,16 +331,12 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture);
 FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, FeSamplerHandle sampler);
-FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t backend);
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size);
 FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                    uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait);
 FE_API FeResult fe_kernel_dispatch_stream(FeKernelHandle kernel, FeStreamHandle stream, uint32_t group_x,
                                           uint32_t group_y, uint32_t group_z, uint32_t logical_x, uint32_t logical_y,
                                           uint32_t logical_z, FeFenceHandle* out_fence);
-FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size, size_t* out_required_size);
-FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
-                                             size_t* out_required_size);
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path);
 FE_API FeResult fe_kernel_get_ad_gradient_count(FeKernelHandle kernel, uint32_t* out_count);
 FE_API FeResult fe_kernel_get_ad_gradient_info(FeKernelHandle kernel, uint32_t index, FeADGradientInfo* out_info);
@@ -372,8 +345,6 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
 FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, uint32_t index,
                                                        FeBufferHandle destination, uint64_t destination_offset,
                                                        uint64_t destination_size);
-FE_API FeResult fe_kernel_get_ad_backward_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
-                                               size_t* out_required_size);
 
 FE_API FeResult fe_graphics_pipeline_create_from_ir(FeContextHandle context, const FeGraphicsPipelineCreateDesc* desc,
                                                     FeGraphicsPipelineHandle* out_pipeline);

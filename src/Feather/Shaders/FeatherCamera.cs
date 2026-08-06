@@ -87,7 +87,7 @@ public static class FeatherCamera
     /// Rebuilds the camera inside a kernel from the two values a kernel can actually receive.
     /// </summary>
     /// <remarks>
-    /// A <see cref="GpuCamera"/> cannot cross the uniform boundary directly: EasyGPU rejects a
+    /// A <see cref="GpuCamera"/> cannot cross the uniform boundary directly: the native ABI rejects a
     /// user struct as a push constant even though the generator accepts one, so a kernel takes the
     /// matrix and the eye as separate uniforms and pairs them here. Everything past this call sees
     /// one camera rather than two loose uniforms, which is what keeps the helpers below shareable.

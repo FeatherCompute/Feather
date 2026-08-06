@@ -17,7 +17,6 @@ ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(samplesPerPixel, 1);
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<RayTracingKernel>();
 
 using var image = GPU.CreateBuffer<float4>(width * height, BufferAccess.ReadWrite);
 using var rng = GPU.CreateBuffer<int>(CreateSeeds(width, height), BufferAccess.ReadWrite);
@@ -68,9 +67,8 @@ Console.WriteLine("PASS");
 static GpuExecutionBackend ParseBackend(string value)
     => value.ToLowerInvariant() switch
     {
-        "easygpu" => GpuExecutionBackend.EasyGpu,
         "luisa" => GpuExecutionBackend.Luisa,
-        _ => throw new ArgumentException($"Unknown execution backend '{value}'. Expected easygpu or luisa.")
+        _ => throw new ArgumentException($"Unknown execution backend '{value}'. Expected luisa.")
     };
 
 static int[] CreateSeeds(int width, int height)
@@ -85,7 +83,7 @@ static int[] CreateSeeds(int width, int height)
 }
 
 /// <summary>
-/// Ports the EasyGPU C++ Cornell-box compute path tracer to Feather's C# compute DSL.
+/// Implements a Cornell-box compute path tracer with Feather's C# compute DSL.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(DefaultThreadGroupSizes.XY)]
@@ -478,31 +476,12 @@ internal static class RayTracingImageWriter
 internal static class SampleProof
 {
     /// <summary>
-    /// Prints the active backend and workgroup limits reported by EasyGPU.
+    /// Prints the selected Luisa device.
     /// </summary>
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    /// <summary>
-    /// Verifies the generated source comes from the EasyGPU GLSL bridge.
-    /// </summary>
-    public static void AssertEasyGpuGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            !glsl.Contains("normalize", StringComparison.Ordinal) ||
-            !glsl.Contains("sqrt", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce the expected EasyGPU GLSL path-tracing shader.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     /// <summary>
@@ -510,10 +489,9 @@ internal static class SampleProof
     /// </summary>
     public static void AssertBackend(DispatchPath path, GpuExecutionBackend backend)
     {
-        var expected = backend == GpuExecutionBackend.Luisa ? DispatchPath.Luisa : DispatchPath.TypedEasyGpu;
-        if (path != expected)
+        if (backend != GpuExecutionBackend.Luisa || path != DispatchPath.Luisa)
         {
-            throw new InvalidOperationException($"Expected {expected} dispatch, got {path}.");
+            throw new InvalidOperationException($"Expected Luisa dispatch, got {path}.");
         }
     }
 

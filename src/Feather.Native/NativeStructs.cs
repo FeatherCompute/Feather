@@ -17,32 +17,8 @@ public enum FeResult : uint
 public enum FeDispatchPath : uint
 {
     None = 0,
-    TypedEasyGpu = 1,
-    CpuReferenceFallback = 2,
-    GraphicsFallback = 3,
-    Rejected = 4,
-    Luisa = 5
-}
-
-public enum FeExecutionBackend : uint
-{
-    EasyGpu = 0,
-    Luisa = 1
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct FeBackendCaps
-{
-    public uint BackendType;
-    public uint MaxWorkGroupSizeX;
-    public uint MaxWorkGroupSizeY;
-    public uint MaxWorkGroupSizeZ;
-    public uint SupportsGraphics;
-    public uint SupportsAD;
-    public uint SupportsNN;
-    public uint SupportsWindow;
-    public uint SupportsDepthClamp;
-    public uint SupportsNonFillPolygonMode;
+    Rejected = 1,
+    Luisa = 2
 }
 
 public enum FeCapabilitySupport : uint
@@ -534,7 +510,7 @@ public unsafe struct FeADGradientInfo
     public fixed byte Name[128];
     public fixed byte ResourceName[128];
     public fixed byte ElementType[64];
-    public fixed byte EasyGpuName[64];
+    public fixed byte NativeName[64];
     public uint SourceBinding;
     public uint GradientBinding;
     public uint ElementCount;

@@ -6,7 +6,7 @@
     <IsPackable>true</IsPackable>
     <PackageId>FeatherCompute.NativeAssets</PackageId>
     <Title>FeatherCompute.NativeAssets</Title>
-    <Description>RID-specific native EasyGPU and LuisaCompute runtime assets for Feather.</Description>
+    <Description>RID-specific Feather and LuisaCompute native runtime assets.</Description>
     <NativeAssetStagingRoot Condition="'$(NativeAssetStagingRoot)' == ''">$(MSBuildThisFileDirectory)../../artifacts/native-assets/</NativeAssetStagingRoot>
   </PropertyGroup>
 

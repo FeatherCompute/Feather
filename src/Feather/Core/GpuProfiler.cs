@@ -7,7 +7,7 @@ namespace Feather;
 /// </summary>
 /// <remarks>
 /// The current native backend records successful compute dispatches and graphics draw calls. Basic generated compute
-/// kernels use the typed EasyGPU backend path; compatibility and graphics fallback commands are recorded with the same
+/// kernels use the Luisa backend path; compute, AD, NN, and graphics commands are recorded with the same
 /// aggregate counters for diagnostics.
 /// </remarks>
 public static class GpuProfiler

@@ -5,14 +5,12 @@ using Feather.Resources;
 
 SampleProof.PrintBackend(GPU.Context);
 
-Console.WriteLine("Shader Inspection:");
-string glsl = ShaderInspection.GetGLSL<InspectKernel>();
-Console.WriteLine("GLSL source obtained successfully");
-Console.WriteLine($"Contains gl_GlobalInvocationID: {glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal)}");
-Console.WriteLine($"Contains #version: {glsl.Contains("#version", StringComparison.Ordinal)}");
-if (!SampleProof.IsEasyGpuGlsl(glsl))
+Console.WriteLine("FEIR Inspection:");
+string ir = ShaderInspection.GetIR<InspectKernel>();
+Console.WriteLine($"Serialized FEIR bytes: {ir.Length / 2}");
+if (ir.Length == 0)
 {
-    throw new InvalidOperationException("InspectKernel did not produce EasyGPU GLSL.");
+    throw new InvalidOperationException("InspectKernel did not produce serialized FEIR.");
 }
 
 using var input = GPU.CreateBuffer<float>([1.0f, 2.0f, 3.0f, 4.0f], BufferAccess.ReadOnly);
@@ -60,22 +58,13 @@ public readonly partial struct InspectKernel(
 internal static class SampleProof
 {
     /// <summary>
-    /// Prints the active backend and workgroup limits reported by EasyGPU.
+    /// Prints the selected Luisa device.
     /// </summary>
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
-
-    /// <summary>
-    /// Checks whether GLSL came from the EasyGPU bridge rather than a stub.
-    /// </summary>
-    public static bool IsEasyGpuGlsl(string glsl)
-        => glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) &&
-           glsl.Contains("#version", StringComparison.Ordinal) &&
-           !glsl.Contains("Feather native stub", StringComparison.Ordinal);
 
     /// <summary>
     /// Requires the dispatch to have used the Luisa backend path.

@@ -246,9 +246,7 @@ struct KernelState {
     int32_t logical_y = 0;
     int32_t logical_z = 0;
     std::vector<unsigned char> backward_ir;
-    std::string last_ad_backward_glsl;
     std::vector<ADGradientState> ad_gradients;
-    FeExecutionBackend execution_backend = FE_EXECUTION_BACKEND_LUISA;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
 };
 
@@ -3505,7 +3503,6 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
         release_ad_gradient_buffers(kernel);
         for (auto& gradient : next_gradients) gradient.byte_size = gradient.host_bytes.size();
         kernel.ad_gradients = std::move(next_gradients);
-        kernel.last_ad_backward_glsl.clear();
     }
 
     for (const auto& [binding, handle] : kernel.buffers) {
@@ -5187,63 +5184,6 @@ FE_API FeResult fe_runtime_process_exit(void) {
     });
 }
 
-FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend) {
-    return protect([&] {
-        if (out_backend == nullptr) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "out_backend must not be null.");
-        }
-        std::lock_guard<std::mutex> lock(g_mutex);
-        Feather::Luisa::DispatchInputs dispatch;
-        std::string error;
-        if (!context_exists_locked(context) || !configure_luisa_dispatch_locked(context, &dispatch, &error)) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
-        if (dispatch.backend_name != "vk") {
-            *out_backend = 0u;
-            return fail(FE_ERROR_UNSUPPORTED,
-                        "The legacy backend-type ABI cannot represent this Luisa backend.");
-        }
-        *out_backend = 2u;
-        return ok();
-    });
-}
-
-FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps) {
-    return protect([&] {
-        if (out_caps == nullptr) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "out_caps must not be null.");
-        }
-        std::lock_guard<std::mutex> lock(g_mutex);
-        Feather::Luisa::DispatchInputs dispatch;
-        std::string error;
-        if (!context_exists_locked(context) || !configure_luisa_dispatch_locked(context, &dispatch, &error)) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
-        }
-        if (dispatch.backend_name != "vk") {
-            return fail(FE_ERROR_UNSUPPORTED,
-                        "The legacy capability ABI cannot represent this Luisa backend.");
-        }
-#if FEATHER_BUILD_WINDOW
-        constexpr uint32_t supports_window = 1u;
-#else
-        constexpr uint32_t supports_window = 0u;
-#endif
-        *out_caps = FeBackendCaps{
-            2u,
-            1u,
-            1u,
-            1u,
-            1u,
-            1u,
-            1u,
-            supports_window,
-            1u,
-            1u
-        };
-        return ok();
-    });
-}
-
 FE_API FeResult fe_stream_create(FeContextHandle context, FeStreamHandle* out_stream) {
     return protect([&] {
         if (out_stream == nullptr) {
@@ -6484,7 +6424,6 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
         state.debug_name = copy_debug_name(desc->debug_name, "Kernel");
         state.auto_diff = desc->auto_diff;
         state.bounds_check = desc->bounds_check;
-        state.execution_backend = FE_EXECUTION_BACKEND_LUISA;
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!context_exists_locked(context)) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
@@ -6559,21 +6498,6 @@ FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, 
         }
     }
     it->second.samplers[binding] = sampler;
-    return ok();
-}
-
-FE_API FeResult fe_kernel_set_execution_backend(FeKernelHandle kernel, uint32_t backend) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-    }
-    if (backend != FE_EXECUTION_BACKEND_LEGACY && backend != FE_EXECUTION_BACKEND_LUISA) {
-        return fail(FE_ERROR_INVALID_ARGUMENT, "Unknown kernel execution backend.");
-    }
-    // Preserve the stage-2 ABI value accepted by the managed compatibility
-    // layer while making both entry points execute on the context's LC device.
-    it->second.execution_backend = FE_EXECUTION_BACKEND_LUISA;
     return ok();
 }
 
@@ -6675,31 +6599,6 @@ FE_API FeResult fe_kernel_dispatch_stream(FeKernelHandle kernel, FeStreamHandle 
         g_fences.emplace(fence, FenceState{stream_state->second.context, stream});
         *out_fence = fence;
         return ok();
-    });
-}
-
-FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size, size_t* out_required_size) {
-    return protect([&] {
-        (void)buffer;
-        (void)buffer_size;
-        (void)out_required_size;
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_kernels.find(kernel) == g_kernels.end())
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-        return fail(FE_ERROR_UNSUPPORTED, "GLSL inspection is unavailable on the Luisa-only runtime.");
-    });
-}
-
-FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
-                                             size_t* out_required_size) {
-    return protect([&] {
-        (void)buffer;
-        (void)buffer_size;
-        (void)out_required_size;
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_kernels.find(kernel) == g_kernels.end())
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-        return fail(FE_ERROR_UNSUPPORTED, "Optimized GLSL inspection is unavailable on the Luisa-only runtime.");
     });
 }
 
@@ -6839,19 +6738,6 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
         destination_it->second.luisa_uploaded = true;
         ++destination_it->second.content_revision;
         return ok();
-    });
-}
-
-FE_API FeResult fe_kernel_get_ad_backward_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
-                                               size_t* out_required_size) {
-    return protect([&] {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        const auto it = g_kernels.find(kernel);
-        if (it == g_kernels.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-        }
-
-        return write_string(it->second.last_ad_backward_glsl, buffer, buffer_size, out_required_size);
     });
 }
 

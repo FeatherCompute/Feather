@@ -168,7 +168,7 @@ public sealed class GpuKernel : IDisposable
     }
 
     /// <summary>
-    /// Creates a generated compute kernel for an explicitly selected execution backend.
+    /// Creates a generated compute kernel using the sole supported Luisa backend.
     /// </summary>
     public static GpuKernel Create<TKernel>(GpuContext context, GpuExecutionBackend backend)
         where TKernel : struct, IGeneratedKernel<TKernel>
@@ -177,43 +177,11 @@ public sealed class GpuKernel : IDisposable
     internal static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff, GpuExecutionBackend backend)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        if (!Enum.IsDefined(backend))
+        if (backend != GpuExecutionBackend.Luisa)
         {
             throw new ArgumentOutOfRangeException(nameof(backend));
         }
-        var kernel = Create<TKernel>(context, autoDiff);
-        try
-        {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_execution_backend(
-                kernel.Handle,
-                (FeExecutionBackend)backend));
-            return kernel;
-        }
-        catch
-        {
-            kernel.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Builds this generated kernel through the EasyGPU IR module bridge and returns the resulting GLSL source.
-    /// </summary>
-    /// <returns>The GLSL source produced by EasyGPU for this kernel.</returns>
-    public string GetGLSL()
-    {
-        ThrowIfDisposed();
-        return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required));
-    }
-
-    /// <summary>
-    /// Builds this generated kernel through the EasyGPU IR module bridge and returns the backend-optimized GLSL inspection dump.
-    /// </summary>
-    /// <returns>The optimized GLSL produced by the active EasyGPU backend.</returns>
-    public string GetOptimizedGLSL()
-    {
-        ThrowIfDisposed();
-        return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required));
+        return Create<TKernel>(context, autoDiff);
     }
 
     public void Dispose()

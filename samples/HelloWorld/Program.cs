@@ -5,7 +5,6 @@ using Feather.Resources;
 
 int count = args.Length > 0 && int.TryParse(args[0], out var parsed) ? parsed : 25600;
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<IncrementKernel>();
 
 int[] data = new int[count];
 for (int idx = 0; idx < count; idx++)
@@ -69,30 +68,12 @@ public readonly partial struct IncrementKernel(
 internal static class SampleProof
 {
     /// <summary>
-    /// Prints the active backend and workgroup limits reported by EasyGPU.
+    /// Prints the selected Luisa device.
     /// </summary>
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    /// <summary>
-    /// Verifies the generated source comes from the EasyGPU GLSL bridge.
-    /// </summary>
-    public static void AssertEasyGpuGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            !glsl.Contains("layout(push_constant)", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce EasyGPU GLSL with push constants.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     /// <summary>

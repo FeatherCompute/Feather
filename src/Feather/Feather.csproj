@@ -6,7 +6,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PackageId>FeatherCompute</PackageId>
     <Title>FeatherCompute</Title>
-    <Description>C# frontend API for EasyGPU compute, graphics, automatic differentiation, and neural network workloads.</Description>
+    <Description>C# frontend API for LuisaCompute compute, graphics, automatic differentiation, and neural network workloads.</Description>
   </PropertyGroup>
 
   <ItemGroup>

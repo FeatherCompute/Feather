@@ -12,7 +12,6 @@ ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(maxIterations, 1);
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<JuliaKernel>();
 
 using var output = GPU.CreateBuffer<float4>(width * height, BufferAccess.ReadWrite);
 var stopwatch = Stopwatch.StartNew();
@@ -59,7 +58,7 @@ if (new FileInfo(imagePath).Length <= 18)
 Console.WriteLine("PASS");
 
 /// <summary>
-/// Ports EasyGPU's Julia set compute example to Feather's C# kernel DSL.
+/// Implements a Julia-set renderer with Feather's C# kernel DSL.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(DefaultThreadGroupSizes.XY)]
@@ -235,31 +234,12 @@ internal static class JuliaImageWriter
 internal static class SampleProof
 {
     /// <summary>
-    /// Prints the active backend and workgroup limits reported by EasyGPU.
+    /// Prints the selected Luisa device.
     /// </summary>
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    /// <summary>
-    /// Verifies the generated source comes from the EasyGPU GLSL bridge.
-    /// </summary>
-    public static void AssertEasyGpuGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            !glsl.Contains("sin", StringComparison.Ordinal) ||
-            !glsl.Contains("layout(push_constant)", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce EasyGPU GLSL with structured control flow and push constants.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     /// <summary>

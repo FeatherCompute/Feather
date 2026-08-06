@@ -194,7 +194,7 @@ public static class GPU
         => new(kernel);
 
     /// <summary>
-    /// Creates a managed AD kernel wrapper for an explicitly selected execution backend.
+    /// Creates a managed AD kernel wrapper using the sole supported Luisa backend.
     /// </summary>
     public static GpuADKernel<TKernel> CreateADKernel<TKernel>(TKernel kernel, GpuExecutionBackend backend)
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
@@ -211,7 +211,7 @@ public static class GPU
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(x, 1, 1), wait);
 
-    /// <summary>Dispatches a one-dimensional kernel through an explicitly selected backend.</summary>
+    /// <summary>Dispatches a one-dimensional kernel through the sole supported Luisa backend.</summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int x, GpuExecutionBackend backend, bool wait = true)
         where TKernel : struct, IKernel1D, IGeneratedKernel<TKernel>
         => DispatchExplicit(kernel, new GpuDispatchSize(x, 1, 1), backend, wait);
@@ -227,7 +227,7 @@ public static class GPU
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, 1), wait);
 
-    /// <summary>Dispatches a two-dimensional kernel through an explicitly selected backend.</summary>
+    /// <summary>Dispatches a two-dimensional kernel through the sole supported Luisa backend.</summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int2 size, GpuExecutionBackend backend, bool wait = true)
         where TKernel : struct, IKernel2D, IGeneratedKernel<TKernel>
         => DispatchExplicit(kernel, new GpuDispatchSize(size.X, size.Y, 1), backend, wait);
@@ -243,41 +243,20 @@ public static class GPU
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
         => CachedKernelDispatcher<TKernel>.Dispatch(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), wait);
 
-    /// <summary>Dispatches a three-dimensional kernel through an explicitly selected backend.</summary>
+    /// <summary>Dispatches a three-dimensional kernel through the sole supported Luisa backend.</summary>
     public static DispatchPath DispatchAndGetPath<TKernel>(TKernel kernel, int3 size, GpuExecutionBackend backend, bool wait = true)
         where TKernel : struct, IKernel3D, IGeneratedKernel<TKernel>
         => DispatchExplicit(kernel, new GpuDispatchSize(size.X, size.Y, size.Z), backend, wait);
 
     private static DispatchPath DispatchExplicit<TKernel>(TKernel kernel, GpuDispatchSize size, GpuExecutionBackend backend, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
-        => ExplicitKernelDispatcher<TKernel>.Dispatch(kernel, size, backend, wait);
-
-    private static class ExplicitKernelDispatcher<TKernel>
-        where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        private static readonly object Gate = new();
-        private static GpuKernel? easyGpuKernel;
-        private static GpuKernel? luisaKernel;
-
-        public static DispatchPath Dispatch(TKernel kernel, GpuDispatchSize size, GpuExecutionBackend backend, bool wait)
+        if (backend != GpuExecutionBackend.Luisa)
         {
-            if (GpuKernel.IrTransformForTesting is not null)
-            {
-                using var uncachedKernel = GpuKernel.Create<TKernel>(Context, backend);
-                GpuKernel.Dispatch(Context, uncachedKernel, kernel, size, wait);
-                return uncachedKernel.LastDispatchPath;
-            }
-
-            lock (Gate)
-            {
-                ref var cachedKernel = ref (backend == GpuExecutionBackend.Luisa
-                    ? ref luisaKernel
-                    : ref easyGpuKernel);
-                cachedKernel ??= GpuKernel.Create<TKernel>(Context, backend);
-                GpuKernel.Dispatch(Context, cachedKernel, kernel, size, wait);
-                return cachedKernel.LastDispatchPath;
-            }
+            throw new ArgumentOutOfRangeException(nameof(backend));
         }
+
+        return CachedKernelDispatcher<TKernel>.Dispatch(kernel, size, wait);
     }
 
     private static class CachedKernelDispatcher<TKernel>

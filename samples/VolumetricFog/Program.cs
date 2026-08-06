@@ -10,7 +10,6 @@ ArgumentOutOfRangeException.ThrowIfLessThan(width, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertEasyGpuGlsl<VolumetricFogKernel>();
 
 using var image = GPU.CreateBuffer<float4>(width * height, BufferAccess.ReadWrite);
 
@@ -56,7 +55,7 @@ if (new FileInfo(imagePath).Length <= 18)
 Console.WriteLine("PASS");
 
 /// <summary>
-/// Ports EasyGPU's volumetric fog/cloud renderer to Feather's C# kernel DSL.
+/// Implements a volumetric fog/cloud renderer with Feather's C# kernel DSL.
 /// </summary>
 [Kernel]
 [ThreadGroupSize(DefaultThreadGroupSizes.XY)]
@@ -418,25 +417,8 @@ internal static class SampleProof
 {
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    public static void AssertEasyGpuGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        if (!glsl.Contains("gl_GlobalInvocationID", StringComparison.Ordinal) ||
-            !glsl.Contains("exp", StringComparison.Ordinal) ||
-            !glsl.Contains("pow", StringComparison.Ordinal) ||
-            !glsl.Contains("for", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"{typeof(TKernel).Name} did not produce the expected EasyGPU volumetric GLSL.");
-        }
-
-        Console.WriteLine("EasyGPU GLSL bridge: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     public static void AssertLuisa(DispatchPath path)

@@ -263,7 +263,7 @@ public sealed class FeatherGenerator : IIncrementalGenerator
         else
         {
             builder.AppendLine("            var __feather_value = source[__feather_index];");
-            builder.AppendLine("            // Fields are written at generator-computed std430 offsets using each type's EasyGPU field layout.");
+            builder.AppendLine("            // Fields are written at generator-computed std430 offsets using each type's GPU field layout.");
             foreach (var field in model.Fields.Items)
             {
                 var sourceExpression = "__feather_value." + field.MemberAccessor;

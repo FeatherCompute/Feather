@@ -158,7 +158,7 @@ public static class MlpLayout
 /// Everything here is inside the AD subset by construction: a 1D kernel, one scalar loss, counted
 /// <c>for</c> loops only, no <c>while</c>/<c>break</c>, and every weight read at an index built from
 /// loop counters and uniforms rather than from data. That last point is the one worth restating —
-/// EasyGPU does not differentiate a parameter read at a data-dependent index, so the layout is
+/// The XIR AD path does not differentiate a parameter read at a data-dependent index, so the layout is
 /// arithmetic on <c>hiddenSize</c> and never a value loaded from a buffer.
 ///
 /// The arithmetic is duplicated in <see cref="MlpLayout.Evaluate3To1" /> for the host and in

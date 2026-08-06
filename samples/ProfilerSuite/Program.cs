@@ -15,15 +15,15 @@ using ADMarker = Feather.AD.AD;
 var options = ProfilerOptions.Parse(args);
 Directory.CreateDirectory(options.OutputDirectory);
 
-var caps = GPU.Context.Caps;
+var device = GPU.Context.Device;
 var suite = new ProfilerSuite(options, new BackendInfo(
-    caps.BackendType.ToString(),
-    caps.MaxWorkGroupSizeX,
-    caps.MaxWorkGroupSizeY,
-    caps.MaxWorkGroupSizeZ));
+    device.BackendName,
+    device.Name,
+    device.DeviceIndex,
+    device.Capabilities.ComputeWarpSize));
 
 Console.WriteLine("=== Feather Profiler Suite ===");
-Console.WriteLine($"backend={suite.Backend.BackendType} maxWorkGroup={suite.Backend.MaxWorkGroupSizeX}x{suite.Backend.MaxWorkGroupSizeY}x{suite.Backend.MaxWorkGroupSizeZ}");
+Console.WriteLine($"backend={suite.Backend.BackendName} device={suite.Backend.DeviceName} index={suite.Backend.DeviceIndex} warp={suite.Backend.ComputeWarpSize?.ToString() ?? "unknown"}");
 Console.WriteLine($"warmup={options.Warmup} iterations={options.Iterations} output={options.OutputDirectory}");
 
 suite.Run("compute.buffer.increment.1m", "Compute", "1,048,576 int increments", MeasureComputeBuffer);
@@ -162,8 +162,7 @@ static CaseMeasurement MeasureAdLinear(ProfilerCaseContext context)
             ["elements"] = count,
             ["lossSum"] = lossValues.Sum(),
             ["gradientW"] = gradients[0],
-            ["gradientB"] = gradients[1],
-            ["backwardGlslBytes"] = ad.GetBackwardGLSL().Length
+            ["gradientB"] = gradients[1]
         });
 }
 
@@ -195,7 +194,7 @@ static CaseMeasurement MeasureSmallGptTraining(ProfilerCaseContext context)
 
     var evalLoss = trainer.EvaluateBatch(batch);
     Validate(float.IsFinite(evalLoss), "NN eval loss was not finite.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"NN trainer path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"NN trainer path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),
@@ -238,7 +237,7 @@ static CaseMeasurement MeasureTriangleDraw(ProfilerCaseContext context)
     target.Read(pixels);
     var visible = CountVisiblePixels(pixels);
     Validate(visible > pixels.Length / 32, "triangle draw produced too few visible pixels.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"triangle draw path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"triangle draw path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),
@@ -288,7 +287,7 @@ static CaseMeasurement MeasureTexturedQuadDraw(ProfilerCaseContext context)
     target.Read(pixels);
     var visible = CountVisiblePixels(pixels);
     Validate(visible > pixels.Length / 8, "textured quad draw produced too few visible pixels.");
-    Validate(path == DispatchPath.TypedEasyGpu, $"textured quad path was {path}.");
+    Validate(path == DispatchPath.Luisa, $"textured quad path was {path}.");
 
     return new CaseMeasurement(
         DispatchPath: path.ToString(),
@@ -525,8 +524,9 @@ file sealed class ProfilerSuite(ProfilerOptions options, BackendInfo backend)
         sb.AppendLine();
         sb.AppendLine("## Backend");
         sb.AppendLine();
-        sb.AppendLine($"- Backend: `{report.Backend.BackendType}`");
-        sb.AppendLine($"- Max workgroup size: `{report.Backend.MaxWorkGroupSizeX}x{report.Backend.MaxWorkGroupSizeY}x{report.Backend.MaxWorkGroupSizeZ}`");
+        sb.AppendLine($"- Backend: `{report.Backend.BackendName}`");
+        sb.AppendLine($"- Device: `{report.Backend.DeviceName}` (index `{report.Backend.DeviceIndex}`)");
+        sb.AppendLine($"- Compute warp size: `{report.Backend.ComputeWarpSize?.ToString() ?? "unknown"}`");
         sb.AppendLine($"- Warmup iterations per case: `{report.Options.Warmup}`");
         sb.AppendLine($"- Measured iterations per case: `{report.Options.Iterations}`");
         sb.AppendLine();
@@ -705,10 +705,10 @@ file readonly record struct ProfilerSnapshot(
     string FormattedReport);
 
 file readonly record struct BackendInfo(
-    string BackendType,
-    uint MaxWorkGroupSizeX,
-    uint MaxWorkGroupSizeY,
-    uint MaxWorkGroupSizeZ);
+    string BackendName,
+    string DeviceName,
+    int DeviceIndex,
+    uint? ComputeWarpSize);
 
 file readonly record struct ProfilerCaseResult(
     string Name,

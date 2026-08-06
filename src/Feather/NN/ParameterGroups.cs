@@ -70,9 +70,9 @@ public static class ParameterInitializers
     }
 
     /// <summary>
-    /// Creates Xavier/Glorot uniform values using EasyGPU C++'s deterministic LCG stream.
+    /// Creates Xavier/Glorot uniform values using Feather's deterministic LCG stream.
     /// </summary>
-    internal static float[] XavierUniformEasyGpuReference(int count, int fanIn, int fanOut, int seed)
+    internal static float[] XavierUniformDeterministic(int count, int fanIn, int fanOut, int seed)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fanIn);
@@ -92,12 +92,12 @@ public static class ParameterInitializers
     }
 
     /// <summary>
-    /// Creates a trainable float parameter initialized with EasyGPU C++'s deterministic Xavier stream.
+    /// Creates a trainable float parameter initialized with Feather's deterministic Xavier stream.
     /// </summary>
-    internal static Parameter<float> XavierParameterEasyGpuReference(string name, TensorShape shape, int fanIn, int fanOut, int seed)
+    internal static Parameter<float> XavierParameterDeterministic(string name, TensorShape shape, int fanIn, int fanOut, int seed)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        var values = XavierUniformEasyGpuReference(shape.ElementCount, fanIn, fanOut, seed);
+        var values = XavierUniformDeterministic(shape.ElementCount, fanIn, fanOut, seed);
         return new Parameter<float>(
             name,
             new Tensor<float>(shape, Feather.GPU.CreateBuffer<float>(values), requiresGrad: true),

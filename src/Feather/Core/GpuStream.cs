@@ -72,7 +72,7 @@ public sealed class GpuStream : IDisposable
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
         ThrowIfDisposed();
-        using var compiled = GpuKernel.Create<TKernel>(Context, GpuExecutionBackend.Luisa);
+        using var compiled = GpuKernel.Create<TKernel>(Context);
         return GpuKernel.Dispatch(this, compiled, kernel, size);
     }
 }

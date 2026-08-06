@@ -215,7 +215,7 @@ internal sealed record PassAssemblyLoadResult(
     PassAssemblyLoadTimings Timings);
 
 /// <summary>
-/// A measured CPU interval for one graph pass. EasyGPU does not currently expose timestamp-query
+/// A measured CPU interval for one graph pass. Feather does not currently expose timestamp-query
 /// objects through Feather, so <see cref="GpuMs"/> is null instead of an estimated share
 /// of the graph total. <see cref="WaitMs"/> is zero until an explicit pass-owned wait can
 /// be observed independently from graph readback.

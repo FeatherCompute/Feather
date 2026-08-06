@@ -4,7 +4,6 @@ using Feather.Math;
 using Feather.Resources;
 
 SampleProof.PrintBackend(GPU.Context);
-SampleProof.AssertMonomorphizedGlsl<ShapeDistanceKernel>();
 
 Sphere[] sphereData =
 [
@@ -185,41 +184,8 @@ internal static class SampleProof
 {
     public static void PrintBackend(GpuContext context)
     {
-        var caps = context.Caps;
-        Console.WriteLine($"Backend: {caps.BackendType}");
-        Console.WriteLine($"Max workgroup size: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGroupSizeY}x{caps.MaxWorkGroupSizeZ}");
-    }
-
-    public static void AssertMonomorphizedGlsl<TKernel>()
-        where TKernel : struct, IGeneratedKernel<TKernel>
-    {
-        var glsl = ShaderInspection.GetGLSL<TKernel>();
-        string[] required =
-        [
-            "ShapeOps_MovedSdf_T_global__Sphere",
-            "ShapeOps_MovedSdf_T_global__GroundPlane",
-            "inout Sphere fe_this",
-            "inout GroundPlane fe_this",
-            "Sphere_Sdf",
-            "GroundPlane_Sdf"
-        ];
-
-        foreach (var marker in required)
-        {
-            if (!glsl.Contains(marker, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException($"Generated GLSL did not contain '{marker}'.");
-            }
-        }
-
-        if (glsl.Contains("ISignedDistanceShape", StringComparison.Ordinal) ||
-            glsl.Contains("switch", StringComparison.Ordinal) ||
-            glsl.Contains("Feather native stub", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("Expected generic monomorphization, not interface dispatch or fallback GLSL.");
-        }
-
-        Console.WriteLine("Generic interface monomorphization: OK");
+        Console.WriteLine($"Backend: {context.Device.BackendName}");
+        Console.WriteLine($"Device: {context.Device.Name} (index {context.Device.DeviceIndex})");
     }
 
     public static void AssertLuisa(DispatchPath path)
