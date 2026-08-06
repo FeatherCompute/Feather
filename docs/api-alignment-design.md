@@ -3,8 +3,8 @@
 ## Status And Scope
 
 This is a design for M8 and M9. M8.1 device discovery, M8.2 multi-context
-ownership, and M8.3 explicit streams/fences are implemented; later milestones
-in this document remain design-only.
+ownership, M8.3 explicit streams/fences, and M8.4 native presentation are
+implemented; later milestones in this document remain design-only.
 LuisaCompute is the target runtime model. EasyGPU is scheduled for removal in
 M9, so new public API must describe Luisa concepts directly rather than add
 another backend-selection layer.
@@ -210,6 +210,46 @@ before zero-copy. Texture usage should separate sampled, storage, render target,
 depth/stencil, transfer source, and transfer destination; current
 `TextureAccess` is too coarse for that contract.
 
+#### M8.4 native presentation status
+
+The pinned LC resource contract carries a backend-native pointer on every
+creation result and preserves it on `ImageView`
+([LuisaCompute/include/luisa/runtime/rhi/resource.h](../LuisaCompute/include/luisa/runtime/rhi/resource.h):20-34;
+[LuisaCompute/include/luisa/runtime/image.h](../LuisaCompute/include/luisa/runtime/image.h):138-147,
+:191-200). Metal exports `MTLTexture*`, Vulkan exports `VkImage`, and DX exports
+`ID3D12Resource*` from texture creation. External import is not symmetric:
+Vulkan consumes an external `VkImage`, while the pinned Metal and DX backends
+explicitly reject external texture handles
+([LuisaCompute/src/backends/metal/metal_device.cpp](../LuisaCompute/src/backends/metal/metal_device.cpp):293-305;
+[LuisaCompute/src/backends/vk/device.cpp](../LuisaCompute/src/backends/vk/device.cpp):2483-2501;
+[LuisaCompute/src/backends/dx/DXApi/LCDevice.cpp](../LuisaCompute/src/backends/dx/DXApi/LCDevice.cpp):227-260).
+Public arbitrary texture import/export therefore remains unsupported rather
+than exposing an unsafe raw pointer contract.
+
+Presentation does not require cross-device import. When compute graphics is
+enabled, Feather creates a GLFW no-API window, extracts its native display and
+window handles, and gives them to the same LC device's generic swapchain. A
+compute-stream event orders the resident image before a graphics-stream
+`Swapchain::present`; the native handle is queried for verified handle-kind
+diagnostics, but ownership never leaves LC. The Metal implementation binds the
+resident texture directly and presents a `CAMetalDrawable`
+([LuisaCompute/src/backends/metal/metal_swapchain.cpp](../LuisaCompute/src/backends/metal/metal_swapchain.cpp):37-54).
+LC provides equivalent swapchain entry points for Vulkan and DX. Feather's
+pinned build enables Metal and Vulkan; DX activation remains pending, while
+CUDA/HIP report native presentation unsupported.
+
+`FEATHER_GRAPHICS_COMPUTE=0` retains the EasyGPU presenter. On a native LC
+window, `PresentMode.CopyToCpu` and resident-image incompatibility retain the
+R11 three-slot readback ring and upload through an LC staging image; swapchain
+creation failures remain explicit errors. CUDA/HIP cannot create an LC
+swapchain, so they retain the EasyGPU window plus ring/upload path. A 600-frame
+Metal probe with VSync disabled measured five 120-frame native submission
+medians of `0.048-0.094 ms`; the former Metal readback alone measured `0.281-0.381 ms`
+before its EasyGPU upload. VSync-enabled call time also includes drawable
+acquisition/frame pacing and is not reported as interop cost. Sponza capture
+remained `921,600/921,600` non-background pixels, and native window traces
+showed repeated resident-swapchain submissions without a host transfer.
+
 ### Graphics and future RT
 
 Graphics pipeline creation, draw, texture presentation, and future swapchains
@@ -341,7 +381,7 @@ host-synchronous because gradient retrieval has no asynchronous managed contract
 | M8.1 Runtime discovery (implemented) | `GpuRuntime`, device enumeration, `GpuContextOptions`, LC-backed capability report | Device list/default semantics and invalid selection are covered by managed tests; a GPU test creates the selected LC device; multi-device hardware coverage remains conditional |
 | M8.2 Context-native ownership (implemented) | `GPU.WithContext`; native per-context LC state; resources, pipelines, and kernels carry owner context | Two same-device Metal contexts dispatch independently; cross-context binding and post-disposal use are rejected; pinned Vulkan contexts are serialized because LC permits one live device |
 | M8.3 Streams and fences (implemented) | Explicit streams, LC events, retained async staging, `GpuFence` | `wait:true` remains synchronous; `wait:false` retains staging safely; GPU tests cover completion polling/wait, two streams, cross-stream ordering, cross-context rejection, teardown, and Vulkan context activation switches |
-| M8.4 Resource interop and presentation | Capability-gated external resource contract; native presenter/swapchain route where supported | Host staging fallback remains correct; every enabled zero-copy path has ownership/state/fence tests and a non-black multi-frame presentation test |
+| M8.4 Resource interop and presentation (implemented) | Capability-gated native handle classification; same-device LC swapchain route on Metal/Vulkan; host staging fallback | Metal completed 600 direct-present frames and non-black WindowCompute/Sponza runs; forced host fallback completed 240 frames; arbitrary external import remains backend-gated |
 | M8.5 API migration | Static `GPU` facade delegates to default context/stream; samples migrate to explicit contexts where appropriate | Existing public examples compile unchanged; new multi-context/stream samples pass; no public API selects EasyGPU |
 | M8.6 RT readiness | Capability schema and inert RT type/descriptor design review, then a separate implementation proposal | No fake RT success path; construction is capability-gated; FEIR/XIR/backend coverage proposal approved before implementation |
 | M9 EasyGPU removal | Remove EasyGPU ABI, source, assets, enum branch, GLSL inspection APIs, and CI setup after M8 gates | Repository has no EasyGPU runtime dependency; supported compute/graphics/window paths use LC; package and three-platform build gates pass |
@@ -355,9 +395,10 @@ compute and graphics migration.
 
 1. Which backend-specific LC extensions can promote M8.1's `Unknown` capability
    fields to reliable values without changing their cross-platform semantics?
-2. Can the pinned Metal, Vulkan, and DX backends all import/export the native
-   images/buffers required for zero-copy presentation, with an explicit
-   synchronization primitive usable by Feather?
+2. Can a future LC revision add safe Metal and DX external image import plus
+   transferable synchronization? The pinned revision exports handles, but only
+   Vulkan implements external image import; M8.4 presentation avoids import by
+   keeping the swapchain and image on one LC device.
 3. What host-callback and event-lifetime guarantees apply to all targeted LC
    backends, particularly during runtime/context shutdown?
 4. Which RT, raster, external-memory, multi-stream, and profiling features are

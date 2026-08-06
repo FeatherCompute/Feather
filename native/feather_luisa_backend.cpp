@@ -42,6 +42,7 @@
 #include <luisa/runtime/image.h>
 #include <luisa/runtime/shader.h>
 #include <luisa/runtime/stream.h>
+#include <luisa/runtime/swapchain.h>
 #include <luisa/runtime/volume.h>
 #include <luisa/xir/instructions/arithmetic.h>
 #include <luisa/xir/module.h>
@@ -452,6 +453,17 @@ public:
         uint32_t mip_levels = 1;
     };
 
+    struct PresentTarget {
+        uint64_t display = 0u;
+        uint64_t window = 0u;
+        uint2 size{};
+        bool vsync = true;
+        Stream stream;
+        Swapchain swapchain;
+        Event handoff;
+        Image<float> staging;
+    };
+
 private:
   struct FenceState {
       Event event;
@@ -486,6 +498,7 @@ private:
     std::unordered_map<uint64_t, std::unique_ptr<FusedTileRasterShader>> fused_tile_raster_shaders_;
     std::unordered_map<uint64_t, std::unique_ptr<ByteBuffer>> resident_buffers_;
     std::unordered_map<uint64_t, ResidentTexture> resident_textures_;
+    std::unordered_map<uint64_t, std::unique_ptr<PresentTarget>> present_targets_;
     std::unique_ptr<MipmapShader> mipmap_shader_;
     std::unique_ptr<FastRasterInitShader> fast_raster_init_shader_;
     std::unique_ptr<TileResetShader> tile_reset_shader_;
@@ -587,6 +600,19 @@ public:
         return succeeded;
     }
 
+    bool collect_completed_orphans(uint64_t stream_key, std::string* error) {
+        uint64_t completed_sequence = 0u;
+        for (const auto& [key, fence] : fences_) {
+            (void)key;
+            if (fence.stream_key == stream_key && !fence.retained &&
+                fence.event.is_completed(fence.fence)) {
+                completed_sequence = std::max(completed_sequence, fence.sequence);
+            }
+        }
+        return completed_sequence == 0u ||
+               finalize_stream_through(stream_key, completed_sequence, true, error);
+    }
+
     bool signal_fence(uint64_t stream_key, uint64_t fence_key, bool retained, Completion completion,
                       std::string* error) {
         auto* target = stream(stream_key);
@@ -595,6 +621,7 @@ public:
                 *error = "Luisa stream or fence handle is invalid";
             return false;
         }
+        if (!collect_completed_orphans(stream_key, error)) return false;
         auto event = device_->create_event();
         *target << event.signal();
         const auto value = event.last_fence();
@@ -687,6 +714,10 @@ public:
             (void)value;
             if (!synchronize_stream(key, error))
                 succeeded = false;
+        }
+        for (const auto& [key, target] : present_targets_) {
+            (void)key;
+            target->stream.synchronize();
         }
         return succeeded;
     }
@@ -1189,6 +1220,108 @@ public:
         return true;
     }
 
+    PresentTarget* present_target(uint64_t key, uint64_t display, uint64_t window,
+                                  uint32_t width, uint32_t height, bool vsync,
+                                  std::string* error) {
+        if (key == 0u || window == 0u || width == 0u || height == 0u) {
+            if (error != nullptr) *error = "Luisa presenter requires a native window and positive dimensions";
+            return nullptr;
+        }
+        if (backend_name_ != "metal" && backend_name_ != "vk" && backend_name_ != "dx") {
+            if (error != nullptr) *error = "The selected Luisa backend does not expose swapchain presentation";
+            return nullptr;
+        }
+        const auto found = present_targets_.find(key);
+        if (found != present_targets_.end()) {
+            const auto& target = *found->second;
+            if (target.display == display && target.window == window &&
+                target.size.x == width && target.size.y == height && target.vsync == vsync) {
+                return found->second.get();
+            }
+            found->second->stream.synchronize();
+            present_targets_.erase(found);
+        }
+        auto present_stream = device_->create_stream(StreamTag::GRAPHICS);
+        auto swapchain = device_->create_swapchain(
+            present_stream,
+            SwapchainOption{.display = display,
+                            .window = window,
+                            .size = make_uint2(width, height),
+                            .wants_hdr = false,
+                            .wants_vsync = vsync,
+                            .wants_transparent = false,
+                            .back_buffer_count = 3u});
+        if (!swapchain) {
+            if (error != nullptr) *error = "Luisa failed to create a swapchain for the native window";
+            return nullptr;
+        }
+        auto target = std::make_unique<PresentTarget>();
+        target->display = display;
+        target->window = window;
+        target->size = make_uint2(width, height);
+        target->vsync = vsync;
+        target->stream = std::move(present_stream);
+        target->swapchain = std::move(swapchain);
+        target->handoff = device_->create_event();
+        auto* result = target.get();
+        present_targets_.emplace(key, std::move(target));
+        return result;
+    }
+
+    bool present_resident_texture(uint64_t presenter_key, uint64_t texture_key,
+                                  uint64_t display, uint64_t window,
+                                  uint32_t width, uint32_t height, bool vsync,
+                                  NativeTextureInfo* native_texture, std::string* error) {
+        const auto found = resident_textures_.find(texture_key);
+        auto* image = found == resident_textures_.end() ? nullptr :
+                          std::get_if<Image<float>>(found->second.resource.get());
+        if (image == nullptr || image->size().x != width || image->size().y != height) {
+            if (error != nullptr) *error = "Luisa resident 2D texture is unavailable for presentation";
+            return false;
+        }
+        auto* target = present_target(presenter_key, display, window, width, height, vsync, error);
+        if (target == nullptr) return false;
+        *stream_ << target->handoff.signal();
+        target->stream << target->handoff.wait(target->handoff.last_fence())
+                       << target->swapchain.present(image->view());
+        if (native_texture != nullptr) {
+            native_texture->handle = image->native_handle();
+            native_texture->kind = backend_name_ == "metal" ? NativeTextureHandleKind::MetalTexture :
+                                   backend_name_ == "vk" ? NativeTextureHandleKind::VulkanImage :
+                                   backend_name_ == "dx" ? NativeTextureHandleKind::Direct3D12Resource :
+                                                            NativeTextureHandleKind::Unknown;
+        }
+        return true;
+    }
+
+    bool present_host_texture(uint64_t presenter_key, const void* pixels, size_t size,
+                              uint64_t display, uint64_t window,
+                              uint32_t width, uint32_t height, bool vsync,
+                              std::string* error) {
+        if (pixels == nullptr || size != static_cast<size_t>(width) * height * sizeof(uint32_t)) {
+            if (error != nullptr) *error = "Luisa host presentation requires a complete RGBA8 image";
+            return false;
+        }
+        auto* target = present_target(presenter_key, display, window, width, height, vsync, error);
+        if (target == nullptr) return false;
+        if (!target->staging || target->staging.size().x != width || target->staging.size().y != height) {
+            target->stream.synchronize();
+            target->staging = device_->create_image<float>(PixelStorage::BYTE4, make_uint2(width, height));
+        }
+        target->stream << target->staging.copy_from(pixels)
+                       << target->swapchain.present(target->staging.view());
+        return true;
+    }
+
+    bool destroy_presenter(uint64_t key, std::string* error) {
+        const auto found = present_targets_.find(key);
+        if (found == present_targets_.end()) return true;
+        found->second->stream.synchronize();
+        present_targets_.erase(found);
+        if (error != nullptr) error->clear();
+        return true;
+    }
+
     void reset() noexcept {
         if (stream_ != nullptr) {
             std::string ignored;
@@ -1209,6 +1342,7 @@ public:
         tile_raster_shaders_.clear();
         shared_tile_raster_shaders_.clear();
         fused_tile_raster_shaders_.clear();
+        present_targets_.clear();
         resident_buffers_.clear();
         resident_textures_.clear();
         mipmap_shader_.reset();
@@ -1239,6 +1373,14 @@ public:
         }
         streams_.clear();
         stream_keys_.clear();
+        for (auto& [key, target] : present_targets_) {
+            (void)key;
+            (void)target->staging.release();
+            (void)target->handoff.release();
+            (void)target->swapchain.release();
+            (void)target->stream.release();
+        }
+        present_targets_.clear();
         for (auto& [key, fence] : fences_) {
             (void)key;
             (void)fence.event.release();
@@ -1448,6 +1590,42 @@ bool DownloadResidentTextureAsync(uint64_t context_key, uint64_t resident_key, v
     }
     return state->download_texture_async(
         resident_key, destination, size, std::move(completion), error);
+}
+
+bool PresentResidentTexture(uint64_t context_key, uint64_t presenter_key, uint64_t resident_key,
+                            uint64_t native_display, uint64_t native_window,
+                            uint32_t width, uint32_t height, bool vsync,
+                            NativeTextureInfo* native_texture, std::string* error) {
+    if (error != nullptr) error->clear();
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->present_resident_texture(
+        presenter_key, resident_key, native_display, native_window,
+        width, height, vsync, native_texture, error);
+}
+
+bool PresentHostTexture(uint64_t context_key, std::string_view runtime_directory,
+                        std::string_view backend_name, uint32_t device_index,
+                        uint64_t presenter_key, const void* pixels, size_t size,
+                        uint64_t native_display, uint64_t native_window,
+                        uint32_t width, uint32_t height, bool vsync,
+                        std::string* error) {
+    if (error != nullptr) error->clear();
+    auto& state = runtime_registry().prepare(
+        context_key, runtime_directory, backend_name, device_index);
+    return state.present_host_texture(
+        presenter_key, pixels, size, native_display, native_window,
+        width, height, vsync, error);
+}
+
+bool DestroyPresenter(uint64_t context_key, uint64_t presenter_key, std::string* error) {
+    if (error != nullptr) error->clear();
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) return true;
+    return state->destroy_presenter(presenter_key, error);
 }
 
 bool ResolveMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,

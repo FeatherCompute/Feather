@@ -125,6 +125,18 @@ struct DeviceInfo {
     uint32_t compute_warp_size = 0;
 };
 
+enum class NativeTextureHandleKind : uint32_t {
+    Unknown = 0u,
+    MetalTexture = 1u,
+    VulkanImage = 2u,
+    Direct3D12Resource = 3u,
+};
+
+struct NativeTextureInfo {
+    void* handle = nullptr;
+    NativeTextureHandleKind kind = NativeTextureHandleKind::Unknown;
+};
+
 std::string RuntimeDirectory();
 std::vector<DeviceInfo> EnumerateDevices(std::string_view runtime_directory);
 bool ValidateDevice(std::string_view runtime_directory, std::string_view backend_name,
@@ -179,6 +191,22 @@ bool DownloadResidentTexture(uint64_t context_key, uint64_t resident_key, void* 
 bool DownloadResidentTextureAsync(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                                   std::function<void()> completion,
                                   std::string* error = nullptr);
+
+bool PresentResidentTexture(uint64_t context_key, uint64_t presenter_key, uint64_t resident_key,
+                            uint64_t native_display, uint64_t native_window,
+                            uint32_t width, uint32_t height, bool vsync,
+                            NativeTextureInfo* native_texture,
+                            std::string* error = nullptr);
+
+bool PresentHostTexture(uint64_t context_key, std::string_view runtime_directory,
+                        std::string_view backend_name, uint32_t device_index,
+                        uint64_t presenter_key, const void* pixels, size_t size,
+                        uint64_t native_display, uint64_t native_window,
+                        uint32_t width, uint32_t height, bool vsync,
+                        std::string* error = nullptr);
+
+bool DestroyPresenter(uint64_t context_key, uint64_t presenter_key,
+                      std::string* error = nullptr);
 
 bool ResolveMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                                const HostTextureBinding& target,

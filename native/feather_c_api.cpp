@@ -43,6 +43,7 @@
 #include <Runtime/Texture.h>
 
 #if FEATHER_BUILD_WINDOW
+#include "feather_window_host.h"
 #include <Window/AppWindow.h>
 #include <Window/Input.h>
 #include <Window/TexturePresenter.h>
@@ -567,13 +568,15 @@ struct AsyncTexturePresentation {
 };
 
 struct WindowState {
-    std::unique_ptr<GPU::Window::AppWindow> window;
+    std::unique_ptr<Feather::WindowHost> window;
+    std::unordered_set<FeContextHandle> native_contexts;
 };
 
 struct TexturePresenterState {
     FeWindowHandle window_handle = 0;
     std::unique_ptr<GPU::Window::TexturePresenter> presenter;
     std::unordered_map<FeTextureHandle, std::shared_ptr<AsyncTexturePresentation>> async_textures;
+    std::unordered_set<FeContextHandle> native_contexts;
 };
 #endif
 
@@ -2559,6 +2562,14 @@ bool configure_luisa_dispatch_locked(FeContextHandle context,
 
 bool synchronize_luisa_context_locked(FeContextHandle context, std::string* error = nullptr) {
     return Feather::Luisa::Synchronize(context, error);
+}
+
+bool configured_luisa_presentation_backend_locked() {
+    Feather::Luisa::DispatchInputs dispatch;
+    std::string error;
+    if (!configure_luisa_dispatch_locked(kDefaultContext, &dispatch, &error)) return false;
+    return dispatch.backend_name == "metal" || dispatch.backend_name == "vk" ||
+           dispatch.backend_name == "dx";
 }
 #endif
 
@@ -10852,6 +10863,7 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
     const auto* profile_stages = std::getenv("FEATHER_RASTER_PROFILE_STAGES");
     dispatch.synchronize = profile_stages != nullptr && profile_stages[0] != '\0' &&
                            std::strcmp(profile_stages, "0") != 0;
+    if (!dispatch.synchronize) dispatch.fence_key = next_handle();
     std::string error;
     if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster vertex FEIR dispatch failed." : error);
@@ -11079,6 +11091,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
         dispatch.device_index = context_dispatch.device_index;
         dispatch.shader_cache_key = shader_cache_key;
         dispatch.synchronize = sample_count == 1u;
+        if (!dispatch.synchronize && !prepare_fused) dispatch.fence_key = next_handle();
         std::string error;
         const auto dispatched = prepare_fused
             ? Feather::Luisa::PrepareGraphicsFragment(
@@ -12159,7 +12172,8 @@ FeWindowEvent to_fe_window_event(const GPU::Window::WindowEvent& source) {
     return target;
 }
 
-FeResult present_texture_cpu_locked(GPU::Window::TexturePresenter& presenter, TextureState& texture) {
+FeResult prepare_texture_pixels_locked(TextureState& texture, std::vector<uint32_t>* converted,
+                                       const uint32_t** pixels) {
     if (texture.depth != 1 || texture.width == 0 || texture.height == 0) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Texture presenter requires a valid 2D texture.");
     }
@@ -12184,39 +12198,108 @@ FeResult present_texture_cpu_locked(GPU::Window::TexturePresenter& presenter, Te
     }
 
     if (texture.pixel_format == 3) {
-        presenter.Present(reinterpret_cast<const uint32_t*>(texture.bytes.data()), texture.width, texture.height);
+        *pixels = reinterpret_cast<const uint32_t*>(texture.bytes.data());
         return ok();
     }
 
-    std::vector<uint32_t> rgba(pixel_count);
+    converted->resize(pixel_count);
     if (texture.pixel_format == 10) {
         const auto* floats = reinterpret_cast<const float*>(texture.bytes.data());
         const auto to_byte = [](float value) -> uint32_t {
             const auto clamped = std::min(1.0f, std::max(0.0f, value));
             return static_cast<uint32_t>(clamped * 255.0f + 0.5f);
         };
-        for (size_t i = 0; i < rgba.size(); ++i) {
+        for (size_t i = 0; i < converted->size(); ++i) {
             const auto r = to_byte(floats[i * 4 + 0]);
             const auto g = to_byte(floats[i * 4 + 1]);
             const auto b = to_byte(floats[i * 4 + 2]);
             const auto a = to_byte(floats[i * 4 + 3]);
-            rgba[i] = r | (g << 8) | (b << 16) | (a << 24);
+            (*converted)[i] = r | (g << 8) | (b << 16) | (a << 24);
         }
-        presenter.Present(rgba.data(), texture.width, texture.height);
+        *pixels = converted->data();
         return ok();
     }
 
     const auto* bgra = texture.bytes.data();
-    for (size_t i = 0; i < rgba.size(); ++i) {
+    for (size_t i = 0; i < converted->size(); ++i) {
         const auto b = static_cast<uint32_t>(bgra[i * 4 + 0]);
         const auto g = static_cast<uint32_t>(bgra[i * 4 + 1]);
         const auto r = static_cast<uint32_t>(bgra[i * 4 + 2]);
         const auto a = static_cast<uint32_t>(bgra[i * 4 + 3]);
-        rgba[i] = r | (g << 8) | (b << 16) | (a << 24);
+        (*converted)[i] = r | (g << 8) | (b << 16) | (a << 24);
     }
-    presenter.Present(rgba.data(), texture.width, texture.height);
+    *pixels = converted->data();
     return ok();
 }
+
+FeResult present_texture_cpu_locked(GPU::Window::TexturePresenter& presenter, TextureState& texture) {
+    std::vector<uint32_t> converted;
+    const uint32_t* pixels = nullptr;
+    const auto result = prepare_texture_pixels_locked(texture, &converted, &pixels);
+    if (result != FE_OK) return result;
+    presenter.Present(pixels, texture.width, texture.height);
+    return ok();
+}
+
+#if FEATHER_HAS_LUISA
+void trace_present_submission(const char* path, std::chrono::steady_clock::time_point start,
+                              Feather::Luisa::NativeTextureHandleKind handle_kind =
+                                  Feather::Luisa::NativeTextureHandleKind::Unknown) {
+    const auto* profile = std::getenv("FEATHER_PRESENT_PROFILE");
+    if (profile == nullptr || profile[0] == '\0' || std::strcmp(profile, "0") == 0) return;
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    struct Samples {
+        std::array<double, 120u> values{};
+        size_t count = 0u;
+    };
+    static thread_local Samples resident_samples;
+    static thread_local Samples staging_samples;
+    auto& samples = std::strcmp(path, "resident-swapchain") == 0 ? resident_samples : staging_samples;
+    samples.values[samples.count++] = elapsed;
+    if (samples.count != samples.values.size()) return;
+    auto ordered = samples.values;
+    std::sort(ordered.begin(), ordered.end());
+    const auto* native_kind = handle_kind == Feather::Luisa::NativeTextureHandleKind::MetalTexture ? "metal" :
+                              handle_kind == Feather::Luisa::NativeTextureHandleKind::VulkanImage ? "vulkan" :
+                              handle_kind == Feather::Luisa::NativeTextureHandleKind::Direct3D12Resource ? "d3d12" :
+                                                                                                          "none";
+    std::cerr << "[feather present] path=" << path << " native=" << native_kind
+              << " calls=120 median_ms=" << std::fixed << std::setprecision(3)
+              << ordered[ordered.size() / 2u] << " p95_ms=" << ordered[114u] << '\n';
+    samples.count = 0u;
+}
+
+FeResult present_host_pixels_locked(FeContextHandle context, FeTexturePresenterHandle presenter,
+                                    Feather::WindowHost& window, const uint32_t* pixels,
+                                    uint32_t width, uint32_t height) {
+    Feather::Luisa::DispatchInputs dispatch;
+    std::string error;
+    if (!configure_luisa_dispatch_locked(context, &dispatch, &error)) {
+        return fail(FE_ERROR_INVALID_HANDLE, error.empty() ? "Invalid presentation context." : error);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    if (!Feather::Luisa::PresentHostTexture(
+            dispatch.context_key, dispatch.runtime_directory, dispatch.backend_name,
+            dispatch.device_index, presenter, pixels,
+            static_cast<size_t>(width) * height * sizeof(uint32_t),
+            window.NativeDisplay(), window.NativeWindow(), width, height, window.VSync(), &error)) {
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                    error.empty() ? "Luisa host-staged presentation failed." : error);
+    }
+    trace_graphics_step("presenter queued Luisa host fallback");
+    trace_present_submission("host-staging", start);
+    return ok();
+}
+
+void destroy_native_presenter_locked(FeTexturePresenterHandle handle, TexturePresenterState& presenter) {
+    for (const auto context : presenter.native_contexts) {
+        std::string ignored;
+        (void)Feather::Luisa::DestroyPresenter(context, handle, &ignored);
+    }
+    presenter.native_contexts.clear();
+}
+#endif
 #endif
 
 template <typename Func> FeResult protect(Func&& func) {
@@ -12690,10 +12773,20 @@ FE_API FeResult fe_window_create(const FeWindowDesc* desc, FeWindowHandle* out_w
             return fail(FE_ERROR_INVALID_ARGUMENT, "Window dimensions must be positive.");
         }
 
-        auto* backend = require_backend();
-        if (backend == nullptr || backend->GetType() != GPU::Backend::BackendType::Vulkan) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE,
-                        "Feather window support requires the EasyGPU Vulkan backend in this build.");
+        const auto* compute_graphics = std::getenv("FEATHER_GRAPHICS_COMPUTE");
+        auto native_presentation = compute_graphics != nullptr && compute_graphics[0] != '\0' &&
+                                   std::strcmp(compute_graphics, "0") != 0 && desc->visible != 0u;
+#if FEATHER_HAS_LUISA
+        native_presentation = native_presentation && configured_luisa_presentation_backend_locked();
+#else
+        native_presentation = false;
+#endif
+        if (!native_presentation) {
+            auto* backend = require_backend();
+            if (backend == nullptr || backend->GetType() != GPU::Backend::BackendType::Vulkan) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            "Feather window support requires the EasyGPU Vulkan backend in this build.");
+            }
         }
 
         GPU::Window::WindowConfig config;
@@ -12707,7 +12800,7 @@ FE_API FeResult fe_window_create(const FeWindowDesc* desc, FeWindowHandle* out_w
         config.centerOnCreate = desc->center_on_create != 0;
 
         WindowState state;
-        state.window = std::make_unique<GPU::Window::AppWindow>(config);
+        state.window = std::make_unique<Feather::WindowHost>(config, native_presentation);
 
         std::lock_guard<std::mutex> lock(g_mutex);
         const auto handle = next_handle();
@@ -12734,12 +12827,26 @@ FE_API FeResult fe_window_destroy(FeWindowHandle window) {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (auto it = g_texture_presenters.begin(); it != g_texture_presenters.end();) {
             if (it->second.window_handle == window) {
+#if FEATHER_HAS_LUISA
+                destroy_native_presenter_locked(it->first, it->second);
+#endif
                 it = g_texture_presenters.erase(it);
             } else {
                 ++it;
             }
         }
-        return g_windows.erase(window) == 1 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
+        const auto found = g_windows.find(window);
+        if (found == g_windows.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
+        }
+#if FEATHER_HAS_LUISA
+        for (const auto context : found->second.native_contexts) {
+            std::string ignored;
+            (void)Feather::Luisa::DestroyPresenter(context, window, &ignored);
+        }
+#endif
+        g_windows.erase(found);
+        return ok();
 #else
         (void)window;
         return ok();
@@ -13014,6 +13121,16 @@ FE_API FeResult fe_window_present_pixels(FeWindowHandle window, const uint32_t* 
         if (it == g_windows.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid window handle.");
         }
+        if (it->second.window->SupportsNativePresentation()) {
+#if FEATHER_HAS_LUISA
+            const auto result = present_host_pixels_locked(
+                kDefaultContext, window, *it->second.window, pixels, width, height);
+            if (result == FE_OK) it->second.native_contexts.emplace(kDefaultContext);
+            return result;
+#else
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
+#endif
+        }
         it->second.window->Present(pixels, width, height);
         return ok();
 #else
@@ -13040,7 +13157,9 @@ FE_API FeResult fe_texture_presenter_create(FeWindowHandle window, FeTexturePres
 
         TexturePresenterState state;
         state.window_handle = window;
-        state.presenter = std::make_unique<GPU::Window::TexturePresenter>(*window_it->second.window);
+        if (auto* easy_gpu_window = window_it->second.window->EasyGpuWindow(); easy_gpu_window != nullptr) {
+            state.presenter = std::make_unique<GPU::Window::TexturePresenter>(*easy_gpu_window);
+        }
         const auto handle = next_handle();
         g_texture_presenters.emplace(handle, std::move(state));
         *out_presenter = handle;
@@ -13063,9 +13182,15 @@ FE_API FeResult fe_texture_presenter_destroy(FeTexturePresenterHandle presenter)
             return ok();
         }
         std::lock_guard<std::mutex> lock(g_mutex);
-        return g_texture_presenters.erase(presenter) == 1
-                   ? ok()
-                   : fail(FE_ERROR_INVALID_HANDLE, "Invalid texture presenter handle.");
+        const auto found = g_texture_presenters.find(presenter);
+        if (found == g_texture_presenters.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture presenter handle.");
+        }
+#if FEATHER_HAS_LUISA
+        destroy_native_presenter_locked(presenter, found->second);
+#endif
+        g_texture_presenters.erase(found);
+        return ok();
 #else
         (void)presenter;
         return ok();
@@ -13086,14 +13211,39 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
         if (texture_it == g_textures.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
+        const auto window_it = g_windows.find(presenter_it->second.window_handle);
+        if (window_it == g_windows.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Texture presenter window is no longer available.");
+        }
+        auto& texture_state = texture_it->second;
+        const auto native_presentation = window_it->second.window->SupportsNativePresentation();
 
 #if FEATHER_HAS_LUISA
+        if (native_presentation && mode != 1u) {
+            Feather::Luisa::NativeTextureInfo native_texture;
+            std::string error;
+            const auto start = std::chrono::steady_clock::now();
+            if (Feather::Luisa::PresentResidentTexture(
+                    texture_state.context, presenter, texture,
+                    window_it->second.window->NativeDisplay(), window_it->second.window->NativeWindow(),
+                    texture_state.width, texture_state.height, window_it->second.window->VSync(),
+                    &native_texture, &error)) {
+                presenter_it->second.native_contexts.emplace(texture_state.context);
+                trace_graphics_step("presenter queued Luisa resident texture");
+                trace_present_submission("resident-swapchain", start, native_texture.kind);
+                return ok();
+            }
+            if (mode == 2u) {
+                return fail(FE_ERROR_UNSUPPORTED,
+                            error.empty() ? "Native texture presentation is unavailable." : error);
+            }
+        }
+
         // Keep cross-runtime presentation portable: Luisa completes readback into a bounded ring
         // while EasyGPU presents the newest completed frame. This avoids synchronizing the Luisa
         // stream in the current frame and works for Metal, Vulkan, and DX backends alike.
         auto& async = presenter_it->second.async_textures[texture];
         if (async == nullptr) async = std::make_shared<AsyncTexturePresentation>();
-        auto& texture_state = texture_it->second;
         std::shared_ptr<AsyncPresentationFrame> newest;
         for (const auto& frame : async->frames) {
             if (frame->state.load(std::memory_order_acquire) == kPresentationFrameReady &&
@@ -13158,6 +13308,22 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
         }
 #endif
 
+        if (native_presentation) {
+#if FEATHER_HAS_LUISA
+            std::vector<uint32_t> converted;
+            const uint32_t* pixels = nullptr;
+            const auto prepared = prepare_texture_pixels_locked(texture_state, &converted, &pixels);
+            if (prepared != FE_OK) return prepared;
+            const auto result = present_host_pixels_locked(
+                texture_state.context, presenter, *window_it->second.window,
+                pixels, texture_state.width, texture_state.height);
+            if (result == FE_OK) presenter_it->second.native_contexts.emplace(texture_state.context);
+            return result;
+#else
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
+#endif
+        }
+
         if (mode != 1) {
             GPU::Runtime::AutoInitContext();
             GPU::Runtime::Context::GetInstance().MakeCurrent();
@@ -13189,7 +13355,7 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             }
         }
 
-        return present_texture_cpu_locked(*presenter_it->second.presenter, texture_it->second);
+        return present_texture_cpu_locked(*presenter_it->second.presenter, texture_state);
 #else
         (void)presenter;
         (void)texture;
@@ -13210,6 +13376,20 @@ FE_API FeResult fe_texture_presenter_present_pixels(FeTexturePresenterHandle pre
         const auto presenter_it = g_texture_presenters.find(presenter);
         if (presenter_it == g_texture_presenters.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture presenter handle.");
+        }
+        const auto window_it = g_windows.find(presenter_it->second.window_handle);
+        if (window_it == g_windows.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Texture presenter window is no longer available.");
+        }
+        if (window_it->second.window->SupportsNativePresentation()) {
+#if FEATHER_HAS_LUISA
+            const auto result = present_host_pixels_locked(
+                kDefaultContext, presenter, *window_it->second.window, pixels, width, height);
+            if (result == FE_OK) presenter_it->second.native_contexts.emplace(kDefaultContext);
+            return result;
+#else
+            return fail(FE_ERROR_UNSUPPORTED, "Luisa-native presentation is unavailable in this build.");
+#endif
         }
         presenter_it->second.presenter->Present(pixels, width, height);
         return ok();

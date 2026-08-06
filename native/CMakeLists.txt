@@ -61,6 +61,10 @@ add_library(feather SHARED
     feather_typed_ir_lowerer.cpp
 )
 
+if(FEATHER_BUILD_WINDOW)
+    target_sources(feather PRIVATE feather_window_host.cpp)
+endif()
+
 target_compile_features(feather PRIVATE cxx_std_20)
 target_compile_definitions(feather PRIVATE
     FEATHER_BUILDING_DLL=1
