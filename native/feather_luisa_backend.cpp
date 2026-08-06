@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -20,6 +22,7 @@
 #include <unordered_set>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +34,7 @@
 
 #include <luisa/ast/function.h>
 #include <luisa/ast/type.h>
+#include <luisa/core/binary_io.h>
 #include <luisa/dsl/dispatch_indirect.h>
 #include <luisa/dsl/sugar.h>
 #include <luisa/runtime/buffer.h>
@@ -80,6 +84,117 @@ void ensure_luisa_spirv_optimization_preset() noexcept {
         setenv("LUISA_SPIRV_OPT_PASSES", "full", 1);
 #endif
     });
+}
+
+class MemoryBinaryStream final : public luisa::BinaryStream {
+private:
+    std::vector<std::byte> data_;
+    size_t position_ = 0u;
+
+public:
+    explicit MemoryBinaryStream(luisa::span<const std::byte> data)
+        : data_{data.begin(), data.end()} {}
+
+    [[nodiscard]] size_t length() const noexcept override { return data_.size(); }
+    [[nodiscard]] size_t pos() const noexcept override { return position_; }
+
+    void read(luisa::span<std::byte> destination) noexcept override {
+        if (position_ > data_.size() || destination.size() > data_.size() - position_) {
+            std::memset(destination.data(), 0, destination.size());
+            position_ = data_.size();
+            return;
+        }
+        std::memcpy(destination.data(), data_.data() + position_, destination.size());
+        position_ += destination.size();
+    }
+};
+
+// LC's default I/O opens one LMDB environment per Device. A process-wide cache
+// keeps multiple Feather contexts independent without reopening the same LMDB path.
+class ProcessBinaryIO final : public luisa::BinaryIO {
+private:
+    std::filesystem::path cache_directory_;
+    std::filesystem::path data_directory_;
+    mutable std::mutex mutex_;
+
+    [[nodiscard]] luisa::unique_ptr<luisa::BinaryStream> read_entry(
+        const std::filesystem::path& directory, luisa::string_view name) const noexcept {
+        std::scoped_lock lock{mutex_};
+        auto path = std::filesystem::path{std::string{name.data(), name.size()}};
+        if (!path.is_absolute()) path = directory / path;
+        std::ifstream file{path, std::ios::binary | std::ios::ate};
+        if (!file) return nullptr;
+        const auto end = file.tellg();
+        if (end <= 0) return nullptr;
+        std::vector<std::byte> data(static_cast<size_t>(end));
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()))) {
+            return nullptr;
+        }
+        return luisa::make_unique<MemoryBinaryStream>(
+            luisa::span<const std::byte>{data.data(), data.size()});
+    }
+
+    luisa::filesystem::path write_entry(
+        const std::filesystem::path& directory, luisa::string_view name,
+        luisa::span<const std::byte> data) const noexcept {
+        std::scoped_lock lock{mutex_};
+        auto path = std::filesystem::path{std::string{name.data(), name.size()}};
+        if (!path.is_absolute()) path = directory / path;
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec) return {};
+        std::ofstream file{path, std::ios::binary | std::ios::trunc};
+        if (!file.write(reinterpret_cast<const char*>(data.data()),
+                        static_cast<std::streamsize>(data.size()))) {
+            return {};
+        }
+        return path;
+    }
+
+public:
+    explicit ProcessBinaryIO(std::filesystem::path runtime_directory)
+        : cache_directory_{runtime_directory / ".feather-cache"},
+          data_directory_{runtime_directory / ".feather-data"} {}
+
+    void clear_shader_cache() const noexcept override {
+        std::scoped_lock lock{mutex_};
+        std::error_code ec;
+        std::filesystem::remove_all(cache_directory_, ec);
+    }
+
+    [[nodiscard]] luisa::unique_ptr<luisa::BinaryStream> read_shader_bytecode(
+        luisa::string_view name) const noexcept override { return read_entry(data_directory_, name); }
+    [[nodiscard]] luisa::unique_ptr<luisa::BinaryStream> read_shader_cache(
+        luisa::string_view name) const noexcept override { return read_entry(cache_directory_, name); }
+    [[nodiscard]] luisa::unique_ptr<luisa::BinaryStream> read_internal_shader(
+        luisa::string_view name) const noexcept override { return read_entry(data_directory_, name); }
+
+    luisa::filesystem::path write_shader_bytecode(
+        luisa::string_view name, luisa::span<const std::byte> data) const noexcept override {
+        return write_entry(data_directory_, name, data);
+    }
+    luisa::filesystem::path write_shader_cache(
+        luisa::string_view name, luisa::span<const std::byte> data) const noexcept override {
+        return write_entry(cache_directory_, name, data);
+    }
+    luisa::filesystem::path write_internal_shader(
+        luisa::string_view name, luisa::span<const std::byte> data) const noexcept override {
+        return write_entry(data_directory_, name, data);
+    }
+};
+
+ProcessBinaryIO& process_binary_io(std::string_view runtime_directory) noexcept {
+    static auto* mutex = new std::mutex{};
+    static auto* instances = new std::unordered_map<std::string, std::unique_ptr<ProcessBinaryIO>>{};
+    std::scoped_lock lock{*mutex};
+    std::error_code ec;
+    auto path = std::filesystem::absolute(std::filesystem::path{runtime_directory}, ec).lexically_normal();
+    if (ec) path = std::filesystem::path{runtime_directory}.lexically_normal();
+    auto key = path.string();
+    auto& instance = (*instances)[key];
+    if (instance == nullptr) instance = std::make_unique<ProcessBinaryIO>(std::move(path));
+    return *instance;
 }
 
 bool has_vulkan_backend(const std::filesystem::path& directory) {
@@ -309,7 +424,7 @@ struct FusedTileRasterShaderType<std::index_sequence<I...>> {
     using type = Shader2D<ByteBuffer, ByteBuffer, Buffer<uint32_t>, Buffer<uint32_t>,
                           Buffer<uint32_t>, Buffer<uint32_t>, Buffer<float>,
                           Image<float>,
-                          TileRasterUIntArgument<I>..., uint32_t, float, float4>;
+                          TileRasterUIntArgument<I>..., uint32_t, float, uint32_t, float4>;
 };
 
 using FusedTileRasterShader = FusedTileRasterShaderType<std::make_index_sequence<8u>>::type;
@@ -325,6 +440,7 @@ using TileFillShader = Shader1D<ByteBuffer, Buffer<uint32_t>, Buffer<uint32_t>,
                                 uint32_t, uint32_t, uint32_t, uint32_t>;
 using MsaaResolveShader = Shader2D<Image<float>, Image<float>, Image<float>, Image<float>, Image<float>>;
 using MsaaClearShader = Shader2D<Image<float>, Image<float>, Image<float>, Image<float>, float4>;
+using MsaaLoadShader = Shader2D<Image<float>, Image<float>, Image<float>, Image<float>, Image<float>>;
 using AdGradientReduceShader = Shader1D<ByteBuffer, ByteBuffer, uint32_t, uint32_t, uint32_t>;
 
 constexpr auto kMaximumClippedVertices = 12u;
@@ -508,6 +624,7 @@ private:
     std::unique_ptr<IndirectDispatchBuffer> tile_fill_dispatch_buffer_;
     std::unique_ptr<MsaaResolveShader> msaa_resolve_shader_;
     std::unique_ptr<MsaaClearShader> msaa_clear_shader_;
+    std::unique_ptr<MsaaLoadShader> msaa_load_shader_;
     std::unique_ptr<AdGradientReduceShader> ad_gradient_reduce_shader_;
 
 public:
@@ -526,13 +643,12 @@ public:
         backend_name_ = backend_name;
         device_index_ = device_index;
         context_ = std::make_unique<Context>(runtime_directory_);
-        if (device_index == UINT32_MAX) {
-            device_ = std::make_unique<Device>(context_->create_device(backend_name_));
-        } else {
-            DeviceConfig config{};
+        DeviceConfig config{};
+        config.binary_io = &process_binary_io(runtime_directory_);
+        if (device_index != UINT32_MAX) {
             config.device_index = device_index;
-            device_ = std::make_unique<Device>(context_->create_device(backend_name_, &config));
         }
+        device_ = std::make_unique<Device>(context_->create_device(backend_name_, &config));
         stream_ = std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE));
         for (const auto key : stream_keys_) {
             streams_.emplace(key, std::make_unique<Stream>(device_->create_stream(StreamTag::COMPUTE)));
@@ -1234,6 +1350,58 @@ public:
         return true;
     }
 
+    bool load_multisample(std::span<const uint64_t> sample_keys,
+                          const HostTextureBinding& target,
+                          std::string* error) {
+        if (sample_keys.size() != 4u || target.resident_key == 0u || target.bytes == nullptr) {
+            if (error != nullptr) *error = "Luisa multisample load requires a resident source and four samples";
+            return false;
+        }
+        const auto storage = pixel_storage(target.pixel_format);
+        if (!storage) {
+            if (error != nullptr) *error = "Luisa multisample load format is unsupported";
+            return false;
+        }
+        bool source_created = false;
+        auto* source_resource = resident_texture(
+            target.resident_key, kResourceTexture2D, *storage,
+            make_uint3(target.width, target.height, 1u), target.mip_levels, &source_created);
+        auto* source = source_resource == nullptr ? nullptr : std::get_if<Image<float>>(source_resource);
+        if (source == nullptr) {
+            if (error != nullptr) *error = "Luisa multisample load source is unavailable";
+            return false;
+        }
+        std::array<Image<float>*, 4u> samples{};
+        for (size_t i = 0u; i < samples.size(); ++i) {
+            auto* resource = resident_texture(
+                sample_keys[i], kResourceTexture2D, *storage,
+                make_uint3(target.width, target.height, 1u), target.mip_levels);
+            samples[i] = resource == nullptr ? nullptr : std::get_if<Image<float>>(resource);
+            if (samples[i] == nullptr) {
+                if (error != nullptr) *error = "Luisa multisample load target is unavailable";
+                return false;
+            }
+        }
+        if (target.upload || source_created) *stream_ << source->copy_from(target.bytes->data());
+        if (msaa_load_shader_ == nullptr) {
+            auto shader = device_->compile<2>([](ImageFloat input, ImageFloat s0, ImageFloat s1,
+                                                 ImageFloat s2, ImageFloat s3) noexcept {
+                const auto pixel = dispatch_id().xy();
+                const auto source_pixel = make_uint2(pixel.x, dispatch_size().y - 1u - pixel.y);
+                const auto value = input.read(source_pixel);
+                s0.write(pixel, value);
+                s1.write(pixel, value);
+                s2.write(pixel, value);
+                s3.write(pixel, value);
+            });
+            msaa_load_shader_ = std::make_unique<MsaaLoadShader>(std::move(shader));
+        }
+        *stream_ << (*msaa_load_shader_)(
+                        *source, *samples[0], *samples[1], *samples[2], *samples[3])
+                        .dispatch(target.width, target.height);
+        return true;
+    }
+
     bool download_texture(uint64_t key, void* destination, size_t size, std::string* error) {
         const auto found = resident_textures_.find(key);
         if (found == resident_textures_.end() || destination == nullptr) {
@@ -1410,6 +1578,7 @@ public:
         tile_fill_dispatch_buffer_.reset();
         msaa_resolve_shader_.reset();
         msaa_clear_shader_.reset();
+        msaa_load_shader_.reset();
         stream_.reset();
         device_.reset();
         context_.reset();
@@ -1528,18 +1697,29 @@ RuntimeRegistry &runtime_registry() {
     return *registry;
 }
 
+std::recursive_mutex& runtime_mutex() noexcept {
+    // LC devices, streams, command lists, and Feather's resident caches are not
+    // safe for concurrent host mutation. Keep submissions serialized while the
+    // commands themselves remain asynchronous on their selected LC streams.
+    static auto* mutex = new std::recursive_mutex{};
+    return *mutex;
+}
+
 } // namespace
 
 void Shutdown() {
+    std::scoped_lock lock{runtime_mutex()};
     runtime_registry().reset();
 }
 
 void Shutdown(uint64_t context_key) {
+    std::scoped_lock lock{runtime_mutex()};
     runtime_registry().erase(context_key);
 }
 
 bool CreateStream(uint64_t context_key, std::string_view runtime_directory, std::string_view backend_name,
                   uint32_t device_index, uint64_t stream_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto& state = runtime_registry().prepare(context_key, runtime_directory, backend_name, device_index);
@@ -1547,6 +1727,7 @@ bool CreateStream(uint64_t context_key, std::string_view runtime_directory, std:
 }
 
 bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1559,6 +1740,7 @@ bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error
 }
 
 bool Synchronize(uint64_t context_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1566,6 +1748,7 @@ bool Synchronize(uint64_t context_key, std::string* error) {
 }
 
 bool SynchronizeStream(uint64_t context_key, uint64_t stream_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1578,6 +1761,7 @@ bool SynchronizeStream(uint64_t context_key, uint64_t stream_key, std::string* e
 }
 
 bool WaitFence(uint64_t context_key, uint64_t stream_key, uint64_t fence_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1590,6 +1774,7 @@ bool WaitFence(uint64_t context_key, uint64_t stream_key, uint64_t fence_key, st
 }
 
 bool IsFenceCompleted(uint64_t context_key, uint64_t fence_key, bool* completed, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1602,6 +1787,7 @@ bool IsFenceCompleted(uint64_t context_key, uint64_t fence_key, bool* completed,
 }
 
 bool SynchronizeFence(uint64_t context_key, uint64_t fence_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1614,6 +1800,7 @@ bool SynchronizeFence(uint64_t context_key, uint64_t fence_key, std::string* err
 }
 
 bool DestroyFence(uint64_t context_key, uint64_t fence_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     auto* state = runtime_registry().find(context_key);
@@ -1623,11 +1810,13 @@ bool DestroyFence(uint64_t context_key, uint64_t fence_key, std::string* error) 
 }
 
 void Abandon() noexcept {
+    std::scoped_lock lock{runtime_mutex()};
     runtime_registry().abandon();
 }
 
 bool DownloadResidentTexture(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                              std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) {
@@ -1639,6 +1828,7 @@ bool DownloadResidentTexture(uint64_t context_key, uint64_t resident_key, void* 
 
 bool DownloadResidentTextureAsync(uint64_t context_key, uint64_t resident_key, void* destination, size_t size,
                                   std::function<void()> completion, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) {
@@ -1653,6 +1843,7 @@ bool PresentResidentTexture(uint64_t context_key, uint64_t presenter_key, uint64
                             uint64_t native_display, uint64_t native_window,
                             uint32_t width, uint32_t height, bool vsync,
                             NativeTextureInfo* native_texture, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) {
@@ -1670,6 +1861,7 @@ bool PresentHostTexture(uint64_t context_key, std::string_view runtime_directory
                         uint64_t native_display, uint64_t native_window,
                         uint32_t width, uint32_t height, bool vsync,
                         std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     auto& state = runtime_registry().prepare(
         context_key, runtime_directory, backend_name, device_index);
@@ -1679,6 +1871,7 @@ bool PresentHostTexture(uint64_t context_key, std::string_view runtime_directory
 }
 
 bool DestroyPresenter(uint64_t context_key, uint64_t presenter_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) return true;
@@ -1688,6 +1881,7 @@ bool DestroyPresenter(uint64_t context_key, uint64_t presenter_key, std::string*
 bool ResolveMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
                                const HostTextureBinding& target,
                                bool synchronize, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) {
@@ -1701,6 +1895,7 @@ bool ClearMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sam
                              const HostTextureBinding& target,
                              const std::array<float, 4u>& color,
                              std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto state = runtime_registry().find(context_key);
     if (state == nullptr) {
@@ -1709,6 +1904,19 @@ bool ClearMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sam
     }
     return state->clear_multisample(
         sample_keys, target, make_float4(color[0], color[1], color[2], color[3]), error);
+}
+
+bool LoadMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
+                            const HostTextureBinding& target,
+                            std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
+    if (error != nullptr) error->clear();
+    const auto state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) *error = "Luisa context has no resident state";
+        return false;
+    }
+    return state->load_multisample(sample_keys, target, error);
 }
 
 std::string RuntimeDirectory() {
@@ -1768,6 +1976,7 @@ std::vector<DeviceInfo> EnumerateDevices(std::string_view runtime_directory) {
 
 bool ValidateDevice(std::string_view runtime_directory, std::string_view backend_name,
                     uint32_t device_index, DeviceInfo* info, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     const auto devices = EnumerateDevices(runtime_directory);
     const auto selected = std::find_if(devices.begin(), devices.end(), [&](const auto& candidate) {
@@ -1795,6 +2004,7 @@ bool ValidateDevice(std::string_view runtime_directory, std::string_view backend
 
     Context context{runtime_directory};
     DeviceConfig config{};
+    config.binary_io = &process_binary_io(runtime_directory);
     config.device_index = device_index;
     auto device = context.create_device(backend_name, &config);
     if (!device) {
@@ -1815,6 +2025,7 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
               std::span<HostBufferBinding> host_buffers, std::span<HostTextureBinding> host_textures,
               const DispatchInputs& dispatch, const AdInputs* ad_inputs,
               std::span<AdGradientBinding> gradients, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
     if (dispatch.execution_skipped != nullptr) *dispatch.execution_skipped = false;
@@ -2358,6 +2569,7 @@ bool ReduceAdGradient(uint64_t context_key, std::string_view runtime_directory,
                       std::vector<unsigned char>* destination, uint64_t destination_offset,
                       uint64_t destination_size, bool upload_destination,
                       std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr) error->clear();
     auto& state = runtime_registry().prepare(
         context_key, runtime_directory, backend_name, device_index);
@@ -2373,6 +2585,7 @@ bool PrepareGraphicsFragment(const TypedIR::Module& module,
                              const DispatchInputs& dispatch,
                              uint64_t callable_cache_key,
                              std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     const auto trace_enabled = std::getenv("FEATHER_GRAPHICS_TRACE") != nullptr;
     const auto trace = [&](const char* step) {
         if (trace_enabled) std::fprintf(stderr, "[feather fused fragment] %s\n", step);
@@ -2514,6 +2727,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                             std::vector<unsigned char>* fragment_varyings,
                             std::vector<unsigned char>* fragment_coverage,
                             std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
     // Opt-in compute-only triangle assembly and raster stage between generated vertex and
     // fragment FEIR dispatches.
     if (error != nullptr) error->clear();
@@ -2992,7 +3206,8 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         ImageFloat resolved_output,
                         UInt tile_width, UInt reference_capacity, UInt target_width, UInt target_height,
                         UInt viewport_x, UInt viewport_y, UInt viewport_width, UInt viewport_height,
-                        UInt clear_depth, Float clear_depth_value, Float4 clear_color) noexcept {
+                        UInt clear_depth, Float clear_depth_value, UInt load_color,
+                        Float4 clear_color) noexcept {
                         set_block_size(kRasterTileSize, kRasterTileSize, 1u);
                         Shared<float4> shared_primitive_data{kSharedPrimitiveBatchSize * 7u};
                         Shared<uint4> shared_primitive_sources{kSharedPrimitiveBatchSize};
@@ -3013,6 +3228,10 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                         ArrayUInt<4u> best_primitive;
                         ArrayUInt3<4u> best_sources;
                         ArrayFloat4<4u> sample_colors;
+                        const auto output_pixel = make_uint2(
+                            safe_id.x, target_height - 1u - safe_id.y);
+                        const auto initial_color = ite(
+                            load_color != 0u, resolved_output.read(output_pixel), clear_color);
                         for (uint32_t sample = 0u; sample < sample_count; ++sample) {
                             const auto pixel_index = (safe_id.y * target_width + safe_id.x) * sample_count + sample;
                             $if (clear_depth != 0u) {
@@ -3023,7 +3242,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                             best_order[sample] = ~0u;
                             best_primitive[sample] = ~0u;
                             best_sources[sample] = make_uint3(0u);
-                            sample_colors[sample] = clear_color;
+                            sample_colors[sample] = initial_color;
                         }
                         const auto viewport_origin = make_float2(
                             viewport_x.cast<float>(), viewport_y.cast<float>());
@@ -3289,6 +3508,7 @@ bool DispatchVerticalRaster(HostBufferBinding vertices, HostTextureBinding targe
                           target.width, target.height, raster.viewport_x, raster.viewport_y,
                           raster.viewport_width, raster.viewport_height,
                           raster.clear_depth, raster.clear_depth_value,
+                          raster.load_color,
                           make_float4(raster.clear_color_r, raster.clear_color_g,
                                       raster.clear_color_b, raster.clear_color_a))
                           .dispatch(target.width, target.height);

@@ -194,11 +194,13 @@ class Lowerer {
         uint32_t element_count = 0;
         uint8_t kind = 0;
         uint8_t access = 0;
+        uint32_t mip_levels = 1;
     };
 
     struct Sampler {
         Value* filter = nullptr;
         Value* address = nullptr;
+        uint32_t filter_code = 0;
     };
 
     struct CallableParameter {
@@ -221,6 +223,8 @@ class Lowerer {
         uint32_t resource_index_expression = TypedIR::NoIndex;
         const Type* root_type = nullptr;
         std::vector<Value*> indices;
+        const Type* swizzle_base_type = nullptr;
+        std::vector<uint32_t> swizzle_components;
         explicit operator bool() const noexcept { return pointer != nullptr || resource != nullptr; }
     };
 
@@ -434,7 +438,8 @@ class Lowerer {
                                     : source.sampler_mipmap_mode == 0u ? 1u : 2u;
                 const uint32_t addresses[]{0u, 1u, 2u, 3u};
                 samplers_.emplace(source.name,
-                                  Sampler{index_constant(filter), index_constant(addresses[source.sampler_address_u])});
+                                  Sampler{index_constant(filter), index_constant(addresses[source.sampler_address_u]),
+                                          filter});
                 continue;
             }
             const auto texture = source.kind == kResourceTexture2D || source.kind == kResourceTexture3D;
@@ -447,7 +452,8 @@ class Lowerer {
                                           : Type::buffer(element);
             auto* argument = function_->create_resource_argument(resource_type);
             resources_.emplace(source.name, Resource{argument, element, source.binding,
-                                                     source.element_count, source.kind, source.access});
+                                                     source.element_count, source.kind, source.access,
+                                                     source.mip_levels});
             if (!texture && buffer_layouts_ != nullptr) {
                 auto source_type = TypedIR::NoIndex;
                 for (uint32_t i = 0; i < module_.types.size(); ++i) {
@@ -1649,7 +1655,13 @@ class Lowerer {
             operands.push_back(ddy);
             op = ResourceQueryOp::TEXTURE2D_SAMPLE_GRAD;
         }
-        operands.push_back(sampler->second.filter);
+        // LC's portable sampler set has no mip-enabled point-filter variant.
+        // Preserve point sampling for single-level textures and select its
+        // mip-enabled representation only when the bound texture has a mip chain.
+        auto* filter = texture->second.mip_levels > 1u && sampler->second.filter_code < 2u
+                           ? index_constant(2u)
+                           : sampler->second.filter;
+        operands.push_back(filter);
         operands.push_back(sampler->second.address);
         auto* sampled = builder_.call(Type::vector(Type::of<float>(), 4u), op, operands);
         return sampled->type() == result_type ? sampled : builder_.bit_cast_if_necessary(result_type, sampled);
@@ -1853,7 +1865,30 @@ class Lowerer {
             if (found == shared_.end() || index == nullptr) return fail("invalid FEIR shared-memory l-value"), std::nullopt;
             auto* result_type = type(lvalue.type_id);
             index = shared_index(index, found->second.length);
-            return Address{.pointer = builder_.gep(result_type, found->second.pointer, {index}), .root_type = result_type};
+            return Address{.pointer = found->second.pointer, .root_type = result_type, .indices = {index}};
+        }
+        if (lvalue.kind == kLValueSwizzle) {
+            auto base = expression_address(lvalue.a);
+            if (!base || lvalue.a >= module_.expressions.size())
+                return fail("invalid FEIR swizzle l-value base"), std::nullopt;
+            auto* base_type = type(module_.expressions[lvalue.a].type_id);
+            if (base_type == nullptr || !base_type->is_vector())
+                return fail("FEIR swizzle l-value requires a vector base"), std::nullopt;
+            std::array<bool, 4u> used{};
+            for (char c : string(lvalue.name_id)) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                auto position = std::string_view{"xyzw"}.find(c);
+                if (position == std::string_view::npos) position = std::string_view{"rgba"}.find(c);
+                if (position == std::string_view::npos) position = std::string_view{"stpq"}.find(c);
+                if (position == std::string_view::npos || position >= base_type->dimension() || used[position])
+                    return fail("invalid or duplicate FEIR swizzle write component"), std::nullopt;
+                used[position] = true;
+                base->swizzle_components.push_back(static_cast<uint32_t>(position));
+            }
+            if (base->swizzle_components.empty())
+                return fail("FEIR swizzle l-value has no components"), std::nullopt;
+            base->swizzle_base_type = base_type;
+            return base;
         }
         if (lvalue.kind == kLValueField || lvalue.kind == kLValueMemberAccess || lvalue.kind == kLValueIndexAccess) {
             auto base = address(lvalue.a);
@@ -1917,6 +1952,22 @@ class Lowerer {
     }
 
     Value* read_address(const Address& address, const Type* result_type) {
+        if (address.swizzle_base_type != nullptr) {
+            auto base = address;
+            base.swizzle_base_type = nullptr;
+            base.swizzle_components.clear();
+            auto* root = read_address(base, address.swizzle_base_type);
+            if (root == nullptr ||
+                (address.swizzle_components.size() == 1u && !result_type->is_scalar()) ||
+                (address.swizzle_components.size() != 1u &&
+                 (!result_type->is_vector() || result_type->dimension() != address.swizzle_components.size())))
+                return fail("FEIR swizzle l-value type does not match its components"), nullptr;
+            std::vector<Value*> operands{root};
+            for (auto component : address.swizzle_components)
+                operands.push_back(index_constant(component));
+            return operands.size() == 2u ? extract(root, result_type, {operands[1]})
+                                         : builder_.call(result_type, ArithmeticOp::SHUFFLE, operands);
+        }
         if (address.pointer != nullptr) {
             auto* pointer = address.indices.empty() ? address.pointer
                                                     : builder_.gep(result_type, address.pointer, address.indices);
@@ -1937,6 +1988,28 @@ class Lowerer {
     }
 
     bool write_address(const Address& address, const Type* value_type, Value* value) {
+        if (address.swizzle_base_type != nullptr) {
+            if (address.resource != nullptr && address.resource->access != kAccessReadWrite)
+                return fail("FEIR swizzle writes require read-write storage");
+            const auto component_count = address.swizzle_components.size();
+            if ((component_count == 1u && !value_type->is_scalar()) ||
+                (component_count != 1u &&
+                 (!value_type->is_vector() || value_type->dimension() != component_count)))
+                return fail("FEIR swizzle write value does not match its components");
+            auto base = address;
+            base.swizzle_base_type = nullptr;
+            base.swizzle_components.clear();
+            auto* root = read_address(base, address.swizzle_base_type);
+            if (root == nullptr) return false;
+            for (uint32_t i = 0u; i < component_count; ++i) {
+                auto* component = component_count == 1u
+                                      ? value
+                                      : extract(value, address.swizzle_base_type->element(), {index_constant(i)});
+                root = builder_.call(address.swizzle_base_type, ArithmeticOp::INSERT,
+                                     {root, component, index_constant(address.swizzle_components[i])});
+            }
+            return write_address(base, address.swizzle_base_type, root);
+        }
         if (address.pointer != nullptr) {
             auto* pointer = address.indices.empty() ? address.pointer
                                                     : builder_.gep(value_type, address.pointer, address.indices);
@@ -1985,8 +2058,7 @@ class Lowerer {
             indices.insert(indices.end(), target->indices.begin(), target->indices.end());
             return builder_.call(result_type, ops[expression.op], target->resource->argument, indices, values);
         }
-        auto* pointer = target->indices.empty() ? target->pointer : builder_.gep(result_type, target->pointer, target->indices);
-        return builder_.call(result_type, ops[expression.op], pointer, {}, values);
+        return builder_.call(result_type, ops[expression.op], target->pointer, target->indices, values);
     }
 
     bool emit_bounds_guard(uint8_t dimensions) {

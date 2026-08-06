@@ -20,6 +20,7 @@ struct ResourceInfo {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t depth = 1;
+    uint32_t mip_levels = 1;
     bool sampled = false;
     uint32_t sampler_min_filter = 0;
     uint32_t sampler_mag_filter = 0;

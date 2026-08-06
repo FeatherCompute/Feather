@@ -105,6 +105,7 @@ struct RasterDispatchInputs {
     float clear_color_g = 0.0f;
     float clear_color_b = 0.0f;
     float clear_color_a = 1.0f;
+    uint32_t load_color = 0;
     uint32_t vertices_per_instance = 3;
     uint32_t vertex_domain = 3;
     uint32_t sample_count = 1;
@@ -224,5 +225,9 @@ bool ClearMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sam
                              const HostTextureBinding& target,
                              const std::array<float, 4u>& color,
                              std::string* error = nullptr);
+
+bool LoadMultisampleTexture(uint64_t context_key, std::span<const uint64_t> sample_keys,
+                            const HostTextureBinding& target,
+                            std::string* error = nullptr);
 
 } // namespace Feather::Luisa

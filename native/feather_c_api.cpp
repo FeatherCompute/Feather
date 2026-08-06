@@ -3243,6 +3243,7 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                     resource_info.width = texture->second.width;
                     resource_info.height = texture->second.height;
                     resource_info.depth = texture->second.depth;
+                    resource_info.mip_levels = texture->second.mip_levels;
                     resource_info.texture_format = texture->second.pixel_format;
                 }
             }
@@ -3292,6 +3293,10 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     std::optional<Feather::Luisa::AdInputs> ad_inputs;
     std::vector<ADGradientState> next_gradients;
     if (kernel.auto_diff) {
+        std::string unsupported_control_flow;
+        if (typed_ir_contains_unsupported_ad_control_flow(ir.typed_module, &unsupported_control_flow)) {
+            return fail(FE_ERROR_UNSUPPORTED, "Feather AD " + unsupported_control_flow + ".");
+        }
         // XIR reverse mode accepts only fixed-trip loops. Specialize AD shaders
         // for their uniform values so loop bounds remain compile-time constants.
         lowering.dynamic_push_constants = false;
@@ -4042,6 +4047,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                                           uint64_t varying_resident_key, uint64_t coverage_resident_key,
                                           const FeTextureHandle* target_handles, uint32_t sample_count,
                                           const std::array<float, 4u>& clear_color,
+                                          bool preserve_color,
                                           std::vector<uint64_t>* fused_callable_keys = nullptr) {
     const auto prepare_fused = fused_callable_keys != nullptr;
     if (targets.empty() || (!prepare_fused && (varyings == nullptr || coverage == nullptr))) {
@@ -4213,12 +4219,16 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                 targets[target_index]->width, targets[target_index]->height,
                 targets[target_index]->depth, targets[target_index]->mip_levels,
                 targets[target_index]->pixel_format, &targets[target_index]->bytes,
-                target_handles[target_index], false, false, false};
+                target_handles[target_index], !targets[target_index]->luisa_uploaded, false, false};
             std::string error;
-            if (!Feather::Luisa::ClearMultisampleTexture(
-                    pipeline.context, sample_keys, target_binding, clear_color, &error)) {
+            const auto initialized = preserve_color
+                ? Feather::Luisa::LoadMultisampleTexture(
+                      pipeline.context, sample_keys, target_binding, &error)
+                : Feather::Luisa::ClearMultisampleTexture(
+                      pipeline.context, sample_keys, target_binding, clear_color, &error);
+            if (!initialized) {
                 return fail(FE_ERROR_UNSUPPORTED,
-                            error.empty() ? "Compute raster multisample clear failed." : error);
+                            error.empty() ? "Compute raster multisample initialization failed." : error);
             }
         }
     }
@@ -4578,8 +4588,9 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
     } else if (pipeline.depth_test != 0u || pipeline.depth_write != 0u) {
         return fail(FE_ERROR_INVALID_ARGUMENT, "Compute raster depth state requires a depth target.");
     }
-    const auto clear_color = draw.clear_color != 0u || pipeline.sample_count > 1u ||
+    const auto clear_color = draw.clear_color != 0u ||
                              draw.color_load_op == static_cast<uint32_t>(GraphicsColorLoadOp::Clear);
+    const auto load_color = draw.color_load_op == static_cast<uint32_t>(GraphicsColorLoadOp::Load);
     const auto clear_depth = depth_binding_ptr != nullptr &&
                              (draw.clear_depth != 0u ||
                               draw.depth_load_op == static_cast<uint32_t>(GraphicsDepthLoadOp::Clear) ||
@@ -4621,6 +4632,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
         draw.clear_color != 0u ? draw.clear_color_g : 0.0f,
         draw.clear_color != 0u ? draw.clear_color_b : 0.0f,
         draw.clear_color != 0u ? draw.clear_color_a : 1.0f,
+        load_color ? 1u : 0u,
         draw.count,
         vertex_domain,
         pipeline.sample_count,
@@ -4664,6 +4676,7 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
             draw.color_targets, pipeline.sample_count,
             {raster.clear_color_r, raster.clear_color_g,
              raster.clear_color_b, raster.clear_color_a},
+            load_color,
             &fragment_callable_keys);
         if (prepare_result != FE_OK) return prepare_result;
         trace_graphics_step("compute fragment prepared");
@@ -4686,7 +4699,8 @@ FeResult draw_graphics_pipeline_compute_raster(GraphicsPipelineState& pipeline, 
               pipeline, color_targets, &fragment_varyings, &fragment_coverage,
               varying_resident_key, coverage_resident_key, draw.color_targets, pipeline.sample_count,
               {raster.clear_color_r, raster.clear_color_g,
-               raster.clear_color_b, raster.clear_color_a});
+               raster.clear_color_b, raster.clear_color_a},
+              load_color);
     if (fragment_result != FE_OK) return fragment_result;
     trace_graphics_step("compute fragment complete");
     for (auto* color_target : color_targets) {
