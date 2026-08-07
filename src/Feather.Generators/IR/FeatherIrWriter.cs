@@ -136,6 +136,7 @@ internal static class FeatherIrWriter
             ResourceKindModel.Uniform => 4,
             ResourceKindModel.PushConstant => 5,
             ResourceKindModel.Texture3D => 6,
+            ResourceKindModel.Accel => 7,
             _ => 0
         };
 

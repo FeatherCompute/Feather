@@ -25,6 +25,17 @@ public interface IGpuTextureBinding
 }
 
 /// <summary>
+/// Exposes the native accel handle needed by generated Feather binding code.
+/// </summary>
+public interface IGpuAccelBinding
+{
+    /// <summary>
+    /// Gets the native acceleration-structure handle associated with the shader-facing accel view.
+    /// </summary>
+    FeAccelHandle NativeAccelHandle { get; }
+}
+
+/// <summary>
 /// Exposes the native sampler handle needed by generated Feather binding code.
 /// </summary>
 public interface IGpuSamplerBinding

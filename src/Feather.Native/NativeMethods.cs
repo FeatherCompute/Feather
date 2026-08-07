@@ -401,6 +401,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint binding, FeBufferHandle buffer);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_bind_accel(FeKernelHandle kernel, uint binding, FeAccelHandle accel);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint binding, FeTextureHandle texture);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

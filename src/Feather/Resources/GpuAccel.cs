@@ -58,6 +58,15 @@ public sealed class GpuAccel : IDisposable
         return new GpuAccel(context, handle);
     }
 
+    /// <summary>
+    /// Creates a read-only shader binding for this acceleration structure.
+    /// </summary>
+    public ReadOnlyAccel AsReadOnly()
+    {
+        ThrowIfDisposed();
+        return new ReadOnlyAccel(Handle);
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -73,4 +82,26 @@ public sealed class GpuAccel : IDisposable
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
+}
+
+/// <summary>
+/// Read-only shader view over a GPU acceleration structure.
+/// </summary>
+public readonly struct ReadOnlyAccel : IGpuAccelBinding
+{
+    internal ReadOnlyAccel(FeAccelHandle handle)
+    {
+        Handle = handle;
+    }
+
+    internal FeAccelHandle Handle { get; }
+
+    FeAccelHandle IGpuAccelBinding.NativeAccelHandle => Handle;
+
+    /// <summary>
+    /// Traces the given ray against this acceleration structure and returns the
+    /// closest committed surface hit. Only valid inside a generated kernel.
+    /// </summary>
+    public Feather.RayTracing.SurfaceHit TraceClosest(Feather.RayTracing.Ray ray)
+        => throw new System.NotSupportedException("TraceClosest is lowered by the Feather generator; it has no host implementation.");
 }

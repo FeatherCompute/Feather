@@ -620,6 +620,9 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                 case ResourceKindModel.Sampler:
                     builder.Append("        command.BindSampler(").Append(resource.Binding).Append(", ").Append(shaderParameterName).Append(".__feather_sampler_").Append(resource.Name).Append(accessorSuffix).AppendLine("());");
                     break;
+                case ResourceKindModel.Accel:
+                    builder.Append("        command.BindAccel(").Append(resource.Binding).Append(", ").Append(shaderParameterName).Append(".__feather_accel_").Append(resource.Name).Append(accessorSuffix).AppendLine("());");
+                    break;
             }
         }
 
@@ -664,6 +667,14 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                         .Append("() => ((global::Feather.Resources.IGpuSamplerBinding)")
                         .Append(resource.Name)
                         .AppendLine(").NativeSamplerHandle;");
+                    break;
+                case ResourceKindModel.Accel:
+                    builder.Append("    private readonly global::Feather.Native.FeAccelHandle __feather_accel_")
+                        .Append(resource.Name)
+                        .Append(accessorSuffix)
+                        .Append("() => ((global::Feather.Resources.IGpuAccelBinding)")
+                        .Append(resource.Name)
+                        .AppendLine(").NativeAccelHandle;");
                     break;
                 case ResourceKindModel.PushConstant:
                     builder.Append("    private readonly ")
@@ -731,6 +742,9 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                     break;
                 case ResourceKindModel.Sampler:
                     builder.Append("        command.BindSampler(").Append(resource.Binding).Append(", kernel.__feather_sampler_").Append(resource.Name).AppendLine("());");
+                    break;
+                case ResourceKindModel.Accel:
+                    builder.Append("        command.BindAccel(").Append(resource.Binding).Append(", kernel.__feather_accel_").Append(resource.Name).AppendLine("());");
                     break;
             }
         }

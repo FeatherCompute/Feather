@@ -39,6 +39,11 @@ internal static class ShaderInvocationLowerer
                 _ => LoweredShaderInstructionKind.KnownSymbolInvocation
             },
             "global::Feather.Math.ShaderMath" or "global::Feather.Math.Hlsl" => LoweredShaderInstructionKind.KnownSymbolInvocation,
+            "global::Feather.Resources.ReadOnlyAccel" => methodName switch
+            {
+                "TraceClosest" => LoweredShaderInstructionKind.KnownSymbolInvocation,
+                _ => default
+            },
             _ => default
         };
 

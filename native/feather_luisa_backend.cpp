@@ -70,6 +70,7 @@ using namespace luisa::compute;
 using namespace luisa::compute::xir;
 
 constexpr uint8_t kResourceBuffer = 1;
+constexpr uint8_t kResourceAccel = 7;
 constexpr uint8_t kResourceTexture2D = 2;
 constexpr uint8_t kResourcePushConstant = 5;
 constexpr uint8_t kResourceTexture3D = 6;
@@ -2124,7 +2125,8 @@ bool ValidateDevice(std::string_view runtime_directory, std::string_view backend
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> host_buffers, std::span<HostTextureBinding> host_textures,
               const DispatchInputs& dispatch, const AdInputs* ad_inputs,
-              std::span<AdGradientBinding> gradients, std::string* error) {
+              std::span<AdGradientBinding> gradients,
+              std::span<HostAccelBinding> host_accels, std::string* error) {
     std::scoped_lock lock{runtime_mutex()};
     if (error != nullptr)
         error->clear();
@@ -2261,6 +2263,25 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             runtime_push_constants.push_back(runtime);
             ++push_constant_index;
+            continue;
+        }
+        if (resource.kind == kResourceAccel) {
+            auto found = std::find_if(host_accels.begin(), host_accels.end(),
+                                      [&](const auto& binding) { return binding.binding == resource.binding; });
+            if (found == host_accels.end()) {
+                if (error != nullptr) *error = "Luisa accel binding is missing";
+                return false;
+            }
+            auto accel_state = state.accels_.find(found->accel_key);
+            if (accel_state == state.accels_.end() || accel_state->second->accel == nullptr) {
+                if (error != nullptr) *error = "Luisa accel binding references an unknown acceleration structure";
+                return false;
+            }
+            if (!cache_hit) {
+                bound_arguments.emplace_back(
+                    luisa::compute::Function::AccelBinding{
+                        accel_state->second->accel->handle()});
+            }
             continue;
         }
         if (resource.kind == kResourceTexture2D || resource.kind == kResourceTexture3D) {

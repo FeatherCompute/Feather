@@ -344,6 +344,7 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
                                          FeKernelHandle* out_kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer);
+FE_API FeResult fe_kernel_bind_accel(FeKernelHandle kernel, uint32_t binding, FeAccelHandle accel);
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture);
 FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, FeSamplerHandle sampler);
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size);

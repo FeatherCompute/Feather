@@ -501,7 +501,7 @@ bool ParseSection(const unsigned char* payload, uint64_t byte_length, Module* mo
             (type.kind == 3 && (type.a >= parsed.types.size() || type.b < 2 || type.b > 4 || type.c < 2 || type.c > 4)) ||
             (type.kind == 4 && type.a >= parsed.structs.size()) ||
             (type.kind == 5 && type.a >= parsed.types.size()) ||
-            (type.kind == 6 && (type.a > 3 || type.b >= parsed.types.size() || type.c > 3))) {
+            (type.kind == 6 && (type.a > 4 || type.b >= parsed.types.size() || type.c > 3))) {
             return false;
         }
     }

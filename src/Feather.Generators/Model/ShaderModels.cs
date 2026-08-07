@@ -80,7 +80,8 @@ internal enum ResourceKindModel
     Texture3D,
     Sampler,
     Uniform,
-    PushConstant
+    PushConstant,
+    Accel
 }
 
 internal enum ResourceAccessModel

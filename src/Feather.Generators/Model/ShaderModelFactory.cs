@@ -1474,6 +1474,7 @@ internal static class ShaderModelFactory
             var textureElementSupported = IsSupportedComputeTextureElementType(elementSymbol);
             return genericName switch
             {
+                "global::Feather.Resources.ReadOnlyAccel" => new(binding, name, typeName, string.Empty, ResourceKindModel.Accel, ResourceAccessModel.Read, IsComputeStorageElementSupported: false),
                 "global::Feather.Resources.ReadOnlyBuffer<T>" => new(binding, name, typeName, elementType, ResourceKindModel.Buffer, ResourceAccessModel.Read, IsComputeStorageElementSupported: storageElementSupported),
                 "global::Feather.Resources.WriteOnlyBuffer<T>" => new(binding, name, typeName, elementType, ResourceKindModel.Buffer, ResourceAccessModel.Write, IsComputeStorageElementSupported: storageElementSupported),
                 "global::Feather.Resources.ReadWriteBuffer<T>" => new(binding, name, typeName, elementType, ResourceKindModel.Buffer, ResourceAccessModel.ReadWrite, IsComputeStorageElementSupported: storageElementSupported),
@@ -1494,6 +1495,11 @@ internal static class ShaderModelFactory
         if (typeName == "global::Feather.Resources.SamplerState")
         {
             return new(binding, name, typeName, typeName, ResourceKindModel.Sampler, ResourceAccessModel.Sample);
+        }
+
+        if (typeName == "global::Feather.Resources.ReadOnlyAccel")
+        {
+            return new(binding, name, typeName, string.Empty, ResourceKindModel.Accel, ResourceAccessModel.Read, IsComputeStorageElementSupported: false);
         }
 
         return new(binding, name, typeName, typeName, ResourceKindModel.PushConstant, ResourceAccessModel.Read, IsPushConstantSupported: IsSupportedPushConstantType(type));
@@ -1914,6 +1920,11 @@ internal static class ShaderModelFactory
             return ShaderResourceViewKind.None;
         }
 
+        if (type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == "global::Feather.Resources.ReadOnlyAccel")
+        {
+            return ShaderResourceViewKind.Accel;
+        }
+
         var genericName = named.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         return genericName switch
         {
@@ -2315,7 +2326,8 @@ internal static class ShaderModelFactory
         None,
         Buffer,
         Texture2D,
-        Texture3D
+        Texture3D,
+        Accel
     }
 
     private sealed record CallableEdge(string TargetId, string TargetName, Location Location);

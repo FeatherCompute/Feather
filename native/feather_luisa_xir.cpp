@@ -25,6 +25,7 @@ using namespace luisa::compute;
 using namespace luisa::compute::xir;
 
 constexpr uint8_t kResourceBuffer = 1;
+constexpr uint8_t kResourceAccel = 7;
 constexpr uint8_t kResourceTexture2D = 2;
 constexpr uint8_t kResourceSampler = 3;
 constexpr uint8_t kResourcePushConstant = 5;
@@ -40,6 +41,7 @@ constexpr uint8_t kTypeArray = 5;
 constexpr uint8_t kTypeResourceWrapper = 6;
 constexpr uint8_t kTypeVoid = 7;
 constexpr uint32_t kTypeResourceBuffer = 0;
+constexpr uint32_t kTypeResourceAccel = 3;
 constexpr uint32_t kTypeResourceTexture2D = 1;
 constexpr uint32_t kTypeResourceTexture3D = 2;
 constexpr uint32_t kTypeResourceSampler = 3;
@@ -444,12 +446,14 @@ class Lowerer {
             }
             const auto texture = source.kind == kResourceTexture2D || source.kind == kResourceTexture3D;
             const auto push_constant = source.kind == kResourcePushConstant;
-            if (source.kind != kResourceBuffer && !texture && !push_constant)
+            const auto accel = source.kind == kResourceAccel;
+            if (source.kind != kResourceBuffer && !texture && !push_constant && !accel)
                 return fail("Luisa XIR received an unsupported forward resource");
             auto* element = texture ? Type::vector(Type::of<float>(), 4u) : type_from_name(source.element_type);
-            if (element == nullptr) return fail("Luisa cannot resolve FEIR resource element type '" + source.element_type + "'");
+            if (element == nullptr && !accel) return fail("Luisa cannot resolve FEIR resource element type '" + source.element_type + "'");
             auto* resource_type = texture ? Type::texture(Type::of<float>(), source.kind == kResourceTexture2D ? 2u : 3u)
-                                          : Type::buffer(element);
+                                          : accel ? Type::from("accel")
+                                                  : Type::buffer(element);
             auto* argument = function_->create_resource_argument(resource_type);
             resources_.emplace(source.name, Resource{argument, element, source.binding,
                                                      source.element_count, source.kind, source.access,
@@ -963,13 +967,15 @@ class Lowerer {
                         samplers_.emplace(parameter_name, Sampler{lowered.argument, lowered.sampler_address});
                     } else {
                         const uint8_t kind = parameter_type.a == kTypeResourceBuffer ? kResourceBuffer
+                                             : parameter_type.a == kTypeResourceAccel ? kResourceAccel
                                              : parameter_type.a == kTypeResourceTexture2D ? kResourceTexture2D
                                                                                          : kResourceTexture3D;
                         const uint8_t access = parameter_type.c == 0u ? 1u : parameter_type.c == 1u ? 2u
                                                : parameter_type.c == 2u ? 3u : 4u;
                         auto* element = kind == kResourceTexture2D || kind == kResourceTexture3D
                                             ? texture_element_type(parameter_type.b)
-                                            : type(parameter_type.b);
+                                            : kind == kResourceAccel ? nullptr
+                                                                     : type(parameter_type.b);
                         resources_.emplace(parameter_name,
                             Resource{static_cast<ResourceArgument*>(lowered.argument), element, 0u, 0u, kind, access});
                     }

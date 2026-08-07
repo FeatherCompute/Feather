@@ -105,6 +105,7 @@ constexpr uint8_t kIrResourceKindTexture2D = 2;
 constexpr uint8_t kIrResourceKindSampler = 3;
 constexpr uint8_t kIrResourceKindPushConstant = 5;
 constexpr uint8_t kIrResourceKindTexture3D = 6;
+constexpr uint8_t kIrResourceKindAccel = 7;
 constexpr uint8_t kIrBlockKindGeneric = 0;
 constexpr uint8_t kIrBlockKindIfTrue = 1;
 constexpr uint8_t kIrBlockKindIfElse = 2;
@@ -239,6 +240,7 @@ struct KernelState {
     std::unordered_map<uint32_t, FeBufferHandle> buffers;
     std::unordered_map<uint32_t, FeTextureHandle> textures;
     std::unordered_map<uint32_t, FeSamplerHandle> samplers;
+    std::unordered_map<uint32_t, FeAccelHandle> accels;
     std::string debug_name;
     bool auto_diff = false;
     bool bounds_check = false;
@@ -3360,11 +3362,24 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     bindings.reserve(lowering.resources.size());
     std::vector<Feather::Luisa::HostTextureBinding> texture_bindings;
     texture_bindings.reserve(lowering.resources.size());
+    std::vector<Feather::Luisa::HostAccelBinding> accel_bindings;
+    accel_bindings.reserve(lowering.resources.size());
     for (const auto& resource : lowering.resources) {
         if (resource.kind == kIrResourceKindPushConstant) {
             continue;
         }
         if (resource.kind == kIrResourceKindSampler) {
+            continue;
+        }
+        if (resource.kind == kIrResourceKindAccel) {
+            const auto bound = kernel.accels.find(resource.binding);
+            if (bound == kernel.accels.end())
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Luisa dispatch is missing a required accel binding.");
+            auto accel = g_accels.find(bound->second);
+            if (accel == g_accels.end())
+                return fail(FE_ERROR_INVALID_HANDLE, "Luisa dispatch references an invalid Feather accel.");
+            accel_bindings.push_back(Feather::Luisa::HostAccelBinding{.binding = resource.binding,
+                                                                      .accel_key = accel->second.accel_key});
             continue;
         }
         if (resource.kind == kIrResourceKindTexture2D || resource.kind == kIrResourceKindTexture3D) {
@@ -3507,7 +3522,8 @@ FeResult dispatch_luisa_kernel(FeKernelHandle kernel_handle, KernelState& kernel
     }
     std::string error;
     if (!Feather::Luisa::Dispatch(ir.typed_module, lowering, bindings, texture_bindings, dispatch,
-                                  ad_inputs ? &*ad_inputs : nullptr, gradient_bindings, &error)) {
+                                  ad_inputs ? &*ad_inputs : nullptr, gradient_bindings,
+                                  accel_bindings, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Luisa dispatch failed." : std::move(error));
     }
 
@@ -4029,7 +4045,7 @@ FeResult dispatch_graphics_vertex_stage(const GraphicsPipelineState& pipeline, u
                            std::strcmp(profile_stages, "0") != 0;
     if (!dispatch.synchronize) dispatch.fence_key = next_handle();
     std::string error;
-    if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, &error)) {
+    if (!Feather::Luisa::Dispatch(parsed.typed_module, lowering, buffers, textures, dispatch, nullptr, {}, {}, &error)) {
         return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "Compute raster vertex FEIR dispatch failed." : error);
     }
     for (const auto& binding : textures) {
@@ -4269,7 +4285,7 @@ FeResult dispatch_graphics_fragment_stage(const GraphicsPipelineState& pipeline,
                   dispatch, shader_cache_key, &error)
             : Feather::Luisa::Dispatch(
                   parsed.typed_module, lowering, buffers, textures,
-                  dispatch, nullptr, {}, &error);
+                  dispatch, nullptr, {}, {}, &error);
         if (!dispatched) {
             return fail(FE_ERROR_UNSUPPORTED,
                         error.empty()
@@ -6568,6 +6584,20 @@ FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, F
         return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind a buffer from a different GPU context.");
     }
     it->second.buffers[binding] = buffer;
+    return ok();
+}
+
+FE_API FeResult fe_kernel_bind_accel(FeKernelHandle kernel, uint32_t binding, FeAccelHandle accel) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_kernels.find(kernel);
+    const auto resource = g_accels.find(accel);
+    if (it == g_kernels.end() || resource == g_accels.end()) {
+        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or accel handle.");
+    }
+    if (it->second.context != resource->second.context) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Cannot bind an accel from a different GPU context.");
+    }
+    it->second.accels[binding] = accel;
     return ok();
 }
 

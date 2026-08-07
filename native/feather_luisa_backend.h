@@ -187,7 +187,8 @@ bool DestroyFence(uint64_t context_key, uint64_t fence_key, std::string* error =
 bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowering,
               std::span<HostBufferBinding> buffers, std::span<HostTextureBinding> textures,
               const DispatchInputs& dispatch, const AdInputs* ad_inputs = nullptr,
-              std::span<AdGradientBinding> gradients = {}, std::string* error = nullptr);
+              std::span<AdGradientBinding> gradients = {},
+              std::span<HostAccelBinding> accels = {}, std::string* error = nullptr);
 
 bool ReduceAdGradient(uint64_t context_key, std::string_view runtime_directory,
                       std::string_view backend_name, uint32_t device_index,

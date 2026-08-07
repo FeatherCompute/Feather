@@ -231,6 +231,14 @@ public sealed class GpuKernelCommand
         => NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_buffer(Handle, binding, buffer));
 
     /// <summary>
+    /// Binds a native acceleration structure to a generated kernel resource slot.
+    /// </summary>
+    /// <param name="binding">The shader binding index.</param>
+    /// <param name="accel">The native accel handle.</param>
+    public void BindAccel(uint binding, Native.FeAccelHandle accel)
+        => NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_accel(Handle, binding, accel));
+
+    /// <summary>
     /// Binds a native texture handle to a generated kernel resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
