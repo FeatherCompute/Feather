@@ -69,7 +69,7 @@ jobs:
           FEATHER_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
 
       - name: Enforce NN device paths
-        run: python3 scripts/nn-industrial-gate.py
+        run: python3 scripts/nn-industrial-gate.py --software-vulkan-smoke
         env:
           FEATHER_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
 

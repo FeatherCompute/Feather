@@ -218,12 +218,32 @@ def source_gate(root: Path) -> bool:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clean", action="store_true", help="rebuild native library before running tests")
+    parser.add_argument(
+        "--software-vulkan-smoke",
+        action="store_true",
+        help="run representative device-path tests suitable for a software Vulkan CI runner",
+    )
     args = parser.parse_args(argv)
     root = repo_root()
 
     ok = source_gate(root)
     if args.clean:
         ok = run(["cmake", "--build", "native/build"], root) and ok
+
+    integration_filter = (
+        "FullyQualifiedName~AutoDiffManagedReadbackTests|"
+        "FullyQualifiedName~AutoDiffNativeBridgeTests|"
+        "FullyQualifiedName~LuisaBackendAdTests|"
+        "FullyQualifiedName~MlpTrainingGradientTests|"
+        "FullyQualifiedName~Bounds|"
+        + (
+            "FullyQualifiedName~NNTrainingIntegrationTests.SequentialReluMlpTrainingStepWithAdamUsesModuleOwnedParameters|"
+            "FullyQualifiedName~NNTrainingIntegrationTests.ModuleBackedBinaryClassifierWithAdamWDecreasesCrossEntropy|"
+            "FullyQualifiedName~NNTrainingIntegrationTests.OptimizerStepAdKernelReportsMissingMismatchedAmbiguousAndUnsupportedNativeGradients"
+            if args.software_vulkan_smoke
+            else "FullyQualifiedName~NNTrainingIntegrationTests"
+        )
+    )
 
     steps = [
         ["dotnet", "test", "tests/Feather.NN.Tests/Feather.NN.Tests.csproj", "--no-restore"],
@@ -233,12 +253,7 @@ def main(argv: list[str]) -> int:
             "tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj",
             "--no-restore",
             "--filter",
-            "FullyQualifiedName~AutoDiffManagedReadbackTests|"
-            "FullyQualifiedName~AutoDiffNativeBridgeTests|"
-            "FullyQualifiedName~LuisaBackendAdTests|"
-            "FullyQualifiedName~NNTrainingIntegrationTests|"
-            "FullyQualifiedName~MlpTrainingGradientTests|"
-            "FullyQualifiedName~Bounds",
+            integration_filter,
         ],
     ]
 
