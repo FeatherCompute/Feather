@@ -2540,6 +2540,16 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             return false;
         }
         static_cast<void>(reg2mem_pass_run_on_module(xir_module.get()));
+        // The autodiff expansion is intentionally naive (every forward
+        // instruction gets its adjoint plus value caching), which can blow a
+        // small training kernel up by an order of magnitude. The generated
+        // adjoints are full of duplicated subexpressions and dead values, so
+        // clean them before AST translation: without this the Metal backend
+        // compiles tens of thousands of redundant instructions per shader.
+        static_cast<void>(gvn_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
+        static_cast<void>(simplify_cfg_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
     }
     std::unique_ptr<Shader3D<>> shader;
     if (!cache_hit) {
