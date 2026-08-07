@@ -98,6 +98,13 @@ jobs:
           dotnet-version: 10.0.301
           global-json-file: global.json
 
+      - name: Install macOS Vulkan SDK
+        if: runner.os == 'macOS'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.304.1
+          cache: true
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -157,6 +164,7 @@ jobs:
           test -e "$(brew --prefix vulkan-loader)/lib/libvulkan.dylib"
           test -e "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib"
           test -e "$(brew --prefix openssl@3)/lib/libcrypto.dylib"
+          test -e "$VULKAN_SDK/lib/libdxcompiler.dylib"
 
       - name: Check Windows Vulkan toolchain
         if: runner.os == 'Windows'
