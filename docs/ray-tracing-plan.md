@@ -1,0 +1,96 @@
+# Feather Ray Tracing Pipeline Plan
+
+## Status
+
+**Design stage.** The LuisaCompute ray-tracing foundation is verified working
+on this machine (MetalRT): mesh/accel creation, build, `AccelVar` kernel
+arguments, `intersect`/`traverse` execution, and correct hit results
+(instance/primitive/t) were validated with a standalone C++ smoke test. No
+LC-side bug blocks the pipeline; the earlier SIGSEGV was a test-program error
+(build commands were never queued on the stream).
+
+## Goal
+
+Expose LuisaCompute's hardware ray tracing through Feather's C# DSL so that
+generated kernels can trace rays against GPU-accelerated structures:
+
+```csharp
+using var mesh = GPU.CreateMesh(vertices, indices);          // vertices: GpuBuffer<float3>, indices: GpuBuffer<uint>
+using var accel = GPU.CreateAccel(mesh);                      // builds TLAS immediately
+GPU.Dispatch(new TraceKernel(accel.AsReadOnly(), image.AsReadWrite(), ...), size);
+
+[Kernel]
+public readonly partial struct TraceKernel(ReadOnlyAccel accel, ReadWriteBuffer<float4> image, ...) : IKernel2D
+{
+    public void Execute()
+    {
+        var ray = new Ray(origin, direction, 0.0f, 1e30f);
+        var hit = accel.TraceClosest(ray);                    // SurfaceHit { Inst, Prim, Bary, T }
+        ...
+    }
+}
+```
+
+## Design
+
+### 1. Managed API (`src/Feather/Resources/GpuAccel.cs`, `src/Feather/Core/GPU.cs`)
+
+- `GpuMesh` — owns the native mesh built from a vertex buffer
+  (`GpuBuffer<TVertex>` where `TVertex` is a `float3`-compatible struct) and an
+  index buffer (`GpuBuffer<uint>`); `GPU.CreateMesh<TVertex>(GpuBuffer<TVertex>, GpuBuffer<uint>)`.
+- `GpuAccel` — owns the native TLAS; `GPU.CreateAccel(params GpuMesh[])`;
+  immediately builds on the context stream; `Dispose` releases.
+- `ReadOnlyAccel` — kernel binding view (like `ReadOnlyBuffer<T>`).
+- Kernel DSL structs: `Ray` (`Float3 Origin`, `Float3 Direction`, `float TMin`, `float TMax`)
+  and `SurfaceHit` (`uint Inst`, `uint Prim`, `float2 Bary`, `float T`).
+
+### 2. FEIR protocol extension
+
+- **Type**: new resource type kind `accel` (mirror the buffer resource kind).
+- **Instruction**: `TraceClosest(accel, ray) -> SurfaceHit` emitted by the
+  generator when the kernel calls `ReadOnlyAccel.TraceClosest`.
+- The generator (`Feather.Generators`) resolves the `TraceClosest` call into
+  an FEIR expression node; the native parser (`feather_typed_ir.cpp`) accepts
+  the new kind/opcode.
+
+### 3. Native side
+
+- **C API**: `fe_accel_create(context, mesh_count, mesh_handles, out handle)`
+  creates a LuisaCompute `Accel` from meshes; accel handle registry mirrors the
+  buffer registry (`feather_c_api.cpp`).
+- **Lowering** (`feather_luisa_xir.cpp`): map the FEIR `accel` type to LC
+  `Type::accel()`; bind the accel as an `AccelVar` function argument;
+  translate `TraceClosest` to `accel.intersect(ray, {})`; lower `Ray`/`SurfaceHit`
+  structs like ordinary FEIR structs.
+- **Dispatch** (`feather_luisa_backend.cpp`): include accel bindings in the
+  `bound_arguments` span (mirroring buffer bindings).
+
+### 4. Ray tracing sample upgrade
+
+`samples/RayTracing` gains a hardware path: Cornell-box walls as triangle
+meshes, `TraceClosest` in the kernel, same image-writer proof. The software
+fallback kernel stays available behind an option.
+
+## Implementation phases
+
+1. Native accel handle + C API + dispatch binding (no DSL yet).
+2. FEIR type/opcode + parser + lowerer (`TraceClosest`).
+3. Generator: `Ray`/`SurfaceHit` structs + `TraceClosest` call lowering.
+4. Managed `GpuMesh`/`GpuAccel`/`ReadOnlyAccel` + `GPU.CreateMesh/CreateAccel`.
+5. Integration test (single triangle, like the verified LC smoke test) +
+   RayTracing sample hardware path.
+
+## Verification
+
+- New integration test: dispatch a `TraceClosest` kernel against a two-triangle
+  accel; assert `SurfaceHit` fields (instance/primitive/t) — the exact scenario
+  already proven on LC directly.
+- RayTracing sample renders the Cornell box through MetalRT and passes the
+  existing image-variation proof.
+- Full suite regression (AD 66, NN 78, Integration 301) stays green.
+
+## Open questions
+
+- `TVertex` layout rules: reuse `GpuValueLayout<T>`; require a 3-float vertex
+  (float3 or 12-byte struct) and `uint` indices initially.
+- Motion blur / curves: out of scope for the first milestone.
