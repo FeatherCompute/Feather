@@ -71,6 +71,31 @@ public readonly partial struct TraceKernel(ReadOnlyAccel accel, ReadWriteBuffer<
 meshes, `TraceClosest` in the kernel, same image-writer proof. The software
 fallback kernel stays available behind an option.
 
+## Stage 2 entry points (investigated, ready to implement)
+
+The FEIR protocol is shared between the generator and the native parser.
+Stage 2 needs these exact touch points:
+
+1. **Managed kernel type**: `ReadOnlyAccel` in `src/Feather/Resources/` (like
+   `ReadOnlyBuffer<T>`), holding the accel binding for kernel parameters.
+2. **Generator resource recognition** (`ShaderModelFactory.cs`):
+   - `ResourceKindModel.Accel` in `ShaderModels.cs`;
+   - map `"global::Feather.Resources.ReadOnlyAccel"` to it (near line 1477);
+   - `ToIrResourceKind` in `FeatherIrWriter.cs` writes the new kind.
+3. **Generator call lowering**: recognize `ReadOnlyAccel.TraceClosest(Ray)`
+   in `ValidateCall` and the elementwise expression lowerer (near the
+   ShaderMath builtins), emitting a new FEIR call opcode; `Ray` and
+   `SurfaceHit` are plain FEIR structs (float3/float/float and uint/uint/float2/float).
+4. **Native parser** (`feather_typed_ir.cpp`): accept the accel resource kind
+   and the TraceClosest opcode (validate operand/result types).
+5. **Lowerer** (`feather_luisa_xir.cpp`): accel resource -> LC `Type::accel()`
+   function argument (`AccelVar`); TraceClosest -> `accel.intersect(ray, {})`;
+   Ray/SurfaceHit struct lowering like existing FEIR structs.
+6. **Dispatch** (`feather_luisa_backend.cpp`): `HostAccelBinding` span added
+   to `Dispatch`; bind `Function::AccelBinding{accel->handle()}` in
+   `bound_arguments`; RuntimeState keeps accels alive (already added in
+   stage 1).
+
 ## Implementation phases
 
 1. Native accel handle + C API + dispatch binding (no DSL yet).
