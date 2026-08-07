@@ -23,6 +23,7 @@ extern "C" {
 
 typedef uint64_t FeContextHandle;
 typedef uint64_t FeBufferHandle;
+typedef uint64_t FeAccelHandle;
 typedef uint64_t FeTextureHandle;
 typedef uint64_t FeSamplerHandle;
 typedef uint64_t FeKernelHandle;
@@ -300,6 +301,20 @@ FE_API FeResult fe_texture_presenter_present_pixels(FeTexturePresenterHandle pre
 FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* desc, const void* initial_data,
                                  FeBufferHandle* out_buffer);
 FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer);
+
+// Acceleration structures ---------------------------------------------------
+// A mesh references existing vertex (float3, stride 12) and index (uint,
+// stride 4) buffers. The accel copies the mesh data into its own device
+// memory at creation time, so later buffer uploads do not change the accel.
+typedef struct FeAccelMeshDesc {
+    FeBufferHandle vertex_buffer;
+    FeBufferHandle index_buffer;
+} FeAccelMeshDesc;
+
+FE_API FeResult fe_accel_create(FeContextHandle context, uint32_t mesh_count,
+                                const FeAccelMeshDesc* meshes, FeAccelHandle* out_accel);
+FE_API FeResult fe_accel_destroy(FeContextHandle context, FeAccelHandle accel);
+FE_API FeResult fe_accel_destroy_raw(FeContextHandle context, uint64_t accel);
 FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_t size, const void* data);
 FE_API FeResult fe_buffer_download(FeBufferHandle buffer, uint64_t offset, uint64_t size, void* out_data);
 FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t mode, void** out_ptr);

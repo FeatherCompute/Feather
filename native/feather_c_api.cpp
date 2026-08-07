@@ -563,6 +563,11 @@ std::mutex g_mutex;
 std::atomic<uint64_t> g_next_handle{100};
 std::atomic<bool> g_runtime_shutting_down{false};
 std::unordered_map<FeBufferHandle, BufferState> g_buffers;
+struct AccelState {
+    FeContextHandle context = kDefaultContext;
+    uint64_t accel_key = 0u;
+};
+std::unordered_map<FeAccelHandle, AccelState> g_accels;
 std::unordered_map<FeTextureHandle, TextureState> g_textures;
 std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
 std::unordered_map<FeKernelHandle, KernelState> g_kernels;
@@ -601,6 +606,7 @@ void destroy_backend_resources_for_shutdown() {
 
     g_textures.clear();
     g_buffers.clear();
+    g_accels.clear();
     g_samplers.clear();
     g_fences.clear();
     g_streams.clear();
@@ -625,6 +631,7 @@ void abandon_native_resources_for_process_exit() {
     g_kernels.clear();
     g_textures.clear();
     g_buffers.clear();
+    g_accels.clear();
 
     g_samplers.clear();
     g_fences.clear();
@@ -5939,6 +5946,88 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
         *out_buffer = handle;
         return ok();
     });
+}
+
+FE_API FeResult fe_accel_create(FeContextHandle context, uint32_t mesh_count,
+                                 const FeAccelMeshDesc* meshes, FeAccelHandle* out_accel) {
+    return protect([&] {
+        if (meshes == nullptr || out_accel == nullptr || mesh_count == 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Accel meshes and output handle are required.");
+        }
+        std::vector<Feather::Luisa::AccelMeshDesc> descs;
+        descs.reserve(mesh_count);
+        for (uint32_t i = 0u; i < mesh_count; i++) {
+            const auto vertex = g_buffers.find(meshes[i].vertex_buffer);
+            const auto index = g_buffers.find(meshes[i].index_buffer);
+            if (vertex == g_buffers.end() || index == g_buffers.end()) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Accel mesh references an unknown buffer.");
+            }
+            if (vertex->second.stride != sizeof(float)) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Accel vertex buffer must be flat float data.");
+            }
+            if (vertex->second.bytes.size() % (sizeof(float) * 3u) != 0u) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Accel vertex buffer must hold float3 triplets.");
+            }
+            if (index->second.stride != sizeof(uint32_t)) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Accel index buffer must be uint (stride 4).");
+            }
+            const auto vertex_count = vertex->second.bytes.size() / vertex->second.stride;
+            const auto index_count = index->second.bytes.size() / index->second.stride;
+            if (vertex_count == 0u || index_count == 0u || index_count % 3u != 0u) {
+                return fail(FE_ERROR_INVALID_ARGUMENT, "Accel mesh buffers have invalid sizes.");
+            }
+            Feather::Luisa::AccelMeshDesc desc;
+            desc.vertex_count = static_cast<uint32_t>(vertex_count);
+            desc.vertices = reinterpret_cast<const float*>(vertex->second.bytes.data());
+            desc.index_count = static_cast<uint32_t>(index_count);
+            desc.indices = reinterpret_cast<const uint32_t*>(index->second.bytes.data());
+            descs.emplace_back(std::move(desc));
+        }
+        uint64_t accel_key = 0u;
+        std::string error;
+        const auto context_found = g_contexts.find(context);
+        if (context_found == g_contexts.end() && context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        const auto* device_info = context_found == g_contexts.end()
+                                      ? nullptr
+                                      : &context_found->second.device;
+        const auto backend_name = device_info != nullptr
+                                      ? device_info->backend_name
+                                      : std::string{Feather::Luisa::DefaultBackendName};
+        const auto device_index = device_info != nullptr ? device_info->device_index : 0u;
+        if (!Feather::Luisa::CreateAccel(context, configured_luisa_runtime_directory(),
+                                         backend_name, device_index, descs,
+                                         &accel_key, &error)) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, error.c_str());
+        }
+        AccelState state;
+        state.context = context;
+        state.accel_key = accel_key;
+        const auto handle = next_handle();
+        g_accels.emplace(handle, state);
+        *out_accel = handle;
+        return FE_OK;
+    });
+}
+
+FE_API FeResult fe_accel_destroy(FeContextHandle context, FeAccelHandle accel) {
+    return protect([&] {
+        const auto found = g_accels.find(accel);
+        if (found == g_accels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid accel handle.");
+        }
+        std::string error;
+        if (!Feather::Luisa::DestroyAccel(context, found->second.accel_key, &error)) {
+            return fail(FE_ERROR_INVALID_HANDLE, error.c_str());
+        }
+        g_accels.erase(found);
+        return FE_OK;
+    });
+}
+
+FE_API FeResult fe_accel_destroy_raw(FeContextHandle context, uint64_t accel) {
+    return fe_accel_destroy(context, static_cast<FeAccelHandle>(accel));
 }
 
 FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer) {

@@ -44,6 +44,8 @@
 #include <luisa/runtime/dispatch_buffer.h>
 #include <luisa/runtime/event.h>
 #include <luisa/runtime/image.h>
+#include <luisa/runtime/rtx/accel.h>
+#include <luisa/runtime/rtx/mesh.h>
 #include <luisa/runtime/shader.h>
 #include <luisa/runtime/stream.h>
 #include <luisa/runtime/swapchain.h>
@@ -633,6 +635,14 @@ private:
     std::unique_ptr<AdGradientReduceShader> ad_gradient_reduce_shader_;
 
 public:
+    struct AccelState {
+        std::vector<std::unique_ptr<Buffer<float3>>> vertex_buffers;
+        std::vector<std::unique_ptr<Buffer<Triangle>>> index_buffers;
+        std::vector<std::unique_ptr<Mesh>> meshes;
+        std::unique_ptr<Accel> accel;
+    };
+    std::unordered_map<uint64_t, std::unique_ptr<AccelState>> accels_;
+
     RuntimeState() = default;
     RuntimeState(const RuntimeState &) = delete;
     RuntimeState &operator=(const RuntimeState &) = delete;
@@ -1573,6 +1583,7 @@ public:
         shared_tile_raster_shaders_.clear();
         fused_tile_raster_shaders_.clear();
         present_targets_.clear();
+        accels_.clear();
         resident_buffers_.clear();
         resident_textures_.clear();
         mipmap_shader_.reset();
@@ -1702,6 +1713,11 @@ RuntimeRegistry &runtime_registry() {
     return *registry;
 }
 
+uint64_t next_runtime_key() noexcept {
+    static std::atomic<uint64_t> counter{1000u};
+    return counter.fetch_add(1u, std::memory_order_relaxed);
+}
+
 std::recursive_mutex& runtime_mutex() noexcept {
     // LC devices, streams, command lists, and Feather's resident caches are not
     // safe for concurrent host mutation. Keep submissions serialized while the
@@ -1742,6 +1758,85 @@ bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error
         return false;
     }
     return state->destroy_stream(stream_key, error);
+}
+
+bool CreateAccel(uint64_t context_key, std::string_view runtime_directory,
+                 std::string_view backend_name, uint32_t device_index,
+                 std::span<const AccelMeshDesc> meshes,
+                 uint64_t* accel_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
+    if (error != nullptr) { error->clear(); }
+    if (accel_key == nullptr) {
+        if (error != nullptr) { *error = "accel key output is null"; }
+        return false;
+    }
+    if (meshes.empty()) {
+        if (error != nullptr) { *error = "accel requires at least one mesh"; }
+        return false;
+    }
+    auto& state = runtime_registry().prepare(
+        context_key, runtime_directory, backend_name, device_index);
+    auto& device = state.device();
+    auto& stream = state.stream();
+    auto accel_state = std::make_unique<RuntimeState::AccelState>();
+    accel_state->vertex_buffers.reserve(meshes.size());
+    accel_state->index_buffers.reserve(meshes.size());
+    accel_state->meshes.reserve(meshes.size());
+    for (auto& mesh_desc : meshes) {
+        if (mesh_desc.vertex_count == 0u || mesh_desc.vertices == nullptr ||
+            mesh_desc.index_count == 0u || mesh_desc.indices == nullptr ||
+            mesh_desc.index_count % 3u != 0u) {
+            if (error != nullptr) {
+                *error = "accel mesh requires float3 vertices and uint3 index triplets";
+            }
+            return false;
+        }
+        auto vertex_buffer = device.create_buffer<float3>(mesh_desc.vertex_count);
+        stream << vertex_buffer.copy_from(
+                      luisa::span<const float3>{
+                          reinterpret_cast<const float3*>(mesh_desc.vertices),
+                          mesh_desc.vertex_count})
+               << synchronize();
+        auto index_buffer = device.create_buffer<Triangle>(mesh_desc.index_count / 3u);
+        stream << index_buffer.copy_from(
+                      luisa::span<const Triangle>{
+                          reinterpret_cast<const Triangle*>(mesh_desc.indices),
+                          mesh_desc.index_count / 3u})
+               << synchronize();
+        auto mesh = device.create_mesh(vertex_buffer, index_buffer);
+        stream << mesh.build() << synchronize();
+        accel_state->vertex_buffers.emplace_back(
+            std::make_unique<Buffer<float3>>(std::move(vertex_buffer)));
+        accel_state->index_buffers.emplace_back(
+            std::make_unique<Buffer<Triangle>>(std::move(index_buffer)));
+        accel_state->meshes.emplace_back(
+            std::make_unique<Mesh>(std::move(mesh)));
+    }
+    auto accel = device.create_accel();
+    for (auto& mesh : accel_state->meshes) {
+        accel.emplace_back(*mesh);
+    }
+    stream << accel.build() << synchronize();
+    accel_state->accel = std::make_unique<Accel>(std::move(accel));
+    auto key = next_runtime_key();
+    state.accels_.emplace(key, std::move(accel_state));
+    *accel_key = key;
+    return true;
+}
+
+bool DestroyAccel(uint64_t context_key, uint64_t accel_key, std::string* error) {
+    std::scoped_lock lock{runtime_mutex()};
+    if (error != nullptr) { error->clear(); }
+    auto* state = runtime_registry().find(context_key);
+    if (state == nullptr) {
+        if (error != nullptr) { *error = "Luisa context has no runtime state"; }
+        return false;
+    }
+    if (state->accels_.erase(accel_key) == 0u) {
+        if (error != nullptr) { *error = "accel key not found"; }
+        return false;
+    }
+    return true;
 }
 
 bool Synchronize(uint64_t context_key, std::string* error) {

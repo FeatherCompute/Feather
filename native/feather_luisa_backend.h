@@ -47,6 +47,21 @@ struct HostTextureBinding {
     bool generate_mipmaps = false;
 };
 
+// One triangle mesh inside an acceleration structure: interleaved float3
+// vertices and uint3 (or uint) index triplets, copied into device memory owned
+// by the accel at creation time.
+struct AccelMeshDesc {
+    uint32_t vertex_count = 0;
+    const float* vertices = nullptr;
+    uint32_t index_count = 0;
+    const uint32_t* indices = nullptr;
+};
+
+struct HostAccelBinding {
+    uint32_t binding = 0;
+    uint64_t accel_key = 0;
+};
+
 struct DispatchInputs {
     uint32_t group_x = 1;
     uint32_t group_y = 1;
@@ -152,6 +167,15 @@ void Abandon() noexcept;
 
 bool CreateStream(uint64_t context_key, std::string_view runtime_directory, std::string_view backend_name,
                   uint32_t device_index, uint64_t stream_key, std::string* error = nullptr);
+
+// Creates an acceleration structure from triangle meshes. The returned key
+// identifies the accel for later kernel dispatches; the accel and its device
+// meshes stay alive until DestroyAccel.
+bool CreateAccel(uint64_t context_key, std::string_view runtime_directory,
+                 std::string_view backend_name, uint32_t device_index,
+                 std::span<const AccelMeshDesc> meshes,
+                 uint64_t* accel_key, std::string* error = nullptr);
+bool DestroyAccel(uint64_t context_key, uint64_t accel_key, std::string* error = nullptr);
 bool DestroyStream(uint64_t context_key, uint64_t stream_key, std::string* error = nullptr);
 bool Synchronize(uint64_t context_key, std::string* error = nullptr);
 bool SynchronizeStream(uint64_t context_key, uint64_t stream_key, std::string* error = nullptr);

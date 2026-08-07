@@ -26,6 +26,14 @@ public static class GPU
         where T : unmanaged
         => GpuBuffer<T>.Create(Context, count, access);
 
+    /// <summary>
+    /// Creates a GPU acceleration structure from triangle meshes. Each mesh is
+    /// a float3 vertex buffer plus a uint index buffer (length a multiple of 3).
+    /// The accel owns a device-side copy of the mesh data.
+    /// </summary>
+    public static GpuAccel CreateAccel(params (GpuBuffer<float> vertices, GpuBuffer<uint> indices)[] meshes)
+        => GpuAccel.Create(Context, meshes);
+
     public static GpuBuffer<T> CreateBuffer<T>(ReadOnlySpan<T> data, BufferAccess access = BufferAccess.ReadWrite)
         where T : unmanaged
         => GpuBuffer<T>.Create(Context, data, access);

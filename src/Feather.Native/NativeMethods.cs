@@ -321,6 +321,22 @@ public static class NativeMethods
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_buffer_create(FeContextHandle context, in FeBufferDesc desc, IntPtr initial_data, out FeBufferHandle out_buffer);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FeAccelMeshDesc
+    {
+        public ulong VertexBuffer;
+        public ulong IndexBuffer;
+    }
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_accel_create(FeContextHandle context, uint meshCount, [In] FeAccelMeshDesc[] meshes, out FeAccelHandle outAccel);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_accel_destroy(FeContextHandle context, FeAccelHandle accel);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_accel_destroy_raw(ulong context, IntPtr accel);
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_buffer_destroy(IntPtr buffer);
 

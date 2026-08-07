@@ -33,6 +33,13 @@ public sealed class FeBufferHandle : FeSafeHandle
     protected override bool ReleaseHandle() => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_buffer_destroy(handle).Succeeded();
 }
 
+public sealed class FeAccelHandle : FeSafeHandle
+{
+    public static FeAccelHandle Null { get; } = new();
+
+    protected override bool ReleaseHandle() => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_accel_destroy_raw(0ul, handle).Succeeded();
+}
+
 public sealed class FeTextureHandle : FeSafeHandle
 {
     public static FeTextureHandle Null { get; } = new();
