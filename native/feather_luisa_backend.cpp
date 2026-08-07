@@ -2403,15 +2403,8 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
                 *error = "Luisa failed to translate generated XIR to its executable AST";
             return false;
         }
-        ShaderOption shader_option{};
-        if (ad_inputs != nullptr && dispatch.backend_name == "vk") {
-            // LC's native Vulkan XIR emitter currently assigns incompatible SPIR-V type IDs to
-            // otherwise identical AD aggregate stores after the executable AST is re-imported.
-            // A non-empty native include selects LC's existing HLSL compatibility route.
-            shader_option.native_include = "// Feather XIR autodiff compatibility route\n";
-        }
         shader = std::make_unique<Shader3D<>>(
-            device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, std::move(shader_option)));
+            device.create<Shader3D<>>(luisa::compute::Function{ast.get()}, ShaderOption{}));
         if (dispatch.shader_cache_key != 0u) {
             auto entry = std::make_unique<RuntimeState::CachedKernel>();
             entry->shader = std::move(shader);

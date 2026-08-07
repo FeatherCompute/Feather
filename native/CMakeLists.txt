@@ -133,9 +133,9 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
         endif()
     endif()
 
-    # LC's Vulkan HLSL compatibility route is used for XIR autodiff aggregates.
-    # Linux LC stages DXC itself; Apple LC does not, so copy the Vulkan SDK
-    # runtime beside the backend where DynamicModule resolves it.
+    # LC still uses HLSL for backend-owned Vulkan helpers and explicit fallback
+    # routes. Linux LC stages DXC itself; Apple LC does not, so copy the Vulkan
+    # SDK runtime beside the backend where DynamicModule resolves it.
     if(APPLE AND TARGET luisa-compute-backend-vk)
         find_library(_feather_dxcompiler_library NAMES dxcompiler
             HINTS
@@ -143,7 +143,7 @@ if(FEATHER_BUILD_LUISA_COMPUTE)
                 "$ENV{VULKAN_SDK}/macOS/lib")
         if(NOT _feather_dxcompiler_library)
             message(FATAL_ERROR
-                "Feather's Vulkan XIR autodiff path requires libdxcompiler.dylib from the Vulkan SDK.")
+                "Feather's Vulkan backend requires libdxcompiler.dylib from the Vulkan SDK.")
         endif()
         add_custom_command(TARGET feather POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
