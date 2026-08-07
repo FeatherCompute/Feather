@@ -1,6 +1,6 @@
 # FEIR Compiler Pipeline
 
-FEIR is Feather's serialized intermediate representation. It is the contract between generated C# shader code and the native EasyGPU bridge.
+FEIR is Feather's serialized intermediate representation. It is the contract between generated C# shader code and the native Luisa bridge.
 
 Most users do not need to read raw FEIR bytes. You should know FEIR exists because it explains:
 
@@ -8,7 +8,7 @@ Most users do not need to read raw FEIR bytes. You should know FEIR exists becau
 - How `ShaderInspection.GetIR<T>()` and `ShaderInspection.GetGLSL<T>()` relate.
 - Why resource names, bindings, access modes, and thread-group sizes are deterministic.
 - How AD markers and graphics shader stages travel from C# into native code.
-- Why a dispatch can report `TypedEasyGpu`, `CpuReferenceFallback`, or `Rejected`.
+- Why a dispatch can report `Luisa`, `CpuReferenceFallback`, or `Rejected`.
 
 ## Pipeline At A Glance
 
@@ -19,7 +19,7 @@ C# source
   -> Feather typed shader model
   -> FEIR binary payload
   -> native Feather ABI
-  -> EasyGPU IR ModuleBuilder
+  -> Luisa IR ModuleBuilder
   -> GLSL / SPIR-V / backend execution
 ```
 
@@ -38,7 +38,7 @@ For a generated compute kernel, Feather emits:
 
 For graphics, the generator emits combined graphics metadata plus separate vertex and fragment stage FEIR payloads.
 
-For AD, the generator emits parameter/loss annotations so the native bridge can register them with EasyGPU's gradient tape.
+For AD, the generator emits parameter/loss annotations so the native bridge can register them with Luisa's gradient tape.
 
 ## Why FEIR Uses Typed Sections
 
@@ -67,7 +67,7 @@ This is why generated kernels can use `ShaderMath.Sqrt`, `Hlsl.Dot`, a kernel-lo
 
 FEIR represents shader helpers as typed callable functions. A `[GpuStruct]` instance `[Callable]` is lowered as a free callable with an explicit `this` parameter. If the method only reads the receiver, the parameter direction is `in`. If the method writes `this` or a nested receiver field, the direction is `inout`.
 
-The native bridge preserves that direction when it builds the EasyGPU module, so the generated GLSL receives `inout` for mutable receivers. Calls are accepted only when the receiver is an addressable shader value, such as a local or a `ReadWriteBuffer<T>` element. A mutating call on a read-only resource or temporary value is rejected before dispatch.
+The native bridge preserves that direction when it builds the Luisa module, so the generated GLSL receives `inout` for mutable receivers. Calls are accepted only when the receiver is an addressable shader value, such as a local or a `ReadWriteBuffer<T>` element. A mutating call on a read-only resource or temporary value is rejected before dispatch.
 
 Generic interface calls use compile-time monomorphization. For a callable such as `Eval<TShape>(TShape shape) where TShape : IShape`, each concrete call site emits a constructed callable such as `Eval<Sphere>` or `Eval<GroundPlane>`. Interface calls inside that callable resolve to the concrete `[GpuStruct]` implementation. FEIR does not encode a runtime vtable, boxed interface value, or tagged-union dispatch for this pattern.
 
@@ -82,7 +82,7 @@ string optimized = ShaderInspection.GetOptimizedGLSL<MyKernel>();
 ResourceDescriptor[] resources = ShaderInspection.GetResources<MyKernel>();
 ```
 
-Use `GetIR` when you need to confirm that the generator produced metadata. Use `GetGLSL` when you need to inspect the native EasyGPU lowering. Use `GetOptimizedGLSL` when backend optimization is involved.
+Use `GetIR` when you need to confirm that the generator produced metadata. Use `GetGLSL` when you need to inspect the native Luisa lowering. Use `GetOptimizedGLSL` when backend optimization is involved.
 
 ## Dispatch Paths
 
@@ -90,22 +90,22 @@ Use `GetIR` when you need to confirm that the generator produced metadata. Use `
 
 | Path | Meaning |
 | --- | --- |
-| `TypedEasyGpu` | The FEIR typed path lowered into EasyGPU and executed. This is the expected path for supported features. |
+| `Luisa` | The FEIR typed path lowered into Luisa and executed. This is the expected path for supported features. |
 | `CpuReferenceFallback` | Compatibility/reference fallback for older or narrow payloads. New completed DSL features should not rely on this. |
 | `Rejected` | Native validation rejected the payload or backend route. Check the exception message and support matrix. |
 | `None` | No dispatch has been recorded. |
 
-Samples commonly assert `TypedEasyGpu` so a passing demo proves the real backend path.
+Samples commonly assert `Luisa` so a passing demo proves the real backend path.
 
-## Relationship To EasyGPU
+## Relationship To Luisa
 
-Feather does not generate final backend code directly. The native bridge translates FEIR typed records into EasyGPU's language-neutral IR builder. EasyGPU then lowers that module through the selected backend path.
+Feather does not generate final backend code directly. The native bridge translates FEIR typed records into Luisa's language-neutral IR builder. Luisa then lowers that module through the selected backend path.
 
 That separation matters:
 
 - Feather owns C# source analysis and public .NET API shape.
-- EasyGPU owns the backend runtime, shader generation, and AD machinery.
-- The native Feather ABI owns the stable interop layer between managed code and EasyGPU.
+- Luisa owns the backend runtime, shader generation, and AD machinery.
+- The native Feather ABI owns the stable interop layer between managed code and Luisa.
 
 ## Where To Go Deeper
 

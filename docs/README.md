@@ -1,6 +1,6 @@
 # Feather Documentation
 
-Feather lets .NET applications write GPU work in C# and execute it through the native EasyGPU runtime. These docs are written for users first: start with a working kernel, then move into images, windows, graphics, AD, NN, inspection, and internals only when you need them.
+Feather lets .NET applications write GPU work in C# and execute it through the native LuisaCompute runtime. These docs are written for users first: start with a working kernel, then move into images, windows, graphics, AD, NN, inspection, and internals only when you need them.
 
 ## Learning Path
 
@@ -59,11 +59,11 @@ The public API reference is split by subsystem:
 
 These pages are written for users who need to inspect generated output, debug a backend issue, contribute to Feather, or understand why a shader shape is accepted or rejected:
 
-- [FEIR Compiler Pipeline](feir.md): the readable overview of Feather IR and how it reaches EasyGPU.
+- [FEIR Compiler Pipeline](feir.md): the readable overview of Feather IR and how it reaches Luisa.
 - [FEIR Binary Format](ir-format.md): the versioned `FEIR` payload and section layout.
 - [Native ABI](native-abi.md): how managed Feather talks to the native bridge.
-- [Typed IR Compute Support Matrix](typed-ir-compute-support-matrix.md): what the typed EasyGPU route accepts today.
-- [AD Internals And Coverage](ad-implementation-note.md): how AD metadata becomes EasyGPU gradient tape work.
+- [Typed IR Compute Support Matrix](typed-ir-compute-support-matrix.md): what the typed Luisa route accepts today.
+- [AD Internals And Coverage](ad-implementation-note.md): how AD metadata becomes Luisa gradient tape work.
 - [Feather.NN Status](nn-status.md): which NN paths are GPU-native and which are intentionally explicit host boundaries.
 
 ## Recommended First Hour

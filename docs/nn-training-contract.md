@@ -8,7 +8,7 @@ table.
 ## Gradient validation (the gate)
 
 Everything here rests on one thing: the packed-weight MLP training kernel's analytic gradients have to be
-correct. EasyGPU documents variable buffer indexing of an AD parameter as non-differentiable, and the
+correct. Luisa documents variable buffer indexing of an AD parameter as non-differentiable, and the
 boundary between "index built from loop counters and uniforms" and "index loaded from data" was not
 documented precisely.
 
@@ -24,7 +24,7 @@ differences:
 | 4 | 1.9323614 | 1.9323587 |
 | 5 | -2.3258104 | -2.325797 |
 
-Worst relative error 0.51% across every weight, on `DispatchPath.TypedEasyGpu`.
+Worst relative error 0.51% across every weight, on `DispatchPath.Luisa`.
 
 **Where the boundary actually falls**: an AD parameter read at an index computed from loop counters and
 `Uniform<T>` values is differentiated correctly — `weights[layer2Weight + (j * hiddenSize.Value) + k]`

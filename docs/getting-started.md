@@ -7,9 +7,9 @@ This guide takes you from a fresh checkout to a working generated GPU kernel.
 - .NET SDK `10.0.301` or a compatible SDK feature band.
 - CMake 3.26+.
 - A C++20 compiler.
-- A GPU and driver supported by the selected EasyGPU backend.
+- A GPU and driver supported by the selected Luisa backend.
 - Vulkan SDK (including headers and loader), glslang, and SPIRV-Tools when
-  building the EasyGPU and embedded LuisaCompute Vulkan backends. macOS uses
+  building the LuisaCompute Vulkan backends. macOS uses
   MoltenVK.
 - Linux window samples need X11 development libraries.
 
@@ -77,11 +77,11 @@ dotnet run --project samples/HelloBuffer/HelloBuffer.csproj
 Expected output includes:
 
 - The active backend and max workgroup size.
-- `EasyGPU GLSL bridge: OK`.
-- `Dispatch path: TypedEasyGpu`.
+- `Luisa backend: OK`.
+- `Dispatch path: Luisa`.
 - `PASS`.
 
-`TypedEasyGpu` matters because it proves the kernel went through the typed FEIR -> EasyGPU module route rather than an old compatibility fallback.
+`Luisa` matters because it proves the kernel went through the typed FEIR -> LuisaCompute route rather than an old compatibility fallback.
 
 ## Write A Kernel
 

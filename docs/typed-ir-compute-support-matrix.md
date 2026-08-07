@@ -1,6 +1,6 @@
 # Typed IR Compute Support Matrix
 
-This page describes what the typed FEIR -> EasyGPU compute path supports today. Use it when a kernel generates successfully but native lowering returns `Rejected` or `FE_ERROR_UNSUPPORTED`.
+This page describes what the typed FEIR -> Luisa compute path supports today. Use it when a kernel generates successfully but native lowering returns `Rejected` or `FE_ERROR_UNSUPPORTED`.
 
 For the conceptual overview, read [FEIR Compiler Pipeline](feir.md). For byte-level records, read [FEIR Binary Format](ir-format.md).
 
@@ -9,14 +9,14 @@ For the conceptual overview, read [FEIR Compiler Pipeline](feir.md). For byte-le
 Supported generated compute kernels should execute through:
 
 ```text
-DispatchPath.TypedEasyGpu
+DispatchPath.Luisa
 ```
 
-New completed DSL features should not prove behavior through `CpuReferenceFallback`. Samples and tests commonly assert `TypedEasyGpu` for this reason.
+New completed DSL features should not prove behavior through `CpuReferenceFallback`. Samples and tests commonly assert `Luisa` for this reason.
 
 ## Feature Matrix
 
-| Feature | Typed EasyGPU status | Notes |
+| Feature | Typed Luisa status | Notes |
 | --- | --- | --- |
 | 1D/2D/3D compute dispatch | Supported | Logical dispatch size is passed separately from backend group count. |
 | Bounds checks | Supported | Hidden guard emitted unless `[Kernel(BoundsCheck = false)]`. |
@@ -45,7 +45,7 @@ New completed DSL features should not prove behavior through `CpuReferenceFallba
 
 ## Texture And Format Notes
 
-The typed texture bridge maps Feather 2D texture formats to EasyGPU runtime formats. Proven baseline formats include:
+The typed texture bridge maps Feather 2D texture formats to Luisa runtime formats. Proven baseline formats include:
 
 - `R8`
 - `Rg8`
@@ -53,7 +53,7 @@ The typed texture bridge maps Feather 2D texture formats to EasyGPU runtime form
 - `R32Float`
 - `Rgba32Float`
 
-Additional formats may have host-side storage and descriptor support but still be rejected by a backend route. For example, `Bgra8` has host byte storage but no completed EasyGPU runtime/backend format in the current bridge.
+Additional formats may have host-side storage and descriptor support but still be rejected by a backend route. For example, `Bgra8` has host byte storage but no completed LuisaCompute runtime/backend format in the current bridge.
 
 Mip generation is supported for 2D color textures. Depth and 3D mipmap generation are rejected.
 
@@ -101,7 +101,7 @@ python3 scripts/ad-industrial-gate.py
 | Generic callable rejected | Can every type parameter be resolved to a concrete supported GPU value type at the call site? |
 | Unsupported format | Is the texture format in the supported backend set? |
 | AD rejected control flow | Did the AD kernel use `while`, `do`, `break`, or `continue`? |
-| Fallback instead of `TypedEasyGpu` | Does the generated payload include section 7 typed IR? |
+| Fallback instead of `Luisa` | Does the generated payload include section 7 typed IR? |
 
 ## Related Docs
 

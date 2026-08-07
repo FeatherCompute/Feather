@@ -90,9 +90,9 @@ against the native bridge:
 - Structured `if`/`else` and canonical counted `for`. `while`, `do-while`,
   `break`, `continue` rejected.
 - `float`, `float2/3/4` parameters, buffer-element sourced.
-- EasyGPU adds a constraint the Feather docs do not state:
+- Luisa adds a constraint the Feather docs do not state:
   **variable buffer indexing of a parameter is not differentiated** —
-  `EasyGPU/docs/autodiff.md:786` says `buf[varIndex]` with a non-constant index
+  `Luisa/docs/autodiff.md:786` says `buf[varIndex]` with a non-constant index
   "prevents the system from tracking which parameter is being updated". The
   existing GPT kernel works because parameter reads are inside counted `for`
   loops the adjoint generator can reverse. Any new AD kernel must be validated
@@ -508,8 +508,8 @@ Two design decisions worth defending:
   weights (`SequenceModels.cs:85`). `PackedElementCount3To1` makes the layout
   computable from both host and shader side.
 - **Fixed arity (`3To1`) rather than a fully generic loop.** The AD subset rejects
-  `while`, and EasyGPU will not differentiate a parameter read at a
-  variable-computed index (`EasyGPU/docs/autodiff.md:786`). A fixed-arity callable
+  `while`, and Luisa will not differentiate a parameter read at a
+  variable-computed index (`Luisa/docs/autodiff.md:786`). A fixed-arity callable
   with counted `for` loops over `Uniform<int>` bounds is the shape known to
   lower — it is what the GPT kernel already does (`SequenceModels.cs:1276–1289`).
   Generic arity is P1 and must be proven against the adjoint generator, not
@@ -712,9 +712,9 @@ Ranked by value to this platform:
 2. **Chained AD across dispatches.** The real fix for deep models. Requires the
    adjoint generator to treat an intermediate buffer as both an output with an
    incoming adjoint and an input producing an outgoing one. Large native change in
-   `EasyGPU/source/AD/`; scope separately.
+   `Luisa/source/AD/`; scope separately.
 3. **`while`/`break`/`continue`.** Needed for a ray-marched SDF loss with early
-   exit. `EasyGPU/docs/autodiff.md:786` explains why `while` cannot be reversed
+   exit. `Luisa/docs/autodiff.md:786` explains why `while` cannot be reversed
    without a trip count; a bounded `for` with a `float` mask is the workaround and
    should be documented as such.
 4. **Texture gradients.** `nn.md:206` excludes them. Needed for learned textures
@@ -803,7 +803,7 @@ Contract points the add-on can rely on:
   step, so a graph always has endpoints.
 - `finished` is emitted exactly once and is always the last event before exit.
 - `dispatchPath` on a `loss` event lets the UI surface a fallback route the same
-  way the render panel does; anything other than `TypedEasyGpu` is a red flag.
+  way the render panel does; anything other than `Luisa` is a red flag.
 - A `checkpoint` event's `absolutePath` is safe to read immediately — the write
   was atomic.
 - Cancellation is `SIGINT` / `Console.CancelKeyPress`, matching the render host.
@@ -863,11 +863,11 @@ Constraints this respects, by construction:
 - 1D kernel, one scalar loss.
 - No `while`, no `break`.
 - Parameter reads are at counted-loop indices, not host-variable indices — the
-  case `EasyGPU/docs/autodiff.md:786` warns about.
+  case `Luisa/docs/autodiff.md:786` warns about.
 - One marker for the whole packed buffer (`native/feather_c_api.cpp:5516`).
 
 Verification gate before anything else is built on it: `GetBackwardGLSL()` returns
-non-empty, `LastDispatchPath == TypedEasyGpu`, and gradients match central finite
+non-empty, `LastDispatchPath == Luisa`, and gradients match central finite
 differences — the discipline
 `tests/Feather.AD.Tests/ADNumericalCorrectnessTests.cs` already applies.
 
@@ -989,8 +989,8 @@ but do measure it, because it may dominate the pass's cost.
 **R1 — The MLP AD kernel may not lower.** The whole P0 story rests on
 `MlpRegression3To1LossKernel` generating a valid adjoint. The GPT kernel proves
 that nested counted loops over weight buffers *can* work
-(`SequenceModels.cs:1276–1289`), but EasyGPU's own limits list variable buffer
-indexing as non-differentiable (`EasyGPU/docs/autodiff.md:786`), and the boundary
+(`SequenceModels.cs:1276–1289`), but Luisa's own limits list variable buffer
+indexing as non-differentiable (`Luisa/docs/autodiff.md:786`), and the boundary
 between "counted-loop index" and "variable index" is not documented precisely.
 *Mitigation:* build this kernel and validate it against finite differences
 **first**, before any host or add-on work. If it fails, everything downstream

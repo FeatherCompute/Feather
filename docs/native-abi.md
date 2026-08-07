@@ -14,7 +14,7 @@ Feather's managed API talks to native code through a C ABI declared in `native/f
 Feather managed API
   -> Feather.Native P/Invoke layer
   -> native Feather C ABI
-  -> EasyGPU runtime and backends
+  -> LuisaCompute runtime and backends
 ```
 
 The ABI intentionally avoids C++ classes, templates, STL containers, exceptions, and ownership transfer across the boundary. Managed code owns `SafeHandle` wrappers; native code returns `FeResult` values and records a per-thread last-error string.
@@ -55,7 +55,7 @@ See [Packaging](packaging.md) for project and asset guidance.
 
 ## Backend Initialization
 
-`fe_context_initialize`, `fe_context_get_backend_type`, and `fe_context_get_caps` initialize/query the EasyGPU runtime. If the backend cannot initialize, Feather returns `FE_ERROR_BACKEND_UNAVAILABLE` instead of reporting placeholder capabilities.
+`fe_context_initialize`, `fe_context_get_backend_type`, and `fe_context_get_caps` initialize/query the LuisaCompute runtime. If the backend cannot initialize, Feather returns `FE_ERROR_BACKEND_UNAVAILABLE` instead of reporting placeholder capabilities.
 
 `BackendCaps` exposes:
 
@@ -67,14 +67,14 @@ See [Packaging](packaging.md) for project and asset guidance.
 
 ## Compute Dispatch
 
-The core path is typed FEIR -> EasyGPU module lowering:
+The core path is typed FEIR -> Luisa XIR lowering:
 
 1. Managed generated kernel provides serialized FEIR and resource descriptors.
 2. Native `fe_kernel_create_from_ir` validates and stores the payload.
 3. Managed binding code binds buffers, textures, samplers, and push constants.
 4. `fe_kernel_dispatch` receives logical dispatch size and backend workgroup counts.
-5. Native lowering registers resources with EasyGPU `ModuleBuilder`.
-6. EasyGPU lowers and dispatches the kernel.
+5. Native lowering registers resources with Luisa `ModuleBuilder`.
+6. Luisa lowers and dispatches the kernel.
 
 `[Kernel(BoundsCheck = true)]` adds hidden logical-dispatch-size push constants and a synthetic early-return guard. `[Kernel(BoundsCheck = false)]` omits that guard.
 
@@ -82,7 +82,7 @@ Dispatch records one of:
 
 | Path | Meaning |
 | --- | --- |
-| `FE_DISPATCH_PATH_TYPED_EASYGPU` | Supported typed EasyGPU route succeeded. |
+| `FE_DISPATCH_PATH_TYPED_EASYGPU` | Supported typed Luisa route succeeded. |
 | `FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK` | Narrow compatibility/reference fallback. |
 | `FE_DISPATCH_PATH_REJECTED` | Validation or backend lowering rejected the payload. |
 
@@ -105,11 +105,11 @@ Texture descriptors carry:
 
 Sampler descriptors carry filter, address, mip, comparison, anisotropy, and border-color settings.
 
-The typed EasyGPU texture bridge supports the runtime formats documented in [Support Status](support-status.md). Unsupported formats return explicit unsupported-format errors instead of falling back silently.
+The typed Luisa texture bridge supports the runtime formats documented in [Support Status](support-status.md). Unsupported formats return explicit unsupported-format errors instead of falling back silently.
 
 ## Layout Bridge
 
-Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring EasyGPU std430 layout rules:
+Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring Luisa std430 layout rules:
 
 - `float`, `int`, `uint`: 4-byte stride.
 - `float2`, `int2`: 8-byte stride.
@@ -161,7 +161,7 @@ Use this for headless/core-only builds. On macOS, create and poll windows on the
 
 FEIR AD metadata is authoritative. Native AD handling:
 
-- Registers buffer parameters with EasyGPU `GradientTape`.
+- Registers buffer parameters with Luisa `GradientTape`.
 - Marks scalar losses by generator-emitted identity.
 - Generates merged forward/backward GLSL.
 - Dispatches with separate gradient SSBOs.
@@ -179,7 +179,7 @@ Gradient buffers never alias parameter value buffers.
 
 ## Profiler ABI
 
-Profiler functions mirror EasyGPU's global profiler shape:
+Profiler functions mirror Luisa's global profiler shape:
 
 - Enable/disable.
 - Clear.

@@ -4,7 +4,7 @@ Feather publishes NuGet packages under the `FeatherCompute*` IDs. The package
 name is intentionally different from the public C# namespace: application code
 still uses `using Feather;`.
 
-Feather separates managed packages from native runtime assets. EasyGPU is built
+Feather separates managed packages from native runtime assets. Luisa is built
 behind Feather's C ABI, then packaged as RID-specific `feather` native libraries
 inside `FeatherCompute.NativeAssets`.
 
@@ -184,7 +184,7 @@ with `publish=false`, download and inspect the package artifacts, then rerun the
 same version with `publish=true`.
 
 The preview's Luisa path is compute-only. Feather.Graphics raster pipelines stay
-on EasyGPU because LuisaCompute 0.9.0 has no XIR raster entry point.
+on Luisa because LuisaCompute 0.9.0 has no XIR raster entry point.
 
 ## Related Docs
 

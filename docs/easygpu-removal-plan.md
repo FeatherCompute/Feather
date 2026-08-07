@@ -1,5 +1,10 @@
 # M9 EasyGPU Removal Plan
 
+> **Status: COMPLETED** — EasyGPU has been removed as source, build, runtime,
+> public API, test-oracle, and packaging dependency (commits `95839c3` through
+> `618b45b`). LuisaCompute is Feather's only execution runtime. This document
+> is retained as the historical plan and recovery record.
+
 ## Scope, Decisions, And Recovery
 
 M9 removes EasyGPU as a source, build, runtime, public API, test-oracle, and

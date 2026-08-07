@@ -4,7 +4,7 @@ Feather's graphics pipeline API lets you write preview vertex and fragment shade
 
 ![Sponza renderer in Feather](img/sponza.png)
 
-Graphics is a preview surface. It is useful for samples and experiments, and it already supports real render targets, depth, MSAA, MRT, texture sampling, and indexed draws through the typed EasyGPU graphics path.
+Graphics is a preview surface. It is useful for samples and experiments, and it already supports real render targets, depth, MSAA, MRT, texture sampling, and indexed draws through the typed Luisa graphics path.
 
 ## Mental Model
 

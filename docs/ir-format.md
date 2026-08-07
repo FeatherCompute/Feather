@@ -183,7 +183,7 @@ Section 7 is the production model for modern generated shaders. It represents:
 - Table ranges.
 - AD parameter/loss annotations.
 
-Native compute inspection and dispatch feed section 7 into EasyGPU `GPU::IR::ModuleBuilder`. Older structured assignment sections remain compatibility/reference data for fallback-only payloads.
+Native compute inspection and dispatch feed section 7 into Luisa `GPU::IR::ModuleBuilder`. Older structured assignment sections remain compatibility/reference data for fallback-only payloads.
 
 Important section 7 conventions:
 
@@ -235,7 +235,7 @@ Resource accesses historically used:
 RESOURCE1|resourceName|indexSymbol
 ```
 
-These forms are retained for compatibility/reference validation. New completed compute features should use the section 7 typed EasyGPU path.
+These forms are retained for compatibility/reference validation. New completed compute features should use the section 7 typed Luisa path.
 
 ## Validation Entry Points
 

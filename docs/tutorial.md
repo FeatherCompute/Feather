@@ -243,7 +243,7 @@ DispatchPath path = GPU.DispatchAndGetPath(new MyKernel(...), count);
 
 Use these checks:
 
-- `DispatchPath.TypedEasyGpu`: the typed EasyGPU path succeeded.
+- `DispatchPath.Luisa`: the typed Luisa path succeeded.
 - `DispatchPath.Rejected`: the native bridge rejected the shape.
 - Generator diagnostics such as `FE0006`: the C# source shape cannot be lowered.
 

@@ -39,7 +39,7 @@ Shader views expose `Length` and indexers. `ReadWriteBuffer<T>` returns `ref T` 
 
 ## Buffer Layout
 
-Feather follows EasyGPU/std430-style buffer strides. Important examples:
+Feather follows Luisa/std430-style buffer strides. Important examples:
 
 | Type | Buffer stride |
 | --- | --- |

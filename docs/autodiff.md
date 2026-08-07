@@ -1,6 +1,6 @@
 # Automatic Differentiation
 
-Feather's automatic differentiation path lets a generated 1D kernel describe a forward computation, mark differentiable parameters, mark a scalar loss, and ask EasyGPU to generate the reverse-mode adjoint work.
+Feather's automatic differentiation path lets a generated 1D kernel describe a forward computation, mark differentiable parameters, mark a scalar loss, and ask Luisa to generate the reverse-mode adjoint work.
 
 This is a preview API, but it is a real GPU path: unsupported AD shapes fail explicitly rather than pretending a forward-only dispatch is a successful backward pass.
 
@@ -134,9 +134,9 @@ Use aliases when the kernel resource name and the NN parameter name differ. `Cop
 The AD path is:
 
 1. Roslyn generator emits typed FEIR and AD annotations.
-2. Native Feather registers parameter buffers and scalar loss markers with EasyGPU `GradientTape`.
-3. EasyGPU records differentiable operations while lowering the forward module.
-4. EasyGPU generates an adjoint body and merges forward/backward GLSL.
+2. Native Feather registers parameter buffers and scalar loss markers with Luisa `GradientTape`.
+3. Luisa records differentiable operations while lowering the forward module.
+4. Luisa generates an adjoint body and merges forward/backward GLSL.
 5. Native Feather dispatches the merged kernel and stores gradients in separate gradient buffers.
 6. Managed Feather reads or copies those gradient buffers by stable name.
 

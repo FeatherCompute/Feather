@@ -20,7 +20,7 @@ ResourceDescriptor[] resources = ShaderInspection.GetResources<MyKernel>();
 | API | Purpose |
 | --- | --- |
 | `GetIR<TKernel>()` | Returns serialized FEIR as uppercase hex. |
-| `GetGLSL<TKernel>()` | Builds through EasyGPU and returns unoptimized GLSL. |
+| `GetGLSL<TKernel>()` | Builds through Luisa and returns unoptimized GLSL. |
 | `GetOptimizedGLSL<TKernel>()` | Returns backend-optimized GLSL inspection text. |
 | `GetResources<TKernel>()` | Returns generated resource descriptors. |
 | `GetGraphicsSource<TVS,TFS,TVaryings>()` | Returns graphics FEIR source payloads. |
@@ -80,7 +80,7 @@ DispatchPath path = GPU.DispatchAndGetPath(kernel, count);
 Console.WriteLine(path);
 ```
 
-`TypedEasyGpu` is the expected route for supported modern kernels.
+`Luisa` is the expected route for supported modern kernels.
 
 ## Host Vs Shader
 

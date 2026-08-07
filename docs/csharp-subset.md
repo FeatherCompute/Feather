@@ -2,7 +2,7 @@
 
 Feather kernels and graphics shaders are written in C#, but their entry-point bodies are compiled as GPU shader code. Treat that code as a shader DSL with C# syntax, not as arbitrary .NET code.
 
-The generator analyzes Roslyn syntax and semantic `IOperation` trees, lowers supported constructs into typed FEIR, and the native bridge translates that FEIR into EasyGPU IR. Unsupported source shapes are rejected early with `FE0001`-style diagnostics.
+The generator analyzes Roslyn syntax and semantic `IOperation` trees, lowers supported constructs into typed FEIR, and the native bridge translates that FEIR into Luisa IR. Unsupported source shapes are rejected early with `FE0001`-style diagnostics.
 
 ## Shader Type Shape
 

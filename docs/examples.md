@@ -6,7 +6,7 @@ Feather ships samples that are meant to be read as a learning path. Each sample 
 
 Compute and AD samples that are supported by the LuisaCompute XIR/Vulkan path
 select `GpuExecutionBackend.Luisa` explicitly and print `DispatchPath.Luisa`.
-EasyGPU remains the library default and is still used by raster presentation.
+Luisa remains the library default and is still used by raster presentation.
 `WindowCompute` also demonstrates the explicit M8 runtime API and can use the
 native Luisa presentation route when `FEATHER_GRAPHICS_COMPUTE=1`.
 
@@ -22,10 +22,10 @@ native Luisa presentation route when `FEATHER_GRAPHICS_COMPUTE=1`.
 | `JuliaSet` | ✅ Luisa | 2D math/callable compute. |
 | `Mandelbrot` | ✅ Luisa | 2D math/callable compute. |
 | `ParallelReduction` | ✅ Luisa | Barrier and buffer compute. |
-| `ProfilerSuite` | ✅ partial | Compute and AD cases use Luisa; NN trainer and raster cases remain EasyGPU. |
+| `ProfilerSuite` | ✅ partial | Compute and AD cases use Luisa; NN trainer and raster cases remain Luisa. |
 | `RayTracing` | ✅ Luisa | The sample is a pure compute path tracer; it does not use hardware RT/acceleration structures. |
 | `SdfRenderer` | ✅ Luisa | 2D math/callable compute. |
-| `SpirvOptInspection` | ✅ Luisa | Dispatch uses Luisa; GLSL inspection intentionally remains an EasyGPU inspection tool. |
+| `SpirvOptInspection` | ✅ Luisa | Dispatch uses Luisa; GLSL inspection intentionally remains an Luisa inspection tool. |
 | `TextureCopy` | ✅ Luisa | 2D texture load/store compute. |
 | `VolumetricFog` | ✅ Luisa | 2D math/callable compute. |
 | `WindowCompute` | ✅ Luisa | Demonstrates `GpuRuntime`, explicit `GpuContext`/`GpuStream`, and Luisa texture dispatch. With `FEATHER_GRAPHICS_COMPUTE=1`, Metal/Vulkan presentation consumes the resident Luisa texture directly; otherwise the documented fallback remains active. |
@@ -41,7 +41,7 @@ native Luisa presentation route when `FEATHER_GRAPHICS_COMPUTE=1`.
 | `WindowPixels` | ❌排除 | CPU pixel generation and window presentation, no GPU kernel. |
 
 The Luisa-enabled samples are run with the same default arguments used by their
-EasyGPU versions when validating output; only long-running image samples may be
+Luisa versions when validating output; only long-running image samples may be
 invoked with reduced dimensions/samples for a bounded GPU smoke run.
 
 ## Recommended Order
@@ -121,7 +121,7 @@ The Cornell box image demonstrates path/ray-style rendering workloads. Use the r
 
 - Generated kernels are `readonly partial struct` types with `[Kernel]`.
 - Shader resource constructor parameters become FEIR resource bindings.
-- `SampleProof.AssertLuisa(path)` verifies that a Luisa-enabled sample did not silently fall back to EasyGPU.
+- `SampleProof.AssertLuisa(path)` verifies that a Luisa-enabled sample did not silently fall back to Luisa.
 - `GpuStructInterfaces` checks generated GLSL for concrete generic monomorphizations and `inout` receivers.
 - Window samples render into Feather textures and then present those textures; swapchain rendering is not exposed as the public graphics target.
 - AD samples use `AD.Parameter` and `AD.Loss` inside a generated kernel, then drive `GpuADKernel<T>` or `TrainingStep<TKernel>` from host code.

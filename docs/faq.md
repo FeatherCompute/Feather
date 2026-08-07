@@ -2,7 +2,7 @@
 
 ## What is Feather?
 
-Feather is a C# front end for EasyGPU. You write generated C# kernel structs, Feather lowers them into FEIR with a Roslyn source generator, and the native bridge sends the typed module to EasyGPU.
+Feather is a C# front end for Luisa. You write generated C# kernel structs, Feather lowers them into FEIR with a Roslyn source generator, and the native bridge sends the typed module to Luisa.
 
 ## Is Feather production-ready?
 
@@ -40,7 +40,7 @@ Use `feather_native.dll` on Windows and `libfeather.so` on Linux.
 
 ## Do I need to know GLSL, HLSL, Vulkan, or OpenGL?
 
-For basic Feather compute, no. You still need to understand GPU-style parallel execution, memory movement, and the supported C# shader subset. Backend setup depends on EasyGPU and your platform.
+For basic Feather compute, no. You still need to understand GPU-style parallel execution, memory movement, and the supported C# shader subset. Backend setup depends on Luisa and your platform.
 
 ## Why must kernels be `readonly partial struct`?
 
@@ -48,7 +48,7 @@ The source generator needs a stable value type shape and emits additional partia
 
 ## What is FEIR?
 
-FEIR is Feather's serialized intermediate representation. It carries resources, typed statements, thread-group sizes, AD metadata, and graphics stage information from generated C# to the native EasyGPU bridge. Start with [FEIR Compiler Pipeline](feir.md).
+FEIR is Feather's serialized intermediate representation. It carries resources, typed statements, thread-group sizes, AD metadata, and graphics stage information from generated C# to the native Luisa bridge. Start with [FEIR Compiler Pipeline](feir.md).
 
 ## Can I use normal C# collections inside a kernel?
 
@@ -62,9 +62,9 @@ No. Allocations, exceptions, async/await, reflection, and virtual/interface call
 
 By default `[Kernel]` enables logical bounds checking for lanes created by workgroup rounding. If you set `[Kernel(BoundsCheck = false)]`, your code must guard all resource accesses manually.
 
-## What does `TypedEasyGpu` mean?
+## What does `Luisa` mean?
 
-It means the generated typed FEIR was accepted by the native bridge and dispatched through EasyGPU. It is the expected path for supported compute kernels.
+It means the generated typed FEIR was accepted by the native bridge and dispatched through Luisa. It is the expected path for supported compute kernels.
 
 ## Can I use Feather.NN like PyTorch?
 

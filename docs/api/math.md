@@ -63,7 +63,7 @@ Use `f` suffixes for float literals in shader code.
 
 ## Host Vs Shader
 
-Most math helpers have CPU implementations so you can use them in host setup code. Inside generated shaders, only the supported subset lowers to FEIR/EasyGPU. Unsupported calls are generator diagnostics.
+Most math helpers have CPU implementations so you can use them in host setup code. Inside generated shaders, only the supported subset lowers to FEIR/Luisa. Unsupported calls are generator diagnostics.
 
 ## Lifetime And Errors
 
