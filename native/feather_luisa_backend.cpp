@@ -51,10 +51,13 @@
 #include <luisa/xir/instructions/arithmetic.h>
 #include <luisa/xir/module.h>
 #include <luisa/xir/passes/autodiff.h>
+#include <luisa/xir/passes/dce.h>
 #include <luisa/xir/passes/destructure_cfg.h>
+#include <luisa/xir/passes/gvn.h>
 #include <luisa/xir/passes/inline.h>
 #include <luisa/xir/passes/reg2mem.h>
 #include <luisa/xir/passes/restructure_cfg.h>
+#include <luisa/xir/passes/simplify_cfg.h>
 #include <luisa/xir/translators/xir2ast.h>
 #include <luisa/xir/verifier.h>
 
@@ -2328,6 +2331,16 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             if (error != nullptr) *error = "Luisa could not inline the generated FEIR callable graph";
             return false;
         }
+        // Inlined FEIR callable graphs carry the full weight of the generated
+        // C# kernel, including loop-unrolled bodies with duplicated
+        // expressions and dead stores. Simplify before structural
+        // normalization: GVN collapses duplicated computation, DCE removes
+        // dead instructions, and CFG simplification merges empty blocks, which
+        // keeps the restructure pass working on a much smaller module.
+        static_cast<void>(gvn_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
+        static_cast<void>(simplify_cfg_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
         xir_to_ast_normalize_module(xir_module.get());
         auto inlined_verification = xir_verify_module(xir_module.get());
         if (!inlined_verification.succeeded()) {
@@ -2354,6 +2367,14 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             if (error != nullptr) *error = "Luisa could not inline the complete FEIR callable graph before autodiff";
             return false;
         }
+        // Same simplification rationale as the non-AD path: the inlined
+        // callable graph is huge (loop-unrolled C# kernel bodies), and the
+        // restructure pass before autodiff stays far cheaper on the cleaned
+        // module.
+        static_cast<void>(gvn_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
+        static_cast<void>(simplify_cfg_pass_run_on_module(xir_module.get()));
+        static_cast<void>(dce_pass_run_on_module(xir_module.get()));
         auto destructured = destructure_cfg_pass_run_on_module(xir_module.get());
         if (destructured.error_count != 0u) {
             if (error != nullptr) *error = "Luisa failed to destructure XIR control flow before autodiff";
