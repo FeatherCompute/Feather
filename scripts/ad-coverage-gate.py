@@ -47,10 +47,34 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
         ((12, 34), (44, 132), (136, 152), (158, 189), (198, 347)),
         ("Feather/AD/AD.cs",),
     ),
-    ScopeEntry("src/Feather/Core/GPU.cs", "GPU.CreateADKernel facade", ((173, 178),), ("Feather/Core/GPU.cs",)),
+    ScopeEntry(
+        "src/Feather/Core/GPU.cs",
+        "GPU.CreateADKernel facade",
+        ((192, 201),),
+        ("Feather/Core/GPU.cs",),
+        ((
+            "public static GpuADKernel<TKernel> CreateADKernel<TKernel>(TKernel kernel)",
+            "=> new(kernel, backend);",
+        ),),
+    ),
     ScopeEntry("src/Feather/Kernels/GpuKernel.cs", "retained dispatch path that drives native AD", ((35, 92),), ("Feather/Kernels/GpuKernel.cs",)),
-    ScopeEntry("src/Feather.Native/NativeMethods.cs", "AD native P/Invoke declarations", ((230, 248),), ("Feather.Native/NativeMethods.cs",)),
-    ScopeEntry("src/Feather.Native/NativeStructs.cs", "AD kernel-create flag and gradient metadata ABI", ((112, 130), (176, 205)), ("Feather.Native/NativeStructs.cs",)),
+    ScopeEntry(
+        "src/Feather.Native/NativeMethods.cs",
+        "AD native P/Invoke declarations",
+        ((422, 432),),
+        ("Feather.Native/NativeMethods.cs",),
+        (("fe_kernel_get_ad_gradient_count(", "fe_kernel_reduce_ad_gradient_to_buffer("),),
+    ),
+    ScopeEntry(
+        "src/Feather.Native/NativeStructs.cs",
+        "AD kernel-create flag and gradient metadata ABI",
+        ((203, 225), (507, 521)),
+        ("Feather.Native/NativeStructs.cs",),
+        (
+            ("public struct FeKernelCreateDesc", "public bool AutoDiff;"),
+            ("public unsafe struct FeADGradientInfo", "public uint GradientBinding;"),
+        ),
+    ),
     ScopeEntry(
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
         "AD marker validation, AD callable policy, and traceable parameter analysis",
@@ -348,7 +372,7 @@ TEST_SLICES = (
             "tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj",
             "--no-restore",
             "--filter",
-            "(FullyQualifiedName~AutoDiff|FullyQualifiedName~AD)&FullyQualifiedName!~DispatchExecutesSharedMemoryAtomicAddWithDynamicIndexFromTypedIr",
+            "FullyQualifiedName~AutoDiffManagedReadbackTests|FullyQualifiedName~AutoDiffNativeBridgeTests|FullyQualifiedName~LuisaBackendAdTests",
         ],
     ),
     (
