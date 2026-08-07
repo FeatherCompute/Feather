@@ -5989,11 +5989,13 @@ FE_API FeResult fe_accel_create(FeContextHandle context, uint32_t mesh_count,
             }
             const auto vertex_count = vertex->second.bytes.size() / vertex->second.stride;
             const auto index_count = index->second.bytes.size() / index->second.stride;
-            if (vertex_count == 0u || index_count == 0u || index_count % 3u != 0u) {
+            if (vertex_count == 0u || vertex_count % 3u != 0u || index_count == 0u || index_count % 3u != 0u) {
                 return fail(FE_ERROR_INVALID_ARGUMENT, "Accel mesh buffers have invalid sizes.");
             }
+            // AccelMeshDesc.vertex_count counts float3 vertices, not floats.
+            const auto float3_count = vertex_count / 3u;
             Feather::Luisa::AccelMeshDesc desc;
-            desc.vertex_count = static_cast<uint32_t>(vertex_count);
+            desc.vertex_count = static_cast<uint32_t>(float3_count);
             desc.vertices = reinterpret_cast<const float*>(vertex->second.bytes.data());
             desc.index_count = static_cast<uint32_t>(index_count);
             desc.indices = reinterpret_cast<const uint32_t*>(index->second.bytes.data());
@@ -6011,7 +6013,9 @@ FE_API FeResult fe_accel_create(FeContextHandle context, uint32_t mesh_count,
         const auto backend_name = device_info != nullptr
                                       ? device_info->backend_name
                                       : std::string{Feather::Luisa::DefaultBackendName};
-        const auto device_index = device_info != nullptr ? device_info->device_index : 0u;
+        const auto device_index = device_info != nullptr
+                                       ? device_info->device_index
+                                       : std::numeric_limits<uint32_t>::max();
         if (!Feather::Luisa::CreateAccel(context, configured_luisa_runtime_directory(),
                                          backend_name, device_index, descs,
                                          &accel_key, &error)) {

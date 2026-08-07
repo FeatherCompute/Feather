@@ -53,6 +53,14 @@ internal static class ShaderTypeFactory
             };
         }
 
+        if (name == "global::Feather.Resources.ReadOnlyAccel")
+        {
+            return new ShaderResourceWrapperType(ShaderResourceKind.Accel, Void, ShaderResourceAccess.Read)
+            {
+                CSharpTypeName = name
+            };
+        }
+
         if (type is IArrayTypeSymbol array)
         {
             var elementType = FromTypeSymbol(array.ElementType);

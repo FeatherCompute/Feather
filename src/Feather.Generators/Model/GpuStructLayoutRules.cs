@@ -175,10 +175,20 @@ internal static class GpuStructLayoutRules
     }
 
     private static bool IsPartial(INamedTypeSymbol symbol)
-        => symbol.DeclaringSyntaxReferences
+    {
+        // Types from referenced assemblies have no syntax references in this
+        // compilation, so partialness cannot be verified; treat them as
+        // partial (the generator only emits IGpuStruct<T> for types declared
+        // in the current compilation, where the check is meaningful).
+        if (symbol.DeclaringSyntaxReferences.IsEmpty)
+        {
+            return true;
+        }
+        return symbol.DeclaringSyntaxReferences
             .Select(static reference => reference.GetSyntax())
             .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>()
             .Any(static syntax => syntax.Modifiers.Any(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PartialKeyword));
+    }
 
     private static IEnumerable<INamedTypeSymbol> GetNestedGpuStructs(ITypeSymbol type)
     {

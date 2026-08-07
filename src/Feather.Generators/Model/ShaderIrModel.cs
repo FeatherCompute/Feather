@@ -42,7 +42,7 @@ internal sealed record ShaderResourceWrapperType(
 internal sealed record ShaderVoidType : ShaderType;
 
 internal enum ShaderPrimitiveKind : byte { Bool, Int, UInt, Float }
-internal enum ShaderResourceKind : byte { Buffer, Texture2D, Texture3D, Sampler }
+internal enum ShaderResourceKind : byte { Buffer, Texture2D, Texture3D, Sampler, Accel }
 internal enum ShaderResourceAccess : byte { Read, Write, ReadWrite, Sample }
 
 // ── Expressions ──────────────────────────────────────────────────────────────

@@ -1792,11 +1792,19 @@ bool CreateAccel(uint64_t context_key, std::string_view runtime_directory,
             }
             return false;
         }
+        // FEIR carries tightly packed float3 vertices (12-byte stride), but
+        // luisa::compute::float3 is 16-byte aligned SIMD storage; casting the
+        // packed bytes as float3 would misalign every vertex, so pack them.
+        std::vector<float3> packed_vertices;
+        packed_vertices.reserve(mesh_desc.vertex_count);
+        {
+            const auto* src = reinterpret_cast<const float*>(mesh_desc.vertices);
+            for (uint32_t i = 0u; i < mesh_desc.vertex_count; ++i) {
+                packed_vertices.emplace_back(src[i * 3u], src[i * 3u + 1u], src[i * 3u + 2u]);
+            }
+        }
         auto vertex_buffer = device.create_buffer<float3>(mesh_desc.vertex_count);
-        stream << vertex_buffer.copy_from(
-                      luisa::span<const float3>{
-                          reinterpret_cast<const float3*>(mesh_desc.vertices),
-                          mesh_desc.vertex_count})
+        stream << vertex_buffer.copy_from(luisa::span<const float3>{packed_vertices})
                << synchronize();
         auto index_buffer = device.create_buffer<Triangle>(mesh_desc.index_count / 3u);
         stream << index_buffer.copy_from(
@@ -2274,7 +2282,11 @@ bool Dispatch(const TypedIR::Module& module, const TypedIR::LoweringInputs& lowe
             }
             auto accel_state = state.accels_.find(found->accel_key);
             if (accel_state == state.accels_.end() || accel_state->second->accel == nullptr) {
-                if (error != nullptr) *error = "Luisa accel binding references an unknown acceleration structure";
+                if (error != nullptr) {
+                    *error = "Luisa accel binding references an unknown acceleration structure (key " +
+                             std::to_string(found->accel_key) + ", " + std::to_string(state.accels_.size()) +
+                             " accels registered, context_key " + std::to_string(dispatch.context_key) + ")";
+                }
                 return false;
             }
             if (!cache_hit) {

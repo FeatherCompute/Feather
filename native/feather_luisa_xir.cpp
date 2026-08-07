@@ -15,7 +15,10 @@
 #include <utility>
 #include <vector>
 
+#include <luisa/core/logging.h>
 #include <luisa/ast/type.h>
+#include <luisa/runtime/rtx/hit.h>
+#include <luisa/runtime/rtx/ray.h>
 #include <luisa/xir/builder.h>
 
 namespace Feather::Luisa {
@@ -41,7 +44,7 @@ constexpr uint8_t kTypeArray = 5;
 constexpr uint8_t kTypeResourceWrapper = 6;
 constexpr uint8_t kTypeVoid = 7;
 constexpr uint32_t kTypeResourceBuffer = 0;
-constexpr uint32_t kTypeResourceAccel = 3;
+constexpr uint32_t kTypeResourceAccel = 4;
 constexpr uint32_t kTypeResourceTexture2D = 1;
 constexpr uint32_t kTypeResourceTexture3D = 2;
 constexpr uint32_t kTypeResourceSampler = 3;
@@ -325,7 +328,11 @@ class Lowerer {
             result = struct_type(source.a);
             break;
         case kTypeResourceWrapper:
-            result = type(source.b);
+            if (source.a == kTypeResourceAccel) {
+                result = Type::from("accel");
+            } else {
+                result = type(source.b);
+            }
             break;
         case kTypeVoid:
             result = nullptr;
@@ -1262,9 +1269,14 @@ class Lowerer {
                    is_texture_expression(expression.a)) {
             result_type = Type::of<float>();
         }
-        if (result_type == nullptr && !(expression.kind == kExpressionCallableCall && is_void_type(expression.type_id)))
+        if (result_type == nullptr && !(expression.kind == kExpressionCallableCall && is_void_type(expression.type_id))) {
+            const auto type_kind = expression.type_id < module_.types.size()
+                                       ? static_cast<int>(module_.types[expression.type_id].kind)
+                                       : -1;
             return fail("FEIR expression kind " + std::to_string(expression.kind) + " has unsupported type " +
-                        std::to_string(expression.type_id)), nullptr;
+                        std::to_string(expression.type_id) + " (type kind " + std::to_string(type_kind) + ")"),
+                   nullptr;
+        }
         switch (expression.kind) {
         case kExpressionLiteral:
             return literal(expression, result_type);
@@ -1282,9 +1294,16 @@ class Lowerer {
                     return xir_module_.create_constant(result_type, &value);
                 }
             }
-            const auto found = locals_.find(name);
-            return found == locals_.end() ? (fail("FEIR references an unknown local"), nullptr)
-                                          : builder_.load(result_type, found->second);
+            if (const auto found = locals_.find(name); found != locals_.end()) {
+                return builder_.load(result_type, found->second);
+            }
+            if (const auto resource = resources_.find(name); resource != resources_.end()) {
+                // Resource parameters (buffers, textures, accels) are function
+                // arguments, not memory slots: a bare parameter reference
+                // yields the resource value itself.
+                return resource->second.argument;
+            }
+            return fail("FEIR references an unknown local"), nullptr;
         }
         case kExpressionResourceElement: {
             const auto found = resources_.find(std::string{string(expression.name_id)});
@@ -1402,6 +1421,10 @@ class Lowerer {
                         flattened.push_back(extract(value, value->type()->element(), {index_constant(i)}));
                 }
                 values = std::move(flattened);
+            }
+            if (std::getenv("FEATHER_DEBUG_AGG") != nullptr) {
+                LUISA_INFO_WITH_LOCATION("[feather-debug] ctor agg result: {} args={}",
+                                         result_type->description(), values.size());
             }
             return builder_.call(result_type, ArithmeticOp::AGGREGATE, values);
         }
@@ -1781,6 +1804,49 @@ class Lowerer {
 
     Value* lower_intrinsic(const TypedIR::Expression& expression, const Type* result_type) {
         const auto name = string(expression.name_id);
+        if (name.ends_with(".TraceClosest")) {
+            if (!argument_range(expression) || expression.argument_count != 2u) {
+                return fail("TraceClosest requires an accel and a ray"), nullptr;
+            }
+            auto* accel = lower_expression(module_.arguments[expression.first_argument]);
+            auto* ray = lower_expression(module_.arguments[expression.first_argument + 1u]);
+            if (accel == nullptr || ray == nullptr) return nullptr;
+            auto* ray_type = Type::of<luisa::compute::Ray>();
+            auto* hit_type = Type::of<luisa::compute::SurfaceHit>();
+            if (ray_type == nullptr || hit_type == nullptr) {
+                return fail("Luisa XIR Ray/SurfaceHit types are unavailable"), nullptr;
+            }
+            // Extract the FEIR Ray fields (Origin float3, Direction float3,
+            // TMin float, TMax float) and rebuild the LC Ray layout
+            // (compressed_origin, t_min, compressed_direction, t_max).
+            auto* f3 = Type::vector(Type::of<float>(), 3u);
+            auto* f1 = Type::of<float>();
+            auto extract_field = [&](Value* aggregate, uint32_t index, const Type* field_type) {
+                auto* index_value = index_constant(index);
+                return builder_.call(field_type, ArithmeticOp::EXTRACT, {aggregate, index_value});
+            };
+            auto* origin = extract_field(ray, 0u, f3);
+            auto* t_min = extract_field(ray, 2u, f1);
+            auto* direction = extract_field(ray, 1u, f3);
+            auto* t_max = extract_field(ray, 3u, f1);
+            // LC Ray stores origin/direction as array<float,3> members
+            // (compressed_origin, compressed_t_min, compressed_direction,
+            // compressed_t_max), so repack the float3 fields into arrays.
+            auto* array3 = Type::array(Type::of<float>(), 3u);
+            auto repack_array = [&](Value* vec) {
+                auto* e0 = builder_.call(Type::of<float>(), ArithmeticOp::EXTRACT, {vec, index_constant(0u)});
+                auto* e1 = builder_.call(Type::of<float>(), ArithmeticOp::EXTRACT, {vec, index_constant(1u)});
+                auto* e2 = builder_.call(Type::of<float>(), ArithmeticOp::EXTRACT, {vec, index_constant(2u)});
+                return builder_.call(array3, ArithmeticOp::AGGREGATE, {e0, e1, e2});
+            };
+            auto* xir_ray = builder_.call(ray_type, ArithmeticOp::AGGREGATE,
+                                          {repack_array(origin), t_min,
+                                           repack_array(direction), t_max});
+            auto mask = ~0u;
+            auto* mask_value = xir_module_.create_constant(Type::of<uint32_t>(), &mask);
+            return builder_.call(hit_type, ResourceQueryOp::RAY_TRACING_TRACE_CLOSEST,
+                                 {accel, xir_ray, mask_value});
+        }
         auto op = intrinsic_op(name);
         if (name.ends_with(".Ddx") || name.ends_with(".Ddy")) {
             if (!argument_range(expression) || expression.argument_count != 1u) {
