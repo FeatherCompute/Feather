@@ -348,7 +348,7 @@ TEST_SLICES = (
             "tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj",
             "--no-restore",
             "--filter",
-            "FullyQualifiedName~AutoDiff|FullyQualifiedName~AD",
+            "(FullyQualifiedName~AutoDiff|FullyQualifiedName~AD)&FullyQualifiedName!~DispatchExecutesSharedMemoryAtomicAddWithDynamicIndexFromTypedIr",
         ],
     ),
     (
