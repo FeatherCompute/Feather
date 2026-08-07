@@ -25,7 +25,6 @@ jobs:
     name: Native assets (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
     env:
-      FEATHER_NATIVE_CMAKE_ARGS: -DEASYGPU_ENABLE_SPIRV_OPT=ON -DEASYGPU_ENABLE_SPIRV_CROSS_GLSL=OFF
       FEATHER_NATIVE_CONFIGURATION: Release
       FEATHER_RUNTIME_IDENTIFIER: ${{ matrix.rid }}
     strategy:
@@ -223,6 +222,7 @@ jobs:
           grep -F "runtimes/osx-arm64/native/libluisa-ast.dylib" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libluisa-runtime.dylib" artifacts/native-assets-package.txt
           grep -F "runtimes/osx-arm64/native/libluisa-xir.dylib" artifacts/native-assets-package.txt
+          grep -F "runtimes/osx-arm64/native/libdxcompiler.dylib" artifacts/native-assets-package.txt
           grep -F "runtimes/win-x64/native/luisa-backend-vk.dll" artifacts/native-assets-package.txt
           grep -F "runtimes/win-x64/native/luisa-core.dll" artifacts/native-assets-package.txt
           grep -F "runtimes/win-x64/native/luisa-ast.dll" artifacts/native-assets-package.txt
@@ -242,7 +242,15 @@ jobs:
           grep -F "tools/net10.0/any/runtimes/win-x64/native/feather_native.dll" artifacts/render-host-package.txt
           grep -F "tools/net10.0/any/runtimes/linux-x64/native/libluisa-backend-vk.so" artifacts/render-host-package.txt
           grep -F "tools/net10.0/any/runtimes/osx-arm64/native/libluisa-backend-vk.so" artifacts/render-host-package.txt
+          grep -F "tools/net10.0/any/runtimes/osx-arm64/native/libdxcompiler.dylib" artifacts/render-host-package.txt
           grep -F "tools/net10.0/any/runtimes/win-x64/native/luisa-backend-vk.dll" artifacts/render-host-package.txt
+
+          for package in artifacts/packages/*.nupkg; do
+            if unzip -Z1 "$package" | grep -Eqi 'easy[g]pu'; then
+              echo "Removed runtime artifact found in $package" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload packages
         uses: actions/upload-artifact@v4

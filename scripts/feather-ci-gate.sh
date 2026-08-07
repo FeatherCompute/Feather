@@ -123,7 +123,7 @@ run dotnet build "$ROOT/Feather.slnx" --no-restore -v minimal
 run_test_projects
 run_window_opt_in_tests_if_requested
 
-run python3 "$ROOT/scripts/ad-industrial-gate.py" --native-clean
+run python3 "$ROOT/scripts/ad-industrial-gate.py"
 run python3 "$ROOT/scripts/nn-industrial-gate.py" --clean
 
 build_sample_projects

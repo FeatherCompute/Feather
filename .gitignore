@@ -57,13 +57,3 @@ __pycache__/
 
 # External sample assets. Fetch separately when running SponzaRenderer.
 Sponza/
-
-# EasyGPU is a pinned submodule; keep its local build output out of the root repo.
-EasyGPU/.cache/
-EasyGPU/.VSCodeCounter/
-EasyGPU/.idea/
-EasyGPU/CMakeFiles/
-EasyGPU/build*/
-EasyGPU/cmake-build*/
-EasyGPU/imgui.ini
-EasyGPU/Sponza/

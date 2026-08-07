@@ -55,7 +55,7 @@ def check_file(path: Path) -> list[str]:
 def main() -> int:
     errors: list[str] = []
     for path in sorted(ROOT.rglob("*.md")):
-        if any(part in {"EasyGPU", "bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in path.parts):
+        if any(part in {"bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in path.parts):
             continue
         if any(path.is_relative_to(submodule) for submodule in SUBMODULE_ROOTS):
             continue

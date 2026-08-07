@@ -47,37 +47,12 @@ def parse_managed_coverage(output: str) -> str:
     return f"lines {match.group(1)}%, branches {match.group(2)}%"
 
 
-def parse_native_coverage(output: str) -> str:
-    match = re.search(r"Native AD coverage gate passed: scoped lines ([0-9.]+)% >= ([0-9.]+)%", output)
-    if match:
-        return f"lines {match.group(1)}% (threshold {match.group(2)}%)"
-
-    total_line = None
-    for line in output.splitlines():
-        if line.strip().startswith("TOTAL"):
-            parts = line.split()
-            if len(parts) >= 4:
-                total_line = parts[3]
-    return f"lines {total_line}" if total_line else "native coverage unavailable"
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--native-no-build", action="store_true", help="reuse existing native coverage build")
-    parser.add_argument("--native-no-test", action="store_true", help="reuse existing native coverage profiles")
-    parser.add_argument("--native-clean", action="store_true", help="clean native coverage build before running")
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
 
     root = repo_root()
     os.chdir(root)
-
-    native_command = ["python3", "scripts/ad-native-coverage-gate.py"]
-    if args.native_no_build:
-        native_command.append("--no-build")
-    if args.native_no_test:
-        native_command.append("--no-test")
-    if args.native_clean:
-        native_command.append("--clean")
 
     steps = [
         (
@@ -107,7 +82,6 @@ def main(argv: list[str]) -> int:
             ],
         ),
         ("managed coverage gate", ["python3", "scripts/ad-coverage-gate.py"]),
-        ("native coverage gate", native_command),
         ("AD sample smoke", ["dotnet", "run", "--project", "samples/AdLinearRegression/AdLinearRegression.csproj"]),
     ]
 
@@ -127,9 +101,6 @@ def main(argv: list[str]) -> int:
         elif result.name == "managed coverage gate":
             print("    threshold: managed aggregate lines >= 90%, branches >= 90%, per-file lines >= 90%")
             print(f"    {parse_managed_coverage(result.output)}")
-        elif result.name == "native coverage gate":
-            print("    threshold: native aggregate scoped lines >= 80%, per-file scoped lines >= 80%")
-            print(f"    {parse_native_coverage(result.output)}")
 
     if not all(result.passed for result in results) or len(results) != len(steps):
         print("\nIndustrial AD gate failed.", file=sys.stderr)

@@ -49,7 +49,11 @@ if [[ ! -f "$source" ]]; then
     exit 1
 fi
 
-mkdir -p "$(dirname "$target")"
+native_dir="$(dirname "$target")"
+# Staging is a package input, not a runtime cache. Recreate this exact RID
+# directory so a previous process cannot leak generated shader data into a pack.
+rm -rf "$native_dir"
+mkdir -p "$native_dir"
 cp "$source" "$target"
 
 stage_luisa_runtime() {
@@ -76,6 +80,15 @@ stage_luisa_runtime() {
                 cp -f "$source_file" "$native_dir/"
             done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f \
                 \( -name 'libluisa*.dylib' -o -name 'libluisa-backend-*.so' \) -print0)
+            # LC loads DXC dynamically for the Vulkan HLSL compatibility route;
+            # it is therefore absent from otool's dependency graph.
+            while IFS= read -r -d '' source_file; do
+                cp -f "$source_file" "$native_dir/"
+            done < <(find "$BUILD_DIR/bin" -maxdepth 3 -type f -name 'libdxcompiler.dylib' -print0)
+            if [[ ! -f "$native_dir/libdxcompiler.dylib" ]]; then
+                echo "Luisa Vulkan XIR autodiff requires libdxcompiler.dylib under: $BUILD_DIR/bin" >&2
+                exit 1
+            fi
             ;;
     esac
 
@@ -87,6 +100,11 @@ stage_luisa_runtime() {
 }
 
 stage_luisa_runtime
+
+if find "$(dirname "$target")" -maxdepth 1 -type f -iname '*easy[g]pu*' -print -quit | grep -q .; then
+    echo "Staged native assets contain a removed runtime artifact." >&2
+    exit 1
+fi
 
 is_linux_system_abi_dependency() {
     local dependency_name="$1"
