@@ -2,16 +2,21 @@ using System.Diagnostics;
 using Feather;
 using Feather.Interop;
 using Feather.Math;
+using Feather.RayTracing;
 using Feather.Resources;
 
 const int DefaultWidth = 1024;
 const int DefaultHeight = 1024;
 const int DefaultSamplesPerPixel = 2560 * 4;
+const int HardwareSamplesPerPixel = 256;
 
+var hardwareRayTracing = args.Length > 3 && args[3] == "hw";
 var width = args.Length > 0 && int.TryParse(args[0], out var parsedWidth) ? parsedWidth : DefaultWidth;
 var height = args.Length > 1 && int.TryParse(args[1], out var parsedHeight) ? parsedHeight : DefaultHeight;
-var samplesPerPixel = args.Length > 2 && int.TryParse(args[2], out var parsedSamples) ? parsedSamples : DefaultSamplesPerPixel;
-var executionBackend = args.Length > 3 ? ParseBackend(args[3]) : GpuExecutionBackend.Luisa;
+var samplesPerPixel = args.Length > 2 && int.TryParse(args[2], out var parsedSamples)
+    ? parsedSamples
+    : hardwareRayTracing ? HardwareSamplesPerPixel : DefaultSamplesPerPixel;
+var executionBackend = args.Length > 3 && !hardwareRayTracing ? ParseBackend(args[3]) : GpuExecutionBackend.Luisa;
 ArgumentOutOfRangeException.ThrowIfLessThan(width, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(samplesPerPixel, 1);
@@ -22,15 +27,39 @@ using var image = GPU.CreateBuffer<float4>(width * height, BufferAccess.ReadWrit
 using var rng = GPU.CreateBuffer<int>(CreateSeeds(width, height), BufferAccess.ReadWrite);
 
 var stopwatch = Stopwatch.StartNew();
-var path = GPU.DispatchAndGetPath(
-    new RayTracingKernel(
-        image.AsReadWrite(),
-        rng.AsReadWrite(),
-        new Uniform<int>(width),
-        new Uniform<int>(height),
-        new Uniform<int>(samplesPerPixel)),
-    new int2(width, height),
-    executionBackend);
+DispatchPath path;
+if (hardwareRayTracing)
+{
+    var (vertexData, materialIds) = BuildCornellBoxScene();
+    using var vertices = GPU.CreateBuffer(vertexData, BufferAccess.ReadOnly);
+    using var meshIndices = GPU.CreateBuffer<uint>(CreateTriangleIndices(vertexData.Length / 3), BufferAccess.ReadOnly);
+    using var materials = GPU.CreateBuffer(materialIds, BufferAccess.ReadOnly);
+    using var accel = GPU.CreateAccel((vertices, meshIndices));
+    path = GPU.DispatchAndGetPath(
+        new RayTracingHardwareKernel(
+            accel.AsReadOnly(),
+            vertices.AsReadOnly(),
+            materials.AsReadOnly(),
+            image.AsReadWrite(),
+            rng.AsReadWrite(),
+            new Uniform<int>(width),
+            new Uniform<int>(height),
+            new Uniform<int>(samplesPerPixel)),
+        new int2(width, height),
+        executionBackend);
+}
+else
+{
+    path = GPU.DispatchAndGetPath(
+        new RayTracingKernel(
+            image.AsReadWrite(),
+            rng.AsReadWrite(),
+            new Uniform<int>(width),
+            new Uniform<int>(height),
+            new Uniform<int>(samplesPerPixel)),
+        new int2(width, height),
+        executionBackend);
+}
 stopwatch.Stop();
 SampleProof.AssertBackend(path, executionBackend);
 
@@ -80,6 +109,168 @@ static int[] CreateSeeds(int width, int height)
     }
 
     return seeds;
+}
+
+/// <summary>
+/// Builds a Cornell-box scene as a flat float3 triangle soup: back wall,
+/// floor, ceiling, red left wall, green right wall, an emissive area light,
+/// and a short box in the middle. Each triangle is followed by its material
+/// id in the parallel uint array (0 white, 1 red, 2 green, 3 emissive light).
+/// </summary>
+static (float[] vertices, uint[] materials) BuildCornellBoxScene()
+{
+    var vertices = new List<float>();
+    var materials = new List<uint>();
+
+    void Quad(float3 a, float3 b, float3 c, float3 d, uint material)
+    {
+        vertices.AddRange([a.X, a.Y, a.Z, b.X, b.Y, b.Z, c.X, c.Y, c.Z]);
+        materials.Add(material);
+        vertices.AddRange([a.X, a.Y, a.Z, c.X, c.Y, c.Z, d.X, d.Y, d.Z]);
+        materials.Add(material);
+    }
+
+    Quad(new float3(-1f, -1f, -1f), new float3(1f, -1f, -1f), new float3(1f, 1f, -1f), new float3(-1f, 1f, -1f), 0);   // back wall z=-1
+    Quad(new float3(-1f, -1f, -1f), new float3(1f, -1f, -1f), new float3(1f, -1f, 1f), new float3(-1f, -1f, 1f), 0);   // floor y=-1
+    Quad(new float3(-1f, 1f, -1f), new float3(1f, 1f, -1f), new float3(1f, 1f, 1f), new float3(-1f, 1f, 1f), 0);       // ceiling y=+1
+    Quad(new float3(-1f, -1f, -1f), new float3(-1f, 1f, -1f), new float3(-1f, 1f, 1f), new float3(-1f, -1f, 1f), 1);   // left wall x=-1
+    Quad(new float3(1f, -1f, -1f), new float3(1f, 1f, -1f), new float3(1f, 1f, 1f), new float3(1f, -1f, 1f), 2);       // right wall x=+1
+    Quad(new float3(-0.25f, 0.99f, -0.25f), new float3(0.25f, 0.99f, -0.25f), new float3(0.25f, 0.99f, 0.25f), new float3(-0.25f, 0.99f, 0.25f), 3); // area light y=0.99
+
+    const float bx0 = -0.35f, bx1 = 0.35f, by0 = -1f, by1 = -0.5f, bz0 = -0.5f, bz1 = 0.2f;
+    Quad(new float3(bx0, by0, bz0), new float3(bx1, by0, bz0), new float3(bx1, by1, bz0), new float3(bx0, by1, bz0), 0); // box -z face
+    Quad(new float3(bx0, by0, bz1), new float3(bx1, by0, bz1), new float3(bx1, by1, bz1), new float3(bx0, by1, bz1), 0); // box +z face
+    Quad(new float3(bx0, by0, bz0), new float3(bx0, by1, bz0), new float3(bx0, by1, bz1), new float3(bx0, by0, bz1), 0); // box -x face
+    Quad(new float3(bx1, by0, bz0), new float3(bx1, by1, bz0), new float3(bx1, by1, bz1), new float3(bx1, by0, bz1), 0); // box +x face
+    Quad(new float3(bx0, by1, bz0), new float3(bx1, by1, bz0), new float3(bx1, by1, bz1), new float3(bx0, by1, bz1), 0); // box top
+    Quad(new float3(bx0, by0, bz0), new float3(bx1, by0, bz0), new float3(bx1, by0, bz1), new float3(bx0, by0, bz1), 0); // box bottom
+
+    return (vertices.ToArray(), materials.ToArray());
+}
+
+static uint[] CreateTriangleIndices(int vertexCount)
+{
+    var indices = new uint[checked(vertexCount)];
+    for (var i = 0; i < indices.Length; i++)
+    {
+        indices[i] = (uint)i;
+    }
+    return indices;
+}
+
+/// <summary>
+/// Hardware-accelerated Cornell-box renderer: the scene is a triangle mesh
+/// built into a LuisaCompute acceleration structure, and every ray is traced
+/// with TraceClosest (MetalRT on macOS). Materials are a parallel per-triangle
+/// id table; normals are computed from the triangle vertices. Direct lighting
+/// from the emissive area light with a shadow ray, plus a small ambient term.
+/// </summary>
+[Kernel]
+[ThreadGroupSize(DefaultThreadGroupSizes.XY)]
+public readonly partial struct RayTracingHardwareKernel(
+    ReadOnlyAccel accel,
+    ReadOnlyBuffer<float> vertices,
+    ReadOnlyBuffer<uint> materials,
+    ReadWriteBuffer<float4> image,
+    ReadWriteBuffer<int> rng,
+    Uniform<int> width,
+    Uniform<int> height,
+    Uniform<int> samplesPerPixel) : IKernel2D
+{
+    public void Execute()
+    {
+        int2 pixel = ThreadIds.XY;
+        int imageWidth = width.Value;
+        int imageHeight = height.Value;
+        if (pixel.X >= imageWidth || pixel.Y >= imageHeight)
+        {
+            return;
+        }
+
+        int sampleCount = samplesPerPixel.Value;
+        int pixelIndex = pixel.Y * imageWidth + pixel.X;
+        int seed = rng[pixelIndex];
+        float3 accumulated = new float3(0.0f);
+
+        for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+        {
+            int stream = sampleIndex * 64;
+            float u = ((float)pixel.X + Random01(seed, stream)) / (float)imageWidth;
+            float v = ((float)pixel.Y + Random01(seed, stream + 1)) / (float)imageHeight;
+            float3 rayOrigin = new float3(0.0f, 0.0f, 2.5f);
+            float3 rayDirection = ShaderMath.Normalize(new float3(-1.0f + (2.0f * u), -1.0f + (2.0f * v), 0.5f) - rayOrigin);
+
+            var hit = accel.TraceClosest(new Ray(rayOrigin, rayDirection, 0.001f, 1e30f));
+            float3 radiance = new float3(0.0f);
+            if (hit.T < 1e30f)
+            {
+                if (materials[(int)hit.Prim] == 3u)
+                {
+                    // Emissive area light.
+                    radiance = new float3(15.0f, 15.0f, 15.0f);
+                }
+                else
+                {
+                    float3 hitPoint = rayOrigin + (rayDirection * hit.T);
+                    int normalBase = (int)hit.Prim * 9;
+                    float3 v0 = new float3(vertices[normalBase], vertices[normalBase + 1], vertices[normalBase + 2]);
+                    float3 v1 = new float3(vertices[normalBase + 3], vertices[normalBase + 4], vertices[normalBase + 5]);
+                    float3 v2 = new float3(vertices[normalBase + 6], vertices[normalBase + 7], vertices[normalBase + 8]);
+                    float3 normal = ShaderMath.Normalize(ShaderMath.Cross(v1 - v0, v2 - v0));
+                    if (ShaderMath.Dot(normal, rayDirection) > 0.0f)
+                    {
+                        normal = -normal;
+                    }
+
+                    float3 albedo = new float3(0.73f, 0.73f, 0.73f);
+                    if (materials[(int)hit.Prim] == 1u)
+                    {
+                        albedo = new float3(0.65f, 0.05f, 0.05f);
+                    }
+                    else if (materials[(int)hit.Prim] == 2u)
+                    {
+                        albedo = new float3(0.12f, 0.45f, 0.15f);
+                    }
+                    // Direct lighting from the area light center with a shadow ray.
+                    float3 toLight = ShaderMath.Normalize(new float3(0.0f, 0.99f, 0.0f) - hitPoint);
+                    float3 shadowOrigin = hitPoint + (0.002f * normal);
+                    var lightHit = accel.TraceClosest(new Ray(shadowOrigin, toLight, 0.0001f, 1e30f));
+                    float light = 0.0f;
+                    if (lightHit.T < 1e30f && materials[(int)lightHit.Prim] == 3u)
+                    {
+                        float3 lightDelta = new float3(0.0f, 0.99f, 0.0f) - hitPoint;
+                        float distanceSquared = ShaderMath.Dot(lightDelta, lightDelta);
+                        float normalDotLight = ShaderMath.Max(ShaderMath.Dot(normal, toLight), 0.0f);
+                        light = (15.0f * normalDotLight) / distanceSquared;
+                    }
+
+                    radiance = (albedo * 0.12f) + (albedo * light);
+                }
+            }
+
+            accumulated = accumulated + radiance;
+        }
+
+        float scale = 1.0f / (float)sampleCount;
+        float3 color = accumulated * scale;
+        image[pixelIndex] = new float4(
+            ShaderMath.Sqrt(ShaderMath.Clamp(color.X, 0.0f, 1.0f)),
+            ShaderMath.Sqrt(ShaderMath.Clamp(color.Y, 0.0f, 1.0f)),
+            ShaderMath.Sqrt(ShaderMath.Clamp(color.Z, 0.0f, 1.0f)),
+            1.0f);
+        rng[pixelIndex] = seed + (sampleCount * 131) + (pixel.X * 17) + (pixel.Y * 29);
+    }
+
+    [Callable]
+    private static float Random01(int seed, int stream)
+    {
+        int state = seed + (stream * 747796405);
+        state = state ^ (state >> 16);
+        state = state * 1103515245 + 12345;
+        state = state ^ (state >> 15);
+        int positive = state & 2147483647;
+        return (float)positive / 2147483647.0f;
+    }
 }
 
 /// <summary>

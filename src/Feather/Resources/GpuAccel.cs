@@ -59,6 +59,27 @@ public sealed class GpuAccel : IDisposable
     }
 
     /// <summary>
+    /// Creates an acceleration structure from one or more triangle meshes.
+    /// </summary>
+    public static GpuAccel Create(GpuContext context, params GpuMesh[] meshes)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        context.ThrowIfDisposed();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(meshes.Length);
+
+        var tuples = new (GpuBuffer<float> vertices, GpuBuffer<uint> indices)[meshes.Length];
+        for (var i = 0; i < meshes.Length; i++)
+        {
+            if (meshes[i] is null)
+            {
+                throw new ArgumentException("Accel meshes must not be null.", nameof(meshes));
+            }
+            tuples[i] = (meshes[i].Vertices, meshes[i].Indices);
+        }
+        return Create(context, tuples);
+    }
+
+    /// <summary>
     /// Creates a read-only shader binding for this acceleration structure.
     /// </summary>
     public ReadOnlyAccel AsReadOnly()

@@ -34,6 +34,19 @@ public static class GPU
     public static GpuAccel CreateAccel(params (GpuBuffer<float> vertices, GpuBuffer<uint> indices)[] meshes)
         => GpuAccel.Create(Context, meshes);
 
+    /// <summary>
+    /// Creates a GPU acceleration structure from triangle meshes.
+    /// </summary>
+    public static GpuAccel CreateAccel(params GpuMesh[] meshes)
+        => GpuAccel.Create(Context, meshes);
+
+    /// <summary>
+    /// Wraps a flat float3 vertex buffer (3N floats) and a uint index buffer
+    /// (length a multiple of 3) as a triangle mesh for <see cref="CreateAccel"/>.
+    /// </summary>
+    public static GpuMesh CreateMesh(GpuBuffer<float> vertices, GpuBuffer<uint> indices)
+        => new(vertices, indices);
+
     public static GpuBuffer<T> CreateBuffer<T>(ReadOnlySpan<T> data, BufferAccess access = BufferAccess.ReadWrite)
         where T : unmanaged
         => GpuBuffer<T>.Create(Context, data, access);
