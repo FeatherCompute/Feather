@@ -57,6 +57,8 @@ def main() -> int:
     for path in sorted(ROOT.rglob("*.md")):
         if any(part in {"bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in path.parts):
             continue
+        if path.is_relative_to(ROOT / "native") and path.relative_to(ROOT / "native").parts[0].startswith("build"):
+            continue
         if any(path.is_relative_to(submodule) for submodule in SUBMODULE_ROOTS):
             continue
         errors.extend(check_file(path))

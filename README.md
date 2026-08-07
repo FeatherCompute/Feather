@@ -16,7 +16,7 @@ Write GPU compute kernels, texture pipelines, raster shaders, reverse-mode autom
 
 ---
 
-Feather is a .NET front end for [EasyGPU](EasyGPU/). You write GPU code as normal C# `readonly partial struct` types, the Roslyn generator lowers the supported shader subset into Feather IR (FEIR), and the native bridge sends typed IR into EasyGPU for GLSL/SPIR-V execution.
+Feather is a .NET front end for [LuisaCompute](LuisaCompute/). You write GPU code as normal C# `readonly partial struct` types, the Roslyn generator lowers the supported shader subset into Feather IR (FEIR), and the native bridge sends typed IR into LuisaCompute for native backend execution.
 
 Feather is currently experimental. The compute path is the most mature surface. Windowing, graphics, automatic differentiation, and `Feather.NN` are usable preview APIs that are proven by samples and tests but should still be treated as evolving.
 
@@ -36,7 +36,7 @@ Feather is designed for C# developers who want to stay inside .NET while writing
 - Reusable `[ShaderLibrary]` callables for shared BRDF, SDF, sampling, and math code.
 - Native windows and texture presentation for interactive GPU output.
 - Preview raster pipelines written as C# vertex and fragment shaders.
-- Preview reverse-mode AD for generated 1D kernels through EasyGPU's gradient tape.
+- Preview reverse-mode AD for generated 1D kernels through LuisaCompute XIR autodiff.
 - Preview NN helpers for tensors, modules, optimizers, checkpoints, and AD-backed training loops.
 - IR/GLSL inspection for debugging generated kernels and understanding the compiler pipeline.
 
@@ -52,7 +52,7 @@ Prerequisites:
 
 - .NET SDK `10.0.301` or a compatible SDK feature band.
 - CMake 3.20+ and a C++20 compiler for the native bridge.
-- A GPU/driver supported by the selected EasyGPU backend.
+- A GPU/driver supported by the selected LuisaCompute backend.
 - Vulkan SDK when building the Vulkan backend.
 - X11 development libraries on Linux when using windows.
 
@@ -73,7 +73,7 @@ The NuGet package ID is `FeatherCompute`; the public C# namespaces remain
 projects only need this one package. It brings in the source generator, native
 loader, and published native assets through companion packages.
 
-Current preview packages include EasyGPU and LuisaCompute Vulkan/XIR native assets for:
+Current preview packages include LuisaCompute native assets for:
 
 - `linux-x64`
 - `osx-arm64`
@@ -83,16 +83,16 @@ Other runtime identifiers can still use Feather from source or with
 `FEATHER_NATIVE_LIBRARY=/absolute/path/to/<native-library>` pointing at a
 custom native build.
 
-Compute kernels can select the Luisa Vulkan/XIR backend; EasyGPU remains the
-default. Raster graphics remain on EasyGPU because the pinned LuisaCompute
-release does not expose an XIR raster entry point.
+LuisaCompute is Feather's sole execution backend. Feather defaults to Metal on
+macOS and Vulkan on other supported platforms; compute rasterization supplies
+the graphics pipeline.
 
 Build from the repository root:
 
 ```bash
 git submodule update --init --recursive
 
-cmake -S native -B native/build -DEASYGPU_BACKEND=Vulkan
+cmake -S native -B native/build
 cmake --build native/build --target feather --parallel
 
 dotnet build Feather.slnx
@@ -131,7 +131,7 @@ public readonly partial struct DoubleKernel(
 }
 ```
 
-At the call site this is ordinary C#. Inside `Execute`, Feather accepts a GPU-safe C# subset and reports `FE0001`-style diagnostics when a construct cannot be lowered. The generated kernel carries FEIR metadata, resource bindings, thread-group size, and typed shader statements into the native EasyGPU bridge.
+At the call site this is ordinary C#. Inside `Execute`, Feather accepts a GPU-safe C# subset and reports `FE0001`-style diagnostics when a construct cannot be lowered. The generated kernel carries FEIR metadata, resource bindings, thread-group size, and typed shader statements into the native LuisaCompute bridge.
 
 ## Core Concepts
 
@@ -173,7 +173,7 @@ public readonly partial struct LossKernel(
 }
 ```
 
-On the host, `GPU.CreateADKernel(...)` creates a wrapper that dispatches the forward path, asks EasyGPU to generate the adjoint body, and exposes named gradients for readback or device-side optimizer handoff. Start with [Automatic Differentiation](docs/autodiff.md), then read [AD Internals](docs/ad-implementation-note.md) when debugging the native bridge.
+On the host, `GPU.CreateADKernel(...)` creates a wrapper that dispatches the forward path, asks LuisaCompute XIR autodiff to generate the adjoint body, and exposes named gradients for readback or device-side optimizer handoff. Start with [Automatic Differentiation](docs/autodiff.md), then read [AD Internals](docs/ad-implementation-note.md) when debugging the native bridge.
 
 ## Examples
 
@@ -242,12 +242,12 @@ Projects that only use windowing helpers and do not define generated kernels do 
 
 - [Documentation Index](docs/README.md): learning path and topic map.
 - [API Reference](docs/api.md): public API grouped by subsystem.
-- [FEIR](docs/feir.md): how C# becomes native EasyGPU work.
+- [FEIR](docs/feir.md): how C# becomes native LuisaCompute work.
 - [Support Status](docs/support-status.md): maturity, platform notes, and current limits.
 - [Diagnostics](docs/diagnostics.md): common generator and runtime errors.
 - [Packaging](docs/packaging.md): source consumption, native assets, and local packages.
 
 ## License
 
-Feather is licensed under the [MIT License](LICENSE). EasyGPU is consumed as a
-submodule and keeps its own [license](EasyGPU/LICENSE).
+Feather is licensed under the [MIT License](LICENSE). LuisaCompute is consumed
+as a submodule and keeps its own [license](LuisaCompute/LICENSE).
