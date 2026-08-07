@@ -108,14 +108,14 @@ def source_gate(root: Path) -> bool:
     gpu_kernel = (root / "src/Feather/Kernels/GpuKernel.cs").read_text()
     native_structs = (root / "src/Feather.Native/NativeStructs.cs").read_text()
     native_api = (root / "native/feather_c_api.cpp").read_text()
-    native_lowerer = (root / "native/feather_typed_ir_lowerer.cpp").read_text()
+    native_lowerer = (root / "native/feather_luisa_xir.cpp").read_text()
     bounds_requirements = [
         ("managed kernel create descriptor", "descriptor.BoundsCheck" in gpu_kernel),
         ("managed logical dispatch forwarding", "size.X" in gpu_kernel and "logical_x" in (root / "src/Feather.Native/NativeMethods.cs").read_text()),
         ("native create descriptor bounds flag", "BoundsCheck" in native_structs and "bounds_check" in (root / "native/feather_c_api.h").read_text()),
         ("native logical dispatch storage", "logical_x" in native_api and "logical_y" in native_api and "logical_z" in native_api),
-        ("typed lowerer guard", "EmitBoundsCheckGuard" in native_lowerer and "builder_.Compare(GPU::IR::CompareOp::GreaterEqual" in native_lowerer),
-        ("hidden logical dispatch constants", "__feather_dispatch_size_" in native_lowerer),
+        ("typed lowerer guard", "emit_bounds_guard" in native_lowerer and "ArithmeticOp::BINARY_GREATER_EQUAL" in native_lowerer),
+        ("logical dispatch constants", "const uint32_t logical[]" in native_lowerer and "create_constant(Type::of<uint32_t>()" in native_lowerer),
     ]
     for name, ok in bounds_requirements:
         if not ok:
@@ -233,7 +233,12 @@ def main(argv: list[str]) -> int:
             "tests/Feather.Integration.Tests/Feather.Integration.Tests.csproj",
             "--no-restore",
             "--filter",
-            "NN|Training|AutoDiff|AD|Bounds",
+            "FullyQualifiedName~AutoDiffManagedReadbackTests|"
+            "FullyQualifiedName~AutoDiffNativeBridgeTests|"
+            "FullyQualifiedName~LuisaBackendAdTests|"
+            "FullyQualifiedName~NNTrainingIntegrationTests|"
+            "FullyQualifiedName~MlpTrainingGradientTests|"
+            "FullyQualifiedName~Bounds",
         ],
     ]
 
