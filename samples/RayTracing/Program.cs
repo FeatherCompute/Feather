@@ -414,28 +414,32 @@ public readonly partial struct RayTracingKernel(
 
                 if (hit == 0)
                 {
-                    break;
+                    // Terminate the bounce loop by exhausting its bound;
+                    // Feather's XIR pipeline cannot yet restructure
+                    // conditional breaks inside multi-branch loop bodies.
+                    depth = 8;
                 }
-
-                if (materialType == 2)
+                else if (materialType == 2)
                 {
                     radiance = radiance + (throughput * hitAlbedo);
-                    break;
-                }
-
-                float3 randomDirection = RandomUnitVector(seed, stream + (depth * 7) + 2);
-                throughput = throughput * hitAlbedo;
-                if (materialType == 1)
-                {
-                    rayDirection = ShaderMath.Normalize(ReflectVector(ShaderMath.Normalize(rayDirection), hitNormal) + (0.2f * randomDirection));
+                    depth = 8;
                 }
                 else
                 {
-                    float3 lightBias = ShaderMath.Normalize(new float3(0.0f, 0.74f, 0.0f) - hitPoint);
-                    rayDirection = ShaderMath.Normalize(hitNormal + randomDirection + (0.35f * lightBias));
-                }
+                    float3 randomDirection = RandomUnitVector(seed, stream + (depth * 7) + 2);
+                    throughput = throughput * hitAlbedo;
+                    if (materialType == 1)
+                    {
+                        rayDirection = ShaderMath.Normalize(ReflectVector(ShaderMath.Normalize(rayDirection), hitNormal) + (0.2f * randomDirection));
+                    }
+                    else
+                    {
+                        float3 lightBias = ShaderMath.Normalize(new float3(0.0f, 0.74f, 0.0f) - hitPoint);
+                        rayDirection = ShaderMath.Normalize(hitNormal + randomDirection + (0.35f * lightBias));
+                    }
 
-                rayOrigin = hitPoint + (0.002f * hitNormal);
+                    rayOrigin = hitPoint + (0.002f * hitNormal);
+                }
             }
 
             accumulated = accumulated + radiance;
