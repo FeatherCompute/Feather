@@ -234,10 +234,12 @@ bool feir_layout(const TypedIR::Module& module, uint32_t id, size_t* size, size_
         *alignment = source.b == 2u ? 8u : 16u;
         return true;
     }
-    case 3:
-        *size = source.b * 16u;
-        *alignment = 16u;
-        return true;
+    case 3: {
+        const auto column_stride = source.b == 2u ? 8u : 16u;
+        *size = source.b * column_stride;
+        *alignment = column_stride;
+        return source.b >= 2u && source.b <= 4u;
+    }
     case 4:
         if (source.a >= module.structs.size()) return false;
         *size = module.structs[source.a].size_in_bytes;
