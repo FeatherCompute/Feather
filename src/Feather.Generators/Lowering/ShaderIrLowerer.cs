@@ -750,6 +750,23 @@ internal static class ShaderIrLowerer
         }
 
         var args = ctor.Arguments.Select(a => LowerExpr(a.Value, ctx)).ToArray();
+        // Ray's two-argument constructor (origin, direction) defaults the
+        // parametric range to [0, +inf). The generator cannot resolve the
+        // constructor body across assemblies (Ray lives in Feather.dll), so
+        // expand it here per the documented semantics into the four-field
+        // aggregate the FEIR protocol expects. Without this, the native side
+        // rejects the two-argument aggregate for the four-field struct.
+        if (args.Length == 2 && t is ShaderStructType rayStruct &&
+            rayStruct.CSharpTypeName is "global::Feather.RayTracing.Ray" or "Feather.RayTracing.Ray")
+        {
+            args = new[]
+            {
+                args[0],
+                args[1],
+                new ShaderLiteralExpression(ShaderTypeFactory.Float, "0"),
+                new ShaderLiteralExpression(ShaderTypeFactory.Float, "1e30"),
+            };
+        }
         return new ShaderConstructorExpression(t, new EquatableArray<ShaderExpression>(args));
     }
 

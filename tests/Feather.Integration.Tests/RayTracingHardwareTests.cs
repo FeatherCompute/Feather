@@ -41,6 +41,27 @@ public class RayTracingHardwareTests
 
     [Fact]
     [Trait("Category", "Gpu")]
+    public void TwoArgumentRayConstructorDefaultsToInfiniteRange()
+    {
+        using var vertices = GPU.CreateBuffer(
+        [
+            0f, 0f, 0f, 2f, 0f, 0f, 0f, 2f, 0f,      // tri 0 at z=0
+            0f, 0f, -2f, 2f, 0f, -2f, 0f, 2f, -2f,   // tri 1 at z=-2
+        ], BufferAccess.ReadOnly);
+        using var indices = GPU.CreateBuffer<uint>([0, 1, 2, 3, 4, 5], BufferAccess.ReadOnly);
+        using var accel = GPU.CreateAccel((vertices, indices));
+        using var result = GPU.CreateBuffer<uint>(2);
+
+        // new Ray(origin, direction) must default the range to [0, +inf):
+        // from z=-5 looking +z the nearest triangle is z=-2 (prim 1, t 3).
+        GPU.Dispatch(new RayTracingTwoArgumentRayKernel(accel.AsReadOnly(), result.AsReadWrite()), 1);
+        var hits = result.ToArray();
+        Assert.Equal(1u, hits[0]);
+        Assert.Equal(3u, hits[1]);
+    }
+
+    [Fact]
+    [Trait("Category", "Gpu")]
     public void CreateMeshAndCreateAccelOverloadsBuildTheSameStructure()
     {
         using var vertices = GPU.CreateBuffer(
@@ -58,6 +79,20 @@ public class RayTracingHardwareTests
 
         Assert.Equal(0u, hits[0]); // prim of nearest triangle from z=+5
         Assert.Equal(5u, hits[2]); // (uint)5.0f (hitA.T)
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct RayTracingTwoArgumentRayKernel(
+    ReadOnlyAccel accel,
+    ReadWriteBuffer<uint> result) : IKernel1D
+{
+    public void Execute()
+    {
+        var hit = accel.TraceClosest(new Ray(new float3(0.5f, 0.5f, -5.0f), new float3(0.0f, 0.0f, 1.0f)));
+        result[0] = hit.Prim;
+        result[1] = (uint)hit.T;
     }
 }
 
