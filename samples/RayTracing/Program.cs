@@ -10,13 +10,16 @@ const int DefaultHeight = 1024;
 const int DefaultSamplesPerPixel = 2560 * 4;
 const int HardwareSamplesPerPixel = 256;
 
-var hardwareRayTracing = args.Length > 3 && args[3] == "hw";
+// Hardware-accelerated MetalRT Cornell box is the default path; pass "sw"
+// to fall back to the software path tracer.
+var useSoftwarePath = args.Length > 3 && args[3] == "sw";
+var hardwareRayTracing = !useSoftwarePath;
 var width = args.Length > 0 && int.TryParse(args[0], out var parsedWidth) ? parsedWidth : DefaultWidth;
 var height = args.Length > 1 && int.TryParse(args[1], out var parsedHeight) ? parsedHeight : DefaultHeight;
 var samplesPerPixel = args.Length > 2 && int.TryParse(args[2], out var parsedSamples)
     ? parsedSamples
     : hardwareRayTracing ? HardwareSamplesPerPixel : DefaultSamplesPerPixel;
-var executionBackend = args.Length > 3 && !hardwareRayTracing ? ParseBackend(args[3]) : GpuExecutionBackend.Luisa;
+var executionBackend = useSoftwarePath ? ParseBackend(args.Length > 4 ? args[4] : "luisa") : GpuExecutionBackend.Luisa;
 ArgumentOutOfRangeException.ThrowIfLessThan(width, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(height, 2);
 ArgumentOutOfRangeException.ThrowIfLessThan(samplesPerPixel, 1);
