@@ -8,8 +8,8 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
-    <VersionPrefix>0.2.0</VersionPrefix>
-    <VersionSuffix>preview.7</VersionSuffix>
+    <VersionPrefix>0.4.0</VersionPrefix>
+    <VersionSuffix>preview.1</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
