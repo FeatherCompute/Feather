@@ -149,18 +149,22 @@ public readonly partial struct SdfRendererKernel(
                 if (distToLight < hit.Closest)
                 {
                     hitLight = 1.0f;
-                    break;
+                    // Exhaust the bounce bound instead of break: Feather's
+                    // XIR restructure cannot rebuild conditional breaks in
+                    // multi-branch loop bodies.
+                    depth = MaxRayDepth;
                 }
-
-                if (ShaderMath.Length(hit.Normal) == 0.0f)
+                else if (ShaderMath.Length(hit.Normal) == 0.0f)
                 {
-                    break;
+                    depth = MaxRayDepth;
                 }
-
-                var hitPos = pos + (hit.Closest * direction);
-                direction = OutDir(hit.Normal, seed, sampleStream + (depth * 7) + 2);
-                pos = hitPos + (1e-4f * direction);
-                throughput = throughput * hit.Color;
+                else
+                {
+                    var hitPos = pos + (hit.Closest * direction);
+                    direction = OutDir(hit.Normal, seed, sampleStream + (depth * 7) + 2);
+                    pos = hitPos + (1e-4f * direction);
+                    throughput = throughput * hit.Color;
+                }
             }
 
             var sampleColor = throughput * hitLight;
