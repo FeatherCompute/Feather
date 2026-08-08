@@ -2,12 +2,31 @@
 
 ## Status
 
-**Design stage.** The LuisaCompute ray-tracing foundation is verified working
-on this machine (MetalRT): mesh/accel creation, build, `AccelVar` kernel
-arguments, `intersect`/`traverse` execution, and correct hit results
-(instance/primitive/t) were validated with a standalone C++ smoke test. No
-LC-side bug blocks the pipeline; the earlier SIGSEGV was a test-program error
-(build commands were never queued on the stream).
+**Implemented and verified on Metal (MetalRT).** The full hardware ray
+tracing pipeline is live in Feather:
+
+- `GpuMesh` / `GpuAccel` / `ReadOnlyAccel` + `GPU.CreateMesh` /
+  `GPU.CreateAccel` (managed API).
+- `Ray` / `SurfaceHit` GPU structs; `Ray` supports both the four-argument
+  constructor and the two-argument form `new Ray(origin, direction)` which
+  defaults to the `[0, +inf)` range.
+- `TraceClosest` lowers through FEIR -> XIR -> LC `accel_trace_closest`
+  (MetalRT), with correct closest-hit semantics (verified against a
+  two-triangle scene in both traversal directions).
+- RayTracing sample: Cornell-box hardware path (`-- hw`, 1024x1024 in ~4 s)
+  and the software path tracer (both PASS the image-variation proof).
+- Integration tests: `RayTracingHardwareTests` (3 tests).
+
+Two Feather bugs were found and fixed along the way: the accel vertex count
+unit mismatch (floats vs float3) and the `float3` 16-byte alignment mismatch
+when repacking packed vertex data. One LC bug was fixed upstream
+(`xir2ast` conditional-branch merge detection inside loops with backedges,
+commit `c50f71ca9` on `perf/linearize-xir-analyses`).
+
+Remaining known limitation: kernels whose loop bodies contain conditional
+`break`s cannot be restructured by the pinned LC `restructure_cfg` pass
+(see `xir-reverse-loop-autodiff-plan.md`); the samples avoid `break` in
+favor of bound termination.
 
 ## Goal
 
