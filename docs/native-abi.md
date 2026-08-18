@@ -79,7 +79,7 @@ The native queue ABI exposes completion of one EasyGPU submission rather than ma
 | `fe_queue_memory_barrier` | Records `BUFFER`, `TEXTURE`, `UNIFORM`, or combined dependency flags. |
 | `fe_buffer_copy` | Records a bounds-checked GPU buffer copy and updates Feather's host/device shadow state. |
 
-Fence handles are single-owner objects. Querying or waiting on a destroyed/unknown handle returns `FE_ERROR_INVALID_HANDLE`, including a query that races with successful destruction. Destroying a fence does not wait, but managed `GpuFence.Dispose` deliberately waits so its retained SafeHandle leases can be released safely. Native fence queries and waits copy the registry entry and do not hold the global resource-registry lock while blocking on a submission.
+Fence handles are single-owner objects. Querying or waiting on a destroyed/unknown handle returns `FE_ERROR_INVALID_HANDLE`, including a query that races with successful destruction. Destroying a fence does not wait, but managed `GpuFence.Dispose` deliberately waits so its retained SafeHandle leases can be released safely. Native fence queries, waits, and destruction copy the registry entry and do not hold the global resource-registry lock while waiting for either the fence-local lock or the backend.
 
 ## Compute Dispatch
 

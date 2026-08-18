@@ -91,6 +91,71 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void QueueSubmitsMultipleCommandListsBehindOneFence()
+    {
+        using var source = GPU.CreateBuffer<float>([2, 4, 6, 8]);
+        using var intermediate = GPU.CreateBuffer<float>(4);
+        using var destination = GPU.CreateBuffer<float>(4);
+        using var first = GPU.Queue.CreateCommandList();
+        first.CopyBuffer(source, intermediate);
+        first.MemoryBarrier(GpuMemoryBarrier.Buffer);
+        first.Close();
+        using var second = GPU.Queue.CreateCommandList();
+        second.CopyBuffer(intermediate, destination);
+        second.Close();
+
+        using var fence = GPU.Queue.Submit(new[] { first, second });
+        fence.Wait();
+
+        Assert.True(fence.IsCompleted);
+        Assert.Equal([2, 4, 6, 8], destination.ToArray());
+    }
+
+    [Fact]
+    public void QueueCanSignalWithoutACommandList()
+    {
+        using var signal = GPU.Queue.Signal();
+        signal.Wait();
+        Assert.True(signal.IsCompleted);
+
+        using var emptyBatch = GPU.Queue.Submit(Array.Empty<GpuCommandList>());
+        emptyBatch.Wait();
+        Assert.True(emptyBatch.IsCompleted);
+    }
+
+    [Fact]
+    public void QueueSignalRetainsResourcesFromPriorImmediateWork()
+    {
+        var source = GPU.CreateBuffer<float>([5, 10, 15, 20]);
+        using var destination = GPU.CreateBuffer<float>(4);
+        GpuKernel.Dispatch(
+            GPU.Context,
+            new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()),
+            new GpuDispatchSize(4, 1, 1),
+            wait: false);
+
+        using var signal = GPU.Queue.Signal();
+        source.Dispose();
+        signal.Wait();
+
+        Assert.Equal([5, 10, 15, 20], destination.ToArray());
+    }
+
+    [Fact]
+    public void BatchSubmissionValidatesEveryListBeforeExecutingCommands()
+    {
+        using var source = GPU.CreateBuffer<float>([1, 3, 5, 7]);
+        using var destination = GPU.CreateBuffer<float>(4);
+        using var closed = GPU.Queue.CreateCommandList();
+        closed.CopyBuffer(source, destination);
+        closed.Close();
+        using var open = GPU.Queue.CreateCommandList();
+
+        Assert.Throws<InvalidOperationException>(() => GPU.Queue.Submit(new[] { closed, open }));
+        Assert.Equal([0, 0, 0, 0], destination.ToArray());
+    }
+
+    [Fact]
     public async Task FenceSupportsCancelableAsyncWait()
     {
         using var commands = GPU.Queue.CreateCommandList();

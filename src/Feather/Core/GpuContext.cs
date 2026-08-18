@@ -172,6 +172,15 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    internal void TransferSubmittedWorkTo(List<IDisposable> destination)
+    {
+        lock (gate)
+        {
+            destination.AddRange(pendingSubmissions);
+            pendingSubmissions.Clear();
+        }
+    }
+
     internal void CompleteSubmittedWork()
     {
         lock (gate)

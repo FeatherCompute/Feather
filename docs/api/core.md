@@ -80,6 +80,15 @@ await using var fence = GPU.Queue.Submit(commands);
 await fence.WaitAsync();
 ```
 
+Queue submission APIs are:
+
+| API | Semantics |
+| --- | --- |
+| `Submit(commandList)` | Submits one closed list and returns its completion fence. |
+| `Submit(commandLists)` | Validates and snapshots every closed list before atomically replaying them in order behind one fence. An empty list is valid. |
+| `Signal()` | Inserts an empty queue-ordered completion point after work already recorded on the queue. |
+| `WaitIdle()` | Waits for all outstanding work; prefer a fence for local dependencies. |
+
 Command lists record these command families:
 
 | API | Recorded operation |
@@ -93,7 +102,9 @@ Command lists record these command families:
 | `Close()` | Ends recording; idempotent. |
 | `Reset()` | Clears commands and resumes recording. |
 
-`GpuQueue.Submit` snapshots the closed list, executes it as one ordered managed queue operation, and returns a fence for that exact native submission. Other command-list submissions, immediate dispatch/draw calls, and managed buffer/texture transfers cannot interleave its replay. Compute bindings, copy buffers, graphics pipelines, vertex/index buffers, shader resources, and render targets are retained by the fence until completion. Resetting or disposing the command list after `Submit` does not change an in-flight submission.
+`GpuQueue.Submit` snapshots every closed list before executing any command, replays the snapshot as one ordered managed queue operation, and returns a fence for that exact native submission. Other command-list submissions, immediate dispatch/draw calls, and managed buffer/texture transfers cannot interleave its replay. Compute bindings, copy buffers, graphics pipelines, vertex/index buffers, shader resources, and render targets are retained by the fence until completion. Resetting or disposing a command list after `Submit` does not change an in-flight submission.
+
+The next submitted fence also adopts resource leases from earlier immediate non-waiting dispatches or draws on the same context. Waiting that fence therefore both proves queue completion and releases the resources retained by all work ordered before it; `Signal()` is the explicit way to obtain such a fence when no command list needs to be replayed.
 
 `GpuFence` provides:
 

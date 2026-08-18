@@ -91,6 +91,42 @@ public class NativeContractTests
     }
 
     [Fact]
+    public async Task NativeFenceWaitAndDestroyCanRaceSafely()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
+            for (var iteration = 0; iteration < 32; ++iteration)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(context, out var fence));
+                using (fence)
+                {
+                    var rawFence = fence.DangerousGetHandle();
+                    var waitTask = Task.Run(() =>
+                    {
+                        var result = NativeMethods.fe_fence_wait(fence, ulong.MaxValue, out var completed);
+                        return (result, completed);
+                    });
+                    var destroyTask = Task.Run(() => NativeMethods.fe_fence_destroy_raw(rawFence));
+
+                    var wait = await waitTask.WaitAsync(TimeSpan.FromSeconds(30));
+                    var destroy = await destroyTask.WaitAsync(TimeSpan.FromSeconds(30));
+                    Assert.Equal(FeResult.Ok, destroy);
+                    fence.SetHandleAsInvalid();
+                    Assert.True(
+                        wait.result is FeResult.Ok or FeResult.ErrorInvalidHandle,
+                        $"Unexpected wait result while racing fence destruction: {wait.result}");
+                    if (wait.result == FeResult.Ok)
+                    {
+                        Assert.True(wait.completed);
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void NativeQueueRejectsUnknownBarrierFlags()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));

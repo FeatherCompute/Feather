@@ -201,7 +201,7 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 - `GPU.Dispatch` and the one-shot `GpuKernel.Dispatch` overload use the context-owned kernel cache. Disposing the context releases every cached kernel.
 - `GPU.Compile<TKernel>()` moves ordinary backend shader and pipeline compilation out of first dispatch.
 - AD kernels specialize on the first backward dispatch for a logical shape and resource layout. Matching later dispatches reuse the backward pipeline, gradient buffers, and adjoint workspace.
-- Record compute, buffer-copy, explicit-barrier, and graphics commands in a `GpuCommandList`. Call `Close()`, submit through `GPU.Queue`, and wait on the returned per-submission `GpuFence`. Closed lists are reusable; `Reset()` clears them for re-recording. Bound native resources remain retained until that fence completes.
+- Record compute, buffer-copy, explicit-barrier, and graphics commands in a `GpuCommandList`. Call `Close()`, submit one or more lists through `GPU.Queue`, and wait on the returned per-submission `GpuFence`. Closed lists are reusable; `Reset()` clears them for re-recording. Bound native resources remain retained until that fence completes.
 - Shader-only marker APIs throw when called on the CPU.
 - Unsupported statements/calls produce generator diagnostics before dispatch.
 

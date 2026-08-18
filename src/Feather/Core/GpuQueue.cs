@@ -546,15 +546,46 @@ public sealed class GpuQueue
         return new GpuCommandList(context);
     }
 
+    /// <summary>
+    /// Inserts a completion point after all work currently recorded on this queue.
+    /// </summary>
+    public GpuFence Signal()
+        => SubmitSnapshots([]);
+
+    /// <summary>
+    /// Submits one closed command list and returns its queue-ordered completion fence.
+    /// </summary>
     public GpuFence Submit(GpuCommandList commandList)
+        => SubmitSnapshots([Snapshot(commandList, nameof(commandList))]);
+
+    /// <summary>
+    /// Atomically replays zero or more closed command lists in order and returns one completion fence.
+    /// </summary>
+    public GpuFence Submit(IReadOnlyList<GpuCommandList> commandLists)
     {
-        ArgumentNullException.ThrowIfNull(commandList);
+        ArgumentNullException.ThrowIfNull(commandLists);
+        var snapshots = new GpuCommandList.IRecordedGpuCommand[commandLists.Count][];
+        for (var i = 0; i < commandLists.Count; ++i)
+        {
+            var commandList = commandLists[i]
+                ?? throw new ArgumentException($"Command list at index {i} is null.", nameof(commandLists));
+            snapshots[i] = Snapshot(commandList, nameof(commandLists));
+        }
+        return SubmitSnapshots(snapshots);
+    }
+
+    private GpuCommandList.IRecordedGpuCommand[] Snapshot(GpuCommandList commandList, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(commandList, parameterName);
         if (!ReferenceEquals(commandList.Context, context))
         {
-            throw new ArgumentException("The command list was created by a different GPU queue.", nameof(commandList));
+            throw new ArgumentException("The command list was created by a different GPU queue.", parameterName);
         }
+        return commandList.SnapshotForSubmission();
+    }
 
-        var commands = commandList.SnapshotForSubmission();
+    private GpuFence SubmitSnapshots(IReadOnlyList<GpuCommandList.IRecordedGpuCommand[]> snapshots)
+    {
         using var operation = context.EnterOperation();
         lock (context.QueueGate)
         {
@@ -562,13 +593,17 @@ public sealed class GpuQueue
             FeFenceHandle? nativeFence = null;
             try
             {
-                foreach (var command in commands)
+                foreach (var commands in snapshots)
                 {
-                    command.Execute(context, leases);
+                    foreach (var command in commands)
+                    {
+                        command.Execute(context, leases);
+                    }
                 }
 
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(context.Handle, out var submittedFence));
                 nativeFence = submittedFence;
+                context.TransferSubmittedWorkTo(leases);
                 return new GpuFence(submittedFence, leases);
             }
             catch
@@ -576,6 +611,7 @@ public sealed class GpuQueue
                 try
                 {
                     NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(context.Handle));
+                    context.CompleteSubmittedWork();
                 }
                 finally
                 {
@@ -757,6 +793,10 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
         {
             await WaitAsync(cancellationToken).ConfigureAwait(false);
             return true;
+        }
+        if (timeout == TimeSpan.Zero)
+        {
+            return IsCompleted;
         }
 
         var completion = GetOrCreateAsyncCompletion();

@@ -11207,25 +11207,35 @@ FE_API FeResult fe_fence_destroy(FeFenceHandle fence) {
             return ok();
         }
 
-        std::lock_guard<std::mutex> registry_lock(g_mutex);
-        const auto it = g_fences.find(fence);
-        if (it == g_fences.end()) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
         }
 
-        const auto& state = it->second;
-        std::lock_guard<std::mutex> fence_lock(state->mutex);
-        if (state->released) {
-            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        {
+            std::lock_guard<std::mutex> fence_lock(state->mutex);
+            if (state->released) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+            }
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+            auto* backend = GPU::Runtime::Context::GetBackend();
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+            }
+            backend->ReleaseSubmission(state->submission);
+            state->released = true;
         }
-        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
-        auto* backend = GPU::Runtime::Context::GetBackend();
-        if (backend == nullptr) {
-            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        const auto it = g_fences.find(fence);
+        if (it != g_fences.end() && it->second == state) {
+            g_fences.erase(it);
         }
-        backend->ReleaseSubmission(state->submission);
-        state->released = true;
-        g_fences.erase(it);
         return ok();
     });
 }
