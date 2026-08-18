@@ -22,9 +22,14 @@ Reports and emitted shader sources are written under `artifacts/optimization-ben
 
 - FEIR-to-GLSL source lowering median from repeated `ShaderInspection.GetGLSL<TKernel>()` calls.
 - Cold Vulkan inspection with a forced persistent-cache miss.
-- Warm Vulkan inspection from a validated SPIR-V disk-cache hit.
+- Warm Vulkan inspection from the backend's metadata-checked SPIR-V memory cache.
+- Kernel compile time for `CreateShader` plus `CreatePipeline`, split into shader and pipeline stages.
+- Exact-kernel reuse on the same backend and reuse from a new backend after flushing the persistent SPIR-V and Vulkan pipeline caches.
+- Separate memory, disk, and persistent pipeline-cache hit counters.
 - Optimized GLSL line and byte counts after SPIRV-Cross.
 - Steady-state dispatch median, p95, mean, min, and max.
+
+The cold kernel measurement removes EasyGPU's shader and pipeline cache files before initializing the measured backend. Backend and device initialization are outside the timed region. Driver and operating-system compiler caches are outside EasyGPU's control and are not cleared, so results should only be compared within the same report and environment.
 
 The runner uses Vulkan timestamp queries when the device exposes them. Otherwise it batches several dispatches behind one `Finish()` and reports synchronized host time per dispatch. The report records which timing path was used.
 

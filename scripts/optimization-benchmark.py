@@ -97,8 +97,8 @@ def render_report(report: dict[str, Any]) -> str:
         "",
         "## Production Summary",
         "",
-        "| Scenario | Feather source lowering ms | Feather Ultra bytes | Handwritten Ultra bytes | Feather code reduction | Feather Ultra ms | Handwritten Ultra ms | Runtime delta | Ultra cold/warm cache speedup |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Scenario | Source lowering ms | Feather Ultra bytes | Code reduction | Cold kernel compile ms | Same-backend reuse ms | Persistent reuse ms | Persistent speedup | Dispatch ms | Runtime delta |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     source_by_name = {item["Name"]: item for item in report["sourceLowering"]}
     for scenario in scenarios:
@@ -107,12 +107,14 @@ def render_report(report: dict[str, Any]) -> str:
         source = source_by_name[scenario]
         code_reduction = (1.0 - feather["optimizedGlslBytes"] / handwritten["optimizedGlslBytes"]) * 100.0
         runtime_delta = percentage_delta(feather["dispatchMedianMs"], handwritten["dispatchMedianMs"])
-        cache_speedup = feather["coldInspectionMedianMs"] / feather["warmInspectionMedianMs"]
+        cache_speedup = feather["coldKernelCompileMedianMs"] / feather["persistentKernelCompileMedianMs"]
         lines.append(
             f"| `{scenario}` | {source['SourceLoweringMedianMs']:.3f} | "
-            f"{feather['optimizedGlslBytes']} | {handwritten['optimizedGlslBytes']} | "
-            f"{code_reduction:.2f}% | {feather['dispatchMedianMs']:.4f} | "
-            f"{handwritten['dispatchMedianMs']:.4f} | {runtime_delta:+.2f}% | {cache_speedup:.2f}x |"
+            f"{feather['optimizedGlslBytes']} | {code_reduction:.2f}% | "
+            f"{feather['coldKernelCompileMedianMs']:.3f} | "
+            f"{feather['sameBackendKernelCompileMedianMs']:.3f} | "
+            f"{feather['persistentKernelCompileMedianMs']:.3f} | {cache_speedup:.2f}x | "
+            f"{feather['dispatchMedianMs']:.4f} | {runtime_delta:+.2f}% |"
         )
 
     lines.extend([
@@ -121,7 +123,7 @@ def render_report(report: dict[str, Any]) -> str:
         "",
         "The same production Feather GLSL is used for every backend level so this table isolates SPIR-V optimization.",
         "",
-        "| Scenario | Level | Optimized bytes | Cold inspection ms | Optimizer ms | Warm cache ms | Dispatch ms | P95 ms | Speedup vs None |",
+        "| Scenario | Level | Optimized bytes | Frontend ms | Optimizer ms | Cold kernel ms | Persistent kernel ms | Dispatch ms | Speedup vs None |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for scenario in scenarios:
@@ -131,9 +133,33 @@ def render_report(report: dict[str, Any]) -> str:
             speedup = baseline / item["dispatchMedianMs"] if item["dispatchMedianMs"] else 0.0
             lines.append(
                 f"| `{scenario}` | `{level}` | {item['optimizedGlslBytes']} | "
-                f"{item['coldInspectionMedianMs']:.3f} | {item['optimizerMedianMs']:.3f} | "
-                f"{item['warmInspectionMedianMs']:.3f} | {item['dispatchMedianMs']:.4f} | "
-                f"{item['dispatchP95Ms']:.4f} | {speedup:.3f}x |"
+                f"{item['frontendMedianMs']:.3f} | {item['optimizerMedianMs']:.3f} | "
+                f"{item['coldKernelCompileMedianMs']:.3f} | "
+                f"{item['persistentKernelCompileMedianMs']:.3f} | "
+                f"{item['dispatchMedianMs']:.4f} | {speedup:.3f}x |"
+            )
+
+    lines.extend([
+        "",
+        "## Ultra Kernel Compile Breakdown",
+        "",
+        "Shader creation includes GLSL frontend, SPIR-V optimization/cache lookup, and VkShaderModule creation. Pipeline creation includes descriptor/pipeline layouts and vkCreateComputePipelines.",
+        "",
+        "| Scenario | Cache state | Total ms | Shader ms | Pipeline ms | Persistent cache hits |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ])
+    for scenario in scenarios:
+        item = by_key[(scenario, "Feather", "Ultra")]
+        for label, prefix in (
+            ("Cold", "cold"),
+            ("Same backend", "sameBackend"),
+            ("New backend, persistent cache", "persistent"),
+        ):
+            hits = item["persistentPipelineCacheHits"] if prefix == "persistent" else 0
+            lines.append(
+                f"| `{scenario}` | {label} | {item[f'{prefix}KernelCompileMedianMs']:.3f} | "
+                f"{item[f'{prefix}ShaderCreateMedianMs']:.3f} | "
+                f"{item[f'{prefix}PipelineCreateMedianMs']:.3f} | {hits} |"
             )
 
     lines.extend([
@@ -156,7 +182,10 @@ def render_report(report: dict[str, Any]) -> str:
         "## Interpretation",
         "",
         "- Cold inspection includes glslang, SPIRV-Tools, cache write, and SPIRV-Cross. Optimized levels intentionally spend more cold-start CPU time.",
-        "- Warm inspection reads and validates cached SPIR-V, then runs SPIRV-Cross. It demonstrates persistent shader-cache startup behavior, not GPU execution.",
+        "- Warm inspection hits the backend's metadata-checked SPIR-V memory cache, then runs SPIRV-Cross. It is an inspection-path measurement, not GPU execution.",
+        "- Cold kernel compile starts with empty EasyGPU shader and Vulkan pipeline caches. Backend/device initialization is excluded; driver and OS compiler caches are outside EasyGPU's control and are not cleared.",
+        "- Same-backend reuse immediately recreates the identical shader and pipeline against the same in-memory VkPipelineCache.",
+        "- Persistent reuse initializes a new backend after flushing the first backend's content-addressed shader cache and Vulkan pipeline cache to disk.",
         "- FEIR-to-GLSL source lowering is measured separately. It does not include Roslyn/C# build time.",
         "- Similar dispatch medians across levels mean the active Vulkan driver normalized the variants. Code size and cache gains remain real, but this run does not support claiming a steady-state GPU speedup.",
         "- Compare results only within the same report. Power state, driver, GPU, and timestamp-query support materially affect sub-millisecond kernels.",

@@ -60,10 +60,24 @@ struct CompilationMeasurement {
     double frontend_median_ms = 0.0;
     double optimizer_median_ms = 0.0;
     double warm_inspection_median_ms = 0.0;
-    uint64_t cache_hits = 0;
-    uint64_t cache_misses = 0;
+    uint64_t memory_cache_hits = 0;
+    uint64_t disk_cache_hits = 0;
+    uint64_t disk_cache_misses = 0;
     size_t optimized_glsl_bytes = 0;
     size_t optimized_glsl_lines = 0;
+};
+
+struct KernelCompileSample {
+    double total_ms = 0.0;
+    double shader_ms = 0.0;
+    double pipeline_ms = 0.0;
+};
+
+struct KernelCompileMeasurement {
+    KernelCompileSample cold;
+    KernelCompileSample same_backend;
+    KernelCompileSample persistent;
+    uint64_t persistent_pipeline_cache_hits = 0;
 };
 
 struct BenchmarkResult {
@@ -73,7 +87,8 @@ struct BenchmarkResult {
     size_t source_bytes = 0;
     size_t source_lines = 0;
     CompilationMeasurement compilation;
-    double warm_pipeline_setup_ms = 0.0;
+    KernelCompileMeasurement kernel_compile;
+    double execution_pipeline_setup_ms = 0.0;
     double dispatch_median_ms = 0.0;
     double dispatch_p95_ms = 0.0;
     double dispatch_mean_ms = 0.0;
@@ -225,7 +240,8 @@ CompilationMeasurement measure_compilation(
     std::vector<double> optimizer;
     std::vector<double> warm;
     std::string optimized_glsl;
-    uint64_t hits = 0;
+    uint64_t memory_hits = 0;
+    uint64_t disk_hits = 0;
     uint64_t misses = 0;
 
     GPU::Backend::ShaderDesc descriptor;
@@ -247,7 +263,8 @@ CompilationMeasurement measure_compilation(
         cold.push_back(milliseconds(elapsed));
         frontend.push_back(stats.lastFrontendMilliseconds);
         optimizer.push_back(stats.lastOptimizationMilliseconds);
-        hits += stats.diskCacheHits;
+        memory_hits += stats.memoryCacheHits;
+        disk_hits += stats.diskCacheHits;
         misses += stats.diskCacheMisses;
     }
 
@@ -257,7 +274,8 @@ CompilationMeasurement measure_compilation(
         optimized_glsl = backend.GetOptimizedGLSL(descriptor);
         warm.push_back(milliseconds(Clock::now() - start));
         const auto stats = backend.GetShaderCompilationStats();
-        hits += stats.diskCacheHits;
+        memory_hits += stats.memoryCacheHits;
+        disk_hits += stats.diskCacheHits;
         misses += stats.diskCacheMisses;
     }
 
@@ -266,10 +284,127 @@ CompilationMeasurement measure_compilation(
         median(std::move(frontend)),
         median(std::move(optimizer)),
         median(std::move(warm)),
-        hits,
+        memory_hits,
+        disk_hits,
         misses,
         optimized_glsl.size(),
         line_count(optimized_glsl),
+    };
+}
+
+struct TimedPipeline {
+    ShaderHandle shader = GPU::Backend::INVALID_SHADER_HANDLE;
+    PipelineHandle pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+    KernelCompileSample timing;
+};
+
+using BackendOwner = std::unique_ptr<Backend, void (*)(Backend*)>;
+
+BackendOwner create_vulkan_backend() {
+    BackendOwner backend(
+        GPU::Backend::CreateBackend(GPU::Backend::BackendType::Vulkan),
+        GPU::Backend::DestroyBackend);
+    backend->Initialize();
+    return backend;
+}
+
+TimedPipeline compile_kernel(
+    Backend& backend,
+    const SourceInput& input,
+    ShaderOptimizationLevel level) {
+    GPU::Backend::ShaderDesc shader_descriptor;
+    shader_descriptor.type = GPU::Backend::ShaderType::Compute;
+    shader_descriptor.sourceCode = input.source;
+    shader_descriptor.entryPoint = "main";
+    shader_descriptor.optimizationLevel = level;
+
+    const auto total_start = Clock::now();
+    const auto shader_start = Clock::now();
+    const ShaderHandle shader = backend.CreateShader(shader_descriptor);
+    const double shader_ms = milliseconds(Clock::now() - shader_start);
+    if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
+        throw std::runtime_error("Shader creation failed for " + input.scenario.name + "/" + input.authoring);
+    }
+
+    GPU::Backend::PipelineDesc pipeline_descriptor;
+    pipeline_descriptor.computeShader = shader;
+    pipeline_descriptor.workGroupSizeX = kWorkgroupSize;
+    pipeline_descriptor.workGroupSizeY = 1;
+    pipeline_descriptor.workGroupSizeZ = 1;
+    pipeline_descriptor.resources = {
+        {0, BindingType::Buffer, GPU::Backend::PixelFormat::RGBA8, true},
+        {1, BindingType::Buffer, GPU::Backend::PixelFormat::RGBA8, false},
+    };
+
+    const auto pipeline_start = Clock::now();
+    const PipelineHandle pipeline = backend.CreatePipeline(pipeline_descriptor);
+    const double pipeline_ms = milliseconds(Clock::now() - pipeline_start);
+    const double total_ms = milliseconds(Clock::now() - total_start);
+    if (pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
+        backend.DestroyShader(shader);
+        throw std::runtime_error("Pipeline creation failed for " + input.scenario.name + "/" + input.authoring);
+    }
+    return {shader, pipeline, {total_ms, shader_ms, pipeline_ms}};
+}
+
+void destroy_compiled_pipeline(Backend& backend, const TimedPipeline& compiled) {
+    backend.DestroyPipeline(compiled.pipeline);
+    backend.DestroyShader(compiled.shader);
+}
+
+KernelCompileMeasurement measure_kernel_compile(
+    const SourceInput& input,
+    ShaderOptimizationLevel level,
+    const std::filesystem::path& cache_directory,
+    int sample_count) {
+    std::vector<double> cold_total;
+    std::vector<double> cold_shader;
+    std::vector<double> cold_pipeline;
+    std::vector<double> same_backend_total;
+    std::vector<double> same_backend_shader;
+    std::vector<double> same_backend_pipeline;
+    std::vector<double> persistent_total;
+    std::vector<double> persistent_shader;
+    std::vector<double> persistent_pipeline;
+    uint64_t persistent_pipeline_cache_hits = 0;
+
+    for (int sample = 0; sample < sample_count; ++sample) {
+        std::filesystem::remove_all(cache_directory);
+
+        auto cold_backend = create_vulkan_backend();
+        const auto cold = compile_kernel(*cold_backend, input, level);
+        cold_total.push_back(cold.timing.total_ms);
+        cold_shader.push_back(cold.timing.shader_ms);
+        cold_pipeline.push_back(cold.timing.pipeline_ms);
+        destroy_compiled_pipeline(*cold_backend, cold);
+
+        const auto same_backend = compile_kernel(*cold_backend, input, level);
+        same_backend_total.push_back(same_backend.timing.total_ms);
+        same_backend_shader.push_back(same_backend.timing.shader_ms);
+        same_backend_pipeline.push_back(same_backend.timing.pipeline_ms);
+        destroy_compiled_pipeline(*cold_backend, same_backend);
+
+        cold_backend->FlushPipelineCache();
+        cold_backend.reset();
+
+        auto persistent_backend = create_vulkan_backend();
+        if (persistent_backend->GetPipelineCacheStats().lastDiskCacheHit) {
+            ++persistent_pipeline_cache_hits;
+        }
+        const auto persistent = compile_kernel(*persistent_backend, input, level);
+        persistent_total.push_back(persistent.timing.total_ms);
+        persistent_shader.push_back(persistent.timing.shader_ms);
+        persistent_pipeline.push_back(persistent.timing.pipeline_ms);
+        destroy_compiled_pipeline(*persistent_backend, persistent);
+    }
+
+    return {
+        {median(std::move(cold_total)), median(std::move(cold_shader)), median(std::move(cold_pipeline))},
+        {median(std::move(same_backend_total)), median(std::move(same_backend_shader)),
+         median(std::move(same_backend_pipeline))},
+        {median(std::move(persistent_total)), median(std::move(persistent_shader)),
+         median(std::move(persistent_pipeline))},
+        persistent_pipeline_cache_hits,
     };
 }
 
@@ -280,10 +415,11 @@ public:
         const SourceInput& source_input,
         const LevelInfo& level_info,
         std::shared_ptr<Buffer<float>> input_buffer,
-        CompilationMeasurement compilation_measurement)
+        CompilationMeasurement compilation_measurement,
+        KernelCompileMeasurement kernel_compile_measurement)
         : backend_(&backend), source_(&source_input), level_(&level_info), input_(std::move(input_buffer)),
           output_(std::make_unique<Buffer<float>>(source_input.scenario.element_count, BufferMode::Write)),
-          compilation_(std::move(compilation_measurement)) {
+          compilation_(std::move(compilation_measurement)), kernel_compile_(std::move(kernel_compile_measurement)) {
         GPU::Backend::ShaderDesc shader_descriptor;
         shader_descriptor.type = GPU::Backend::ShaderType::Compute;
         shader_descriptor.sourceCode = source_input.source;
@@ -395,6 +531,7 @@ public:
             source_->source.size(),
             line_count(source_->source),
             compilation_,
+            kernel_compile_,
             setup_ms_,
             median(dispatch_samples_ms_),
             percentile(dispatch_samples_ms_, 0.95),
@@ -435,6 +572,7 @@ private:
     std::unique_ptr<Buffer<float>> output_;
     PipelineHandle pipeline_ = GPU::Backend::INVALID_PIPELINE_HANDLE;
     CompilationMeasurement compilation_;
+    KernelCompileMeasurement kernel_compile_;
     double setup_ms_ = 0.0;
     bool used_gpu_timestamps_ = false;
     std::vector<double> dispatch_samples_ms_;
@@ -496,9 +634,27 @@ void write_json(
         output << "      \"frontendMedianMs\": " << compile.frontend_median_ms << ",\n";
         output << "      \"optimizerMedianMs\": " << compile.optimizer_median_ms << ",\n";
         output << "      \"warmInspectionMedianMs\": " << compile.warm_inspection_median_ms << ",\n";
-        output << "      \"cacheHits\": " << compile.cache_hits << ",\n";
-        output << "      \"cacheMisses\": " << compile.cache_misses << ",\n";
-        output << "      \"warmPipelineSetupMs\": " << result.warm_pipeline_setup_ms << ",\n";
+        output << "      \"memoryCacheHits\": " << compile.memory_cache_hits << ",\n";
+        output << "      \"diskCacheHits\": " << compile.disk_cache_hits << ",\n";
+        output << "      \"diskCacheMisses\": " << compile.disk_cache_misses << ",\n";
+        output << "      \"coldKernelCompileMedianMs\": " << result.kernel_compile.cold.total_ms << ",\n";
+        output << "      \"coldShaderCreateMedianMs\": " << result.kernel_compile.cold.shader_ms << ",\n";
+        output << "      \"coldPipelineCreateMedianMs\": " << result.kernel_compile.cold.pipeline_ms << ",\n";
+        output << "      \"sameBackendKernelCompileMedianMs\": "
+               << result.kernel_compile.same_backend.total_ms << ",\n";
+        output << "      \"sameBackendShaderCreateMedianMs\": "
+               << result.kernel_compile.same_backend.shader_ms << ",\n";
+        output << "      \"sameBackendPipelineCreateMedianMs\": "
+               << result.kernel_compile.same_backend.pipeline_ms << ",\n";
+        output << "      \"persistentKernelCompileMedianMs\": "
+               << result.kernel_compile.persistent.total_ms << ",\n";
+        output << "      \"persistentShaderCreateMedianMs\": "
+               << result.kernel_compile.persistent.shader_ms << ",\n";
+        output << "      \"persistentPipelineCreateMedianMs\": "
+               << result.kernel_compile.persistent.pipeline_ms << ",\n";
+        output << "      \"persistentPipelineCacheHits\": "
+               << result.kernel_compile.persistent_pipeline_cache_hits << ",\n";
+        output << "      \"executionPipelineSetupMs\": " << result.execution_pipeline_setup_ms << ",\n";
         output << "      \"dispatchMedianMs\": " << result.dispatch_median_ms << ",\n";
         output << "      \"dispatchP95Ms\": " << result.dispatch_p95_ms << ",\n";
         output << "      \"dispatchMeanMs\": " << result.dispatch_mean_ms << ",\n";
@@ -555,8 +711,11 @@ int main(int argc, char** argv) {
             for (const auto& level : kLevels) {
                 auto compilation = measure_compilation(
                     *backend, source, level.value, cache_directory, options.compile_samples);
+                auto kernel_compile = measure_kernel_compile(
+                    source, level.value, cache_directory, options.compile_samples);
                 cases.push_back(std::make_unique<ExecutableCase>(
-                    *backend, source, level, input_buffers[input_index], std::move(compilation)));
+                    *backend, source, level, input_buffers[input_index], std::move(compilation),
+                    std::move(kernel_compile)));
             }
         }
 
