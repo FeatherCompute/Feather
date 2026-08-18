@@ -69,6 +69,10 @@ if(WIN32)
 endif()
 
 option(FEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE "Build the native AD coverage probe executable" OFF)
+option(FEATHER_ENABLE_COVERAGE_FLUSH "Enable explicit LLVM profile snapshots for native coverage test hosts" OFF)
+if(FEATHER_ENABLE_COVERAGE_FLUSH)
+    target_compile_definitions(feather PRIVATE FEATHER_ENABLE_COVERAGE_FLUSH=1)
+endif()
 if(FEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE)
     add_executable(feather_ad_native_coverage_probe
         ad_native_coverage_probe.cpp

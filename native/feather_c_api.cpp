@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <variant>
 #include <type_traits>
+#include <tuple>
 #include <vector>
 
 #include <AD/ADKernel.h>
@@ -46,9 +47,40 @@
 #include <Window/WindowEvents.h>
 #endif
 
+#if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_set_filename(const char* filename);
+#endif
+
 namespace {
 
 void trace_graphics_step(const char* step);
+
+#if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
+void write_coverage_profile_snapshot() {
+    static std::mutex profile_mutex;
+    static uint64_t sequence = 0;
+    std::lock_guard<std::mutex> lock(profile_mutex);
+
+    const auto* pattern = std::getenv("FEATHER_COVERAGE_PROFILE_PATTERN");
+    if (pattern == nullptr || *pattern == '\0') {
+        return;
+    }
+
+    auto filename = std::string(pattern);
+    const auto token = filename.find("%s");
+    if (token != std::string::npos) {
+        filename.replace(token, 2, std::to_string(sequence++));
+    }
+    __llvm_profile_set_filename(filename.c_str());
+    __llvm_profile_write_file();
+
+    const auto* sink = std::getenv("FEATHER_COVERAGE_PROFILE_SINK");
+    if (sink != nullptr && *sink != '\0') {
+        __llvm_profile_set_filename(sink);
+    }
+}
+#endif
 
 #ifndef FEATHER_SHADER_OPTIMIZATION_LEVEL
 #define FEATHER_SHADER_OPTIMIZATION_LEVEL GPU::Backend::ShaderOptimizationLevel::Ultra
@@ -178,6 +210,7 @@ constexpr uint32_t kWindowEventFocus = 8;
 
 struct BufferState {
     std::vector<unsigned char> bytes;
+    size_t byte_size = 0;
     uint32_t mode = 0;
     uint32_t stride = 0;
     GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
@@ -197,6 +230,7 @@ struct TextureState {
     uint32_t pixel_format = 0;
     uint32_t access = 0;
     std::vector<unsigned char> bytes;
+    size_t byte_size = 0;
     GPU::Backend::TextureHandle backend_texture = GPU::Backend::INVALID_TEXTURE_HANDLE;
     bool host_dirty = false;
     bool device_dirty = false;
@@ -206,6 +240,12 @@ struct TextureState {
 
 struct SamplerState {
     FeSamplerDesc desc{};
+};
+
+struct FenceState {
+    GPU::Backend::SubmissionHandle submission = GPU::Backend::INVALID_SUBMISSION_HANDLE;
+    std::mutex mutex;
+    bool released = false;
 };
 
 struct GraphicsPushConstantLayoutEntry {
@@ -253,6 +293,20 @@ struct ADGradientState {
     GPU::Backend::BufferHandle backend_buffer = GPU::Backend::INVALID_BUFFER_HANDLE;
 };
 
+struct ADKernelCache {
+    std::unique_ptr<GPU::Kernel::KernelBuildContext> context;
+    GPU::Backend::PipelineHandle pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+    uint32_t group_x = 0;
+    uint32_t group_y = 0;
+    uint32_t group_z = 0;
+    int32_t logical_x = 0;
+    int32_t logical_y = 0;
+    int32_t logical_z = 0;
+    int adj_pool_binding = -1;
+    std::vector<std::tuple<uint32_t, size_t, uint32_t>> buffer_layout;
+    std::vector<unsigned char> zero_scratch;
+};
+
 struct KernelState {
     std::vector<unsigned char> ir;
     std::vector<unsigned char> push_constants;
@@ -270,6 +324,8 @@ struct KernelState {
     std::vector<ADGradientState> ad_gradients;
     GPU::Backend::BufferHandle ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
     size_t ad_adj_pool_size = 0;
+    std::shared_ptr<ADKernelCache> ad_cache;
+    uint64_t compile_count = 0;
     FeDispatchPath last_dispatch_path = FE_DISPATCH_PATH_NONE;
 };
 
@@ -552,6 +608,7 @@ struct ProfilerStats {
 };
 
 std::mutex g_mutex;
+std::mutex g_backend_mutex;
 std::atomic<uint64_t> g_next_handle{100};
 std::atomic<bool> g_runtime_shutting_down{false};
 std::unordered_map<FeBufferHandle, BufferState> g_buffers;
@@ -560,6 +617,7 @@ std::unordered_map<FeSamplerHandle, SamplerState> g_samplers;
 std::unordered_map<FeKernelHandle, KernelState> g_kernels;
 std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
+std::unordered_map<FeFenceHandle, std::shared_ptr<FenceState>> g_fences;
 #if FEATHER_BUILD_WINDOW
 std::unordered_map<FeWindowHandle, WindowState> g_windows;
 std::unordered_map<FeTexturePresenterHandle, TexturePresenterState> g_texture_presenters;
@@ -711,6 +769,18 @@ void release_ad_gradient_buffers_with_backend(KernelState& kernel, GPU::Backend:
     kernel.ad_adj_pool_size = 0;
 }
 
+void release_ad_compiled_cache_with_backend(KernelState& kernel, GPU::Backend::Backend* backend) {
+    if (kernel.ad_cache == nullptr) {
+        return;
+    }
+    if (backend != nullptr && kernel.ad_cache->pipeline != GPU::Backend::INVALID_PIPELINE_HANDLE) {
+        backend->DestroyPipeline(kernel.ad_cache->pipeline);
+    }
+    kernel.ad_cache->pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+    kernel.ad_cache->context.reset();
+    kernel.ad_cache.reset();
+}
+
 void destroy_backend_resources_for_shutdown() {
     auto* backend = GPU::Runtime::Context::GetBackend();
     if (backend != nullptr) {
@@ -718,7 +788,16 @@ void destroy_backend_resources_for_shutdown() {
             backend->Finish();
         } catch (...) {
         }
+
+        for (auto& [handle, fence] : g_fences) {
+            (void)handle;
+            try {
+                backend->ReleaseSubmission(fence->submission);
+            } catch (...) {
+            }
+        }
     }
+    g_fences.clear();
 
 #if FEATHER_BUILD_WINDOW
     g_texture_presenters.clear();
@@ -740,8 +819,10 @@ void destroy_backend_resources_for_shutdown() {
     for (auto& [handle, kernel] : g_kernels) {
         (void)handle;
         try {
+            release_ad_compiled_cache_with_backend(kernel, backend);
             release_ad_gradient_buffers_with_backend(kernel, backend);
         } catch (...) {
+            release_ad_compiled_cache_with_backend(kernel, nullptr);
             release_ad_gradient_buffers_with_backend(kernel, nullptr);
         }
     }
@@ -784,6 +865,7 @@ void destroy_backend_resources_for_shutdown() {
 }
 
 void abandon_native_resources_for_process_exit() {
+    g_fences.clear();
 #if FEATHER_BUILD_WINDOW
     for (auto& [handle, presenter] : g_texture_presenters) {
         (void)handle;
@@ -819,6 +901,11 @@ void abandon_native_resources_for_process_exit() {
         kernel.ad_gradients.clear();
         kernel.ad_adj_pool = GPU::Backend::INVALID_BUFFER_HANDLE;
         kernel.ad_adj_pool_size = 0;
+        if (kernel.ad_cache != nullptr) {
+            kernel.ad_cache->pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+            kernel.ad_cache->context.reset();
+            kernel.ad_cache.reset();
+        }
     }
     g_kernels.clear();
 
@@ -960,6 +1047,19 @@ bool checked_add_size(size_t a, size_t b, size_t* result) {
 
     *result = a + b;
     return true;
+}
+
+bool checked_multiply_size(size_t a, size_t b, size_t* result) {
+    if (a != 0 && b > SIZE_MAX / a) {
+        return false;
+    }
+
+    *result = a * b;
+    return true;
+}
+
+bool range_fits(uint64_t offset, uint64_t length, uint64_t total) {
+    return offset <= total && length <= total - offset;
 }
 
 void adopt_typed_ir_module(const Feather::TypedIR::Module& source, ParsedIr* parsed) {
@@ -2649,6 +2749,11 @@ size_t ad_scalar_slot_count_for_type(const std::string& type_name) {
 void release_ad_gradient_buffers(KernelState& kernel) {
     GPU::Runtime::AutoInitContext();
     release_ad_gradient_buffers_with_backend(kernel, GPU::Runtime::Context::GetBackend());
+}
+
+void release_ad_compiled_cache(KernelState& kernel) {
+    GPU::Runtime::AutoInitContext();
+    release_ad_compiled_cache_with_backend(kernel, GPU::Runtime::Context::GetBackend());
 }
 
 void release_pending_ad_gradient_buffers(std::vector<ADGradientState>& gradients) {
@@ -4825,7 +4930,7 @@ uint32_t easygpu_texture_usage_flags(const TextureState& texture) {
 GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend) {
     if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
         GPU::Backend::BufferDesc desc;
-        desc.sizeInBytes = buffer.bytes.size();
+        desc.sizeInBytes = buffer.byte_size;
         desc.mode = easygpu_buffer_storage_mode(buffer.mode);
         desc.initialData = buffer.bytes.empty() ? nullptr : buffer.bytes.data();
         buffer.backend_buffer = backend.CreateBuffer(desc);
@@ -4835,24 +4940,34 @@ GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backe
 
         buffer.host_dirty = false;
         buffer.device_dirty = false;
-        return buffer.backend_buffer;
     }
 
-    if (buffer.host_dirty && !buffer.bytes.empty()) {
-        backend.UploadBuffer(buffer.backend_buffer, 0, buffer.bytes.size(), buffer.bytes.data());
+    if (buffer.host_dirty && buffer.bytes.size() == buffer.byte_size) {
+        backend.UploadBuffer(buffer.backend_buffer, 0, buffer.byte_size, buffer.bytes.data());
         buffer.host_dirty = false;
         buffer.device_dirty = false;
+    }
+
+    if (!buffer.bytes.empty() && !buffer.host_dirty) {
+        std::vector<unsigned char>().swap(buffer.bytes);
+        buffer.device_dirty = true;
     }
 
     return buffer.backend_buffer;
 }
 
 void download_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend) {
-    if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE || !buffer.device_dirty || buffer.bytes.empty()) {
+    if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
         return;
     }
-
-    backend.DownloadBuffer(buffer.backend_buffer, 0, buffer.bytes.size(), buffer.bytes.data());
+    const auto had_shadow = buffer.bytes.size() == buffer.byte_size;
+    if (!had_shadow) {
+        buffer.bytes.resize(buffer.byte_size);
+    }
+    if (!buffer.device_dirty && had_shadow) {
+        return;
+    }
+    backend.DownloadBuffer(buffer.backend_buffer, 0, buffer.byte_size, buffer.bytes.data());
     buffer.device_dirty = false;
 }
 
@@ -4883,10 +4998,14 @@ GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::B
             backend.GenerateMipmaps(texture.backend_texture);
             texture.mipmaps_dirty = false;
         }
+        if (!texture.bytes.empty() && !texture.host_dirty) {
+            std::vector<unsigned char>().swap(texture.bytes);
+            texture.device_dirty = true;
+        }
         return texture.backend_texture;
     }
 
-    if (texture.bytes.empty()) {
+    if (texture.byte_size == 0) {
         return GPU::Backend::INVALID_TEXTURE_HANDLE;
     }
 
@@ -4900,7 +5019,7 @@ GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::B
     desc.height = texture.height;
     desc.depth = texture.depth;
     desc.format = backend_format;
-    desc.initialData = texture.pixel_format == 100 ? nullptr : texture.bytes.data();
+    desc.initialData = texture.pixel_format == 100 || texture.bytes.empty() ? nullptr : texture.bytes.data();
     desc.mipLevels = texture.mip_levels;
     desc.usage = easygpu_texture_usage_flags(texture);
 
@@ -4921,11 +5040,23 @@ GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::B
         backend.GenerateMipmaps(texture.backend_texture);
         texture.mipmaps_dirty = false;
     }
+    if (!texture.bytes.empty()) {
+        std::vector<unsigned char>().swap(texture.bytes);
+        texture.device_dirty = true;
+    }
     return texture.backend_texture;
 }
 
 void download_easygpu_texture(TextureState& texture, GPU::Backend::Backend& backend) {
-    if (texture.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE || !texture.device_dirty || texture.bytes.empty()) {
+    if (texture.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
+        return;
+    }
+
+    const auto had_shadow = texture.bytes.size() == texture.byte_size;
+    if (!had_shadow) {
+        texture.bytes.resize(texture.byte_size);
+    }
+    if (!texture.device_dirty && had_shadow) {
         return;
     }
 
@@ -4940,6 +5071,43 @@ void download_easygpu_texture(TextureState& texture, GPU::Backend::Backend& back
         backend.DownloadTexture(texture.backend_texture, 0, 0, texture.width, texture.height, texture.bytes.data());
     }
     texture.device_dirty = false;
+}
+
+FeResult materialize_kernel_host_shadows(const KernelState& kernel) {
+    auto* backend = GPU::Runtime::Context::GetBackend();
+    for (const auto& [binding, handle] : kernel.buffers) {
+        (void)binding;
+        auto buffer = g_buffers.find(handle);
+        if (buffer == g_buffers.end()) {
+            continue;
+        }
+        if (buffer->second.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            "EasyGPU backend is unavailable while materializing a buffer host shadow.");
+            }
+            download_easygpu_buffer(buffer->second, *backend);
+        } else if (buffer->second.bytes.size() != buffer->second.byte_size) {
+            buffer->second.bytes.resize(buffer->second.byte_size);
+        }
+    }
+    for (const auto& [binding, handle] : kernel.textures) {
+        (void)binding;
+        auto texture = g_textures.find(handle);
+        if (texture == g_textures.end()) {
+            continue;
+        }
+        if (texture->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            "EasyGPU backend is unavailable while materializing a texture host shadow.");
+            }
+            download_easygpu_texture(texture->second, *backend);
+        } else if (texture->second.bytes.size() != texture->second.byte_size) {
+            texture->second.bytes.resize(texture->second.byte_size);
+        }
+    }
+    return ok();
 }
 
 bool map_sampler_desc(const FeSamplerDesc& source, GPU::Backend::SamplerDesc* out);
@@ -5351,6 +5519,33 @@ GPU::Backend::PipelineHandle create_easygpu_compute_pipeline(GPU::Kernel::Kernel
     return pipeline;
 }
 
+GPU::Kernel::KernelBuildContext* ensure_easygpu_buffer_kernel_compiled(
+    FeKernelHandle kernel_handle, KernelState& kernel, GPU::Backend::Backend& backend) {
+    GPU::Kernel::KernelBuildContext* context = nullptr;
+    auto cache_it = g_compute_kernel_caches.find(kernel_handle);
+    if (cache_it != g_compute_kernel_caches.end() && cache_it->second.context != nullptr) {
+        context = cache_it->second.context.get();
+    }
+
+    if (context == nullptr) {
+        auto local_context = try_build_easygpu_kernel_context(kernel);
+        if (local_context == nullptr) {
+            return nullptr;
+        }
+
+        auto& cache = g_compute_kernel_caches[kernel_handle];
+        cache.context = std::move(local_context);
+        context = cache.context.get();
+    }
+
+    if (!context->HasCachedPipeline()) {
+        const auto pipeline = create_easygpu_compute_pipeline(*context, backend);
+        context->SetCachedPipeline(pipeline);
+        kernel.compile_count++;
+    }
+    return context;
+}
+
 bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelState& kernel, uint32_t group_x,
                                         uint32_t group_y, uint32_t group_z, bool wait) {
     if (!can_dispatch_easygpu_buffer_kernel(kernel)) {
@@ -5364,37 +5559,13 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
         return false;
     }
 
-    GPU::Kernel::KernelBuildContext* context = nullptr;
-    auto cache_it = g_compute_kernel_caches.find(kernel_handle);
-    if (cache_it != g_compute_kernel_caches.end() &&
-        cache_it->second.context != nullptr &&
-        cache_it->second.context->HasCachedPipeline()) {
-        context = cache_it->second.context.get();
-    }
-
-    std::unique_ptr<GPU::Kernel::KernelBuildContext> local_context;
+    auto* context = ensure_easygpu_buffer_kernel_compiled(kernel_handle, kernel, *backend);
     if (context == nullptr) {
-        local_context = try_build_easygpu_kernel_context(kernel);
-        if (local_context == nullptr) {
-            return false;
-        }
-
-        context = local_context.get();
+        return false;
     }
 
     bind_easygpu_runtime_buffers(kernel, *context, *backend);
     bind_easygpu_runtime_textures(kernel, *context, *backend);
-
-    if (!context->HasCachedPipeline()) {
-        const auto pipeline = create_easygpu_compute_pipeline(*context, *backend);
-        context->SetCachedPipeline(pipeline);
-    }
-
-    if (local_context != nullptr) {
-        auto& cache = g_compute_kernel_caches[kernel_handle];
-        cache.context = std::move(local_context);
-        context = cache.context.get();
-    }
 
     const auto pipeline = context->GetCachedPipeline();
     backend->BindPipeline(pipeline);
@@ -5417,6 +5588,84 @@ bool try_dispatch_easygpu_buffer_kernel(FeKernelHandle kernel_handle, KernelStat
 
     mark_easygpu_writable_buffers_dirty(kernel, *context);
     mark_easygpu_writable_textures_dirty(kernel, *context);
+    return true;
+}
+
+std::vector<std::tuple<uint32_t, size_t, uint32_t>> current_ad_buffer_layout(const KernelState& kernel) {
+    std::vector<std::tuple<uint32_t, size_t, uint32_t>> layout;
+    layout.reserve(kernel.buffers.size());
+    for (const auto& [binding, handle] : kernel.buffers) {
+        const auto buffer = g_buffers.find(handle);
+        if (buffer != g_buffers.end()) {
+        layout.emplace_back(binding, buffer->second.byte_size, buffer->second.stride);
+        }
+    }
+    std::sort(layout.begin(), layout.end());
+    return layout;
+}
+
+bool try_dispatch_cached_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y,
+                                            uint32_t group_z, bool wait, GPU::Backend::Backend& backend) {
+    auto cache = kernel.ad_cache;
+    if (cache == nullptr || cache->context == nullptr ||
+        cache->pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE ||
+        cache->group_x != group_x || cache->group_y != group_y || cache->group_z != group_z ||
+        cache->logical_x != kernel.logical_x || cache->logical_y != kernel.logical_y ||
+        cache->logical_z != kernel.logical_z || cache->buffer_layout != current_ad_buffer_layout(kernel)) {
+        return false;
+    }
+
+    size_t largest_zero = kernel.ad_adj_pool_size;
+    for (const auto& gradient : kernel.ad_gradients) {
+        if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
+            return false;
+        }
+        largest_zero = std::max(largest_zero, gradient.byte_size);
+    }
+    if (cache->zero_scratch.size() < largest_zero) {
+        cache->zero_scratch.assign(largest_zero, 0);
+    }
+    for (const auto& gradient : kernel.ad_gradients) {
+        if (gradient.byte_size != 0) {
+            backend.UploadBuffer(gradient.backend_buffer, 0, gradient.byte_size, cache->zero_scratch.data());
+        }
+    }
+    if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE && kernel.ad_adj_pool_size != 0) {
+        backend.UploadBuffer(kernel.ad_adj_pool, 0, kernel.ad_adj_pool_size, cache->zero_scratch.data());
+    }
+
+    bind_easygpu_runtime_buffers(kernel, *cache->context, backend);
+    bind_easygpu_runtime_textures(kernel, *cache->context, backend);
+    auto bindings = cache->context->GetCachedBindings();
+    for (const auto& gradient : kernel.ad_gradients) {
+        GPU::Backend::ResourceBinding binding;
+        binding.binding = gradient.gradient_binding;
+        binding.type = GPU::Backend::BindingType::Buffer;
+        binding.buffer = gradient.backend_buffer;
+        binding.readOnly = false;
+        bindings.push_back(binding);
+    }
+    if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE && cache->adj_pool_binding >= 0) {
+        GPU::Backend::ResourceBinding binding;
+        binding.binding = static_cast<uint32_t>(cache->adj_pool_binding);
+        binding.type = GPU::Backend::BindingType::Buffer;
+        binding.buffer = kernel.ad_adj_pool;
+        binding.readOnly = false;
+        bindings.push_back(binding);
+    }
+
+    backend.BindPipeline(cache->pipeline);
+    cache->context->UploadUniformValues(cache->pipeline);
+    if (!bindings.empty()) {
+        backend.BindResources(bindings.data(), static_cast<uint32_t>(bindings.size()));
+    }
+    backend.Dispatch(group_x, group_y, group_z);
+    backend.MemoryBarrier(GPU::Backend::BarrierType::All);
+    if (wait) {
+        backend.Finish();
+    }
+    mark_easygpu_writable_buffers_dirty(kernel, *cache->context);
+    mark_easygpu_writable_textures_dirty(kernel, *cache->context);
     return true;
 }
 
@@ -5470,6 +5719,10 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         return false;
     }
 
+    if (try_dispatch_cached_easygpu_ad_kernel(kernel, group_x, group_y, group_z, wait, *backend)) {
+        return true;
+    }
+
     GPU::AD::GradientTape gradientTape;
     std::vector<ADGradientState> next_gradients;
     next_gradients.reserve(parameters.size());
@@ -5496,11 +5749,11 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
             return false;
         }
         const auto resource_stride = easygpu_buffer_element_stride(ir, *resource);
-        if (resource_stride == 0 || buffer->second.stride != resource_stride || buffer->second.bytes.empty()) {
+        if (resource_stride == 0 || buffer->second.stride != resource_stride || buffer->second.byte_size == 0) {
             fail(FE_ERROR_UNSUPPORTED, "AD parameter buffer has an unsupported element stride.");
             return false;
         }
-        const auto element_count = static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
+        const auto element_count = static_cast<uint32_t>(buffer->second.byte_size / buffer->second.stride);
         if (element_count == 0) {
             fail(FE_ERROR_INVALID_ARGUMENT, "AD parameter buffer must contain at least one element.");
             return false;
@@ -5568,7 +5821,7 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
             continue;
         }
         const auto buffer = g_buffers.find(bound->second);
-        if (buffer == g_buffers.end() || buffer->second.stride == 0 || buffer->second.bytes.empty()) {
+        if (buffer == g_buffers.end() || buffer->second.stride == 0 || buffer->second.byte_size == 0) {
             continue;
         }
         auto element_type = string_or_empty(ir, resource.element_type_string_id);
@@ -5580,7 +5833,7 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         if (component_count == 0) {
             continue;
         }
-        const auto element_count = static_cast<uint32_t>(buffer->second.bytes.size() / buffer->second.stride);
+        const auto element_count = static_cast<uint32_t>(buffer->second.byte_size / buffer->second.stride);
         if (element_count == 0) {
             continue;
         }
@@ -5721,6 +5974,7 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         }
     }
 
+    release_ad_compiled_cache(kernel);
     release_ad_gradient_buffers(kernel);
     kernel.last_ad_backward_glsl = combined_glsl;
 
@@ -5846,6 +6100,7 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         fail(FE_ERROR_SHADER_COMPILE_FAILED, "EasyGPU backend failed to create merged AD backward pipeline.");
         return false;
     }
+    kernel.compile_count++;
 
     bind_easygpu_runtime_buffers(kernel, *forwardContext, *backend);
     bind_easygpu_runtime_textures(kernel, *forwardContext, *backend);
@@ -5879,10 +6134,21 @@ bool try_dispatch_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint3
         backend->Finish();
     }
 
-    backend->DestroyPipeline(pipeline);
     kernel.ad_gradients = std::move(next_gradients);
     mark_easygpu_writable_buffers_dirty(kernel, *forwardContext);
     mark_easygpu_writable_textures_dirty(kernel, *forwardContext);
+    auto cache = std::make_shared<ADKernelCache>();
+    cache->context = std::move(forwardContext);
+    cache->pipeline = pipeline;
+    cache->group_x = group_x;
+    cache->group_y = group_y;
+    cache->group_z = group_z;
+    cache->logical_x = kernel.logical_x;
+    cache->logical_y = kernel.logical_y;
+    cache->logical_z = kernel.logical_z;
+    cache->adj_pool_binding = adj_pool_binding;
+    cache->buffer_layout = current_ad_buffer_layout(kernel);
+    kernel.ad_cache = std::move(cache);
     return true;
 }
 
@@ -5992,7 +6258,7 @@ bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferStat
         return false;
     }
 
-    if (destination_offset > destination.bytes.size() || destination_size > destination.bytes.size() - destination_offset) {
+    if (destination_offset > destination.byte_size || destination_size > destination.byte_size - destination_offset) {
         if (error != nullptr) {
             *error = "Destination buffer range exceeds buffer size.";
         }
@@ -6072,7 +6338,6 @@ bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferStat
     backend.BindResources(bindings, 2);
     backend.Dispatch(static_cast<uint32_t>((scalar_slots + work_group_size - 1) / work_group_size), 1, 1);
     backend.MemoryBarrier(GPU::Backend::BarrierType::All);
-    backend.Finish();
     backend.DestroyPipeline(pipeline);
 
     destination.device_dirty = true;
@@ -10186,7 +10451,7 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
         }
         const auto required_index_elements = static_cast<uint64_t>(draw.first_index) + draw.count;
         if (required_index_elements > std::numeric_limits<size_t>::max() / index_stride ||
-            index_it->second.bytes.size() < static_cast<size_t>(required_index_elements) * index_stride) {
+            index_it->second.byte_size < static_cast<size_t>(required_index_elements) * index_stride) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Index buffer is too small for the requested indexed draw.");
         }
         index_buffer_is_uint16 = index_stride == sizeof(uint16_t);
@@ -10457,11 +10722,6 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     }
     trace_graphics_step("end rendering");
     backend->EndRendering();
-    if (draw.wait != 0) {
-        trace_graphics_step("finish");
-        backend->Finish();
-    }
-
     for (auto* color_target : targets) {
         color_target->device_dirty = true;
         color_target->host_dirty = false;
@@ -10804,6 +11064,7 @@ FE_API FeResult fe_context_initialize(FeContextHandle context) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
         }
 
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         (void)require_backend();
         return ok();
     });
@@ -10813,15 +11074,176 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context) {
     return context == kDefaultContext || context == 0 ? ok() : fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
 }
 
-FE_API FeResult fe_runtime_flush_caches(void) {
+FE_API FeResult fe_context_wait_idle(FeContextHandle context) {
     return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        backend->Finish();
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_fence == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_fence must not be null.");
+        }
+        *out_fence = 0;
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        auto state = std::make_shared<FenceState>();
+        state->submission = backend->Submit();
+
+        const auto handle = next_handle();
+        g_fences.emplace(handle, std::move(state));
+        *out_fence = handle;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if ((barrier_flags & ~static_cast<uint32_t>(FE_MEMORY_BARRIER_ALL)) != 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Memory barrier flags contain unsupported bits.");
+        }
+        if (barrier_flags == FE_MEMORY_BARRIER_NONE) {
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        backend->MemoryBarrier(static_cast<GPU::Backend::BarrierType>(barrier_flags));
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete) {
+    return protect([&] {
+        if (out_complete == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_complete must not be null.");
+        }
+        *out_complete = false;
+
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_complete = backend->IsSubmissionComplete(state->submission);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_wait(FeFenceHandle fence, uint64_t timeout_nanoseconds, bool* out_complete) {
+    return protect([&] {
+        if (out_complete == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_complete must not be null.");
+        }
+        *out_complete = false;
+
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_complete = backend->WaitForSubmission(state->submission, timeout_nanoseconds);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_destroy(FeFenceHandle fence) {
+    return protect([&] {
+        if (fence == 0 || g_runtime_shutting_down.load(std::memory_order_acquire)) {
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        const auto it = g_fences.find(fence);
+        if (it == g_fences.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+        }
+
+        const auto& state = it->second;
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        backend->ReleaseSubmission(state->submission);
+        state->released = true;
+        g_fences.erase(it);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_runtime_flush_caches(void) {
+    const auto result = protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         auto* backend = GPU::Runtime::Context::GetBackend();
         if (backend != nullptr) {
             backend->FlushPipelineCache();
         }
         return ok();
     });
+#if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
+    write_coverage_profile_snapshot();
+#endif
+    return result;
 }
 
 FE_API FeResult fe_runtime_shutdown(void) {
@@ -10832,6 +11254,7 @@ FE_API FeResult fe_runtime_shutdown(void) {
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         destroy_backend_resources_for_shutdown();
         return ok();
     });
@@ -10845,6 +11268,7 @@ FE_API FeResult fe_runtime_process_exit(void) {
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         abandon_native_resources_for_process_exit();
         return ok();
     });
@@ -10858,6 +11282,7 @@ FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* o
         if (out_backend == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "out_backend must not be null.");
         }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         auto& runtime_context = GPU::Runtime::Context::GetInstance();
         auto* backend = GPU::Runtime::Context::GetBackend();
         if (backend == nullptr) {
@@ -10881,6 +11306,7 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
         if (out_caps == nullptr) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "out_caps must not be null.");
         }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         auto& runtime_context = GPU::Runtime::Context::GetInstance();
         auto* backend = GPU::Runtime::Context::GetBackend();
         if (backend == nullptr) {
@@ -11328,6 +11754,8 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
 
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+
         if (mode != 1) {
             GPU::Runtime::AutoInitContext();
             GPU::Runtime::Context::GetInstance().MakeCurrent();
@@ -11355,6 +11783,14 @@ FE_API FeResult fe_texture_presenter_present_texture(FeTexturePresenterHandle pr
             }
         }
 
+        if (texture_it->second.bytes.size() != texture_it->second.byte_size) {
+            auto* backend = GPU::Runtime::Context::GetBackend();
+            if (backend == nullptr || texture_it->second.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                            "Texture host shadow is unavailable and cannot be materialized for presentation.");
+            }
+            download_easygpu_texture(texture_it->second, *backend);
+        }
         return present_texture_cpu_locked(*presenter_it->second.presenter, texture_it->second);
 #else
         (void)presenter;
@@ -11400,7 +11836,8 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
         }
 
         BufferState state;
-        state.bytes.resize(static_cast<size_t>(desc->size_in_bytes));
+        state.byte_size = static_cast<size_t>(desc->size_in_bytes);
+        state.bytes.resize(state.byte_size);
         state.mode = desc->mode;
         state.stride = desc->element_stride;
         if (initial_data != nullptr) {
@@ -11429,6 +11866,7 @@ FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
 
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         if (it->second.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
             if (auto* backend = GPU::Runtime::Context::GetBackend(); backend != nullptr) {
                 backend->DestroyBuffer(it->second.backend_buffer);
@@ -11450,10 +11888,25 @@ FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
-        if (offset + size > it->second.bytes.size()) {
+        if (!range_fits(offset, size, it->second.byte_size)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Upload range exceeds buffer size.");
         }
-        std::memcpy(it->second.bytes.data() + offset, data, static_cast<size_t>(size));
+        if (it->second.bytes.size() != it->second.byte_size) {
+            if (it->second.backend_buffer != GPU::Backend::INVALID_BUFFER_HANDLE) {
+                auto* backend = GPU::Runtime::Context::GetBackend();
+                if (backend == nullptr) {
+                    return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                                "EasyGPU backend is unavailable for partial buffer upload readback.");
+                }
+                std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+                download_easygpu_buffer(it->second, *backend);
+            } else {
+                it->second.bytes.resize(it->second.byte_size);
+            }
+        }
+        if (size != 0) {
+            std::memcpy(it->second.bytes.data() + static_cast<size_t>(offset), data, static_cast<size_t>(size));
+        }
         it->second.host_dirty = true;
         it->second.device_dirty = false;
         return ok();
@@ -11470,19 +11923,59 @@ FE_API FeResult fe_buffer_download(FeBufferHandle buffer, uint64_t offset, uint6
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
-        if (offset + size > it->second.bytes.size()) {
+        if (!range_fits(offset, size, it->second.byte_size)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Download range exceeds buffer size.");
         }
-        if (it->second.device_dirty) {
+        if (it->second.device_dirty || it->second.bytes.size() != it->second.byte_size) {
             auto* backend = GPU::Runtime::Context::GetBackend();
             if (backend == nullptr) {
                 return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for buffer download.");
             }
 
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
             download_easygpu_buffer(it->second, *backend);
         }
 
-        std::memcpy(out_data, it->second.bytes.data() + offset, static_cast<size_t>(size));
+        if (size != 0) {
+            std::memcpy(out_data, it->second.bytes.data() + static_cast<size_t>(offset), static_cast<size_t>(size));
+        }
+        return ok();
+    });
+}
+
+FE_API FeResult fe_buffer_copy(FeBufferHandle source, uint64_t source_offset, FeBufferHandle destination,
+                               uint64_t destination_offset, uint64_t size) {
+    return protect([&] {
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        auto source_it = g_buffers.find(source);
+        auto destination_it = g_buffers.find(destination);
+        if (source_it == g_buffers.end() || destination_it == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Buffer copy references an invalid buffer handle.");
+        }
+        if (!range_fits(source_offset, size, source_it->second.byte_size) ||
+            !range_fits(destination_offset, size, destination_it->second.byte_size)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Buffer copy range exceeds buffer size.");
+        }
+        if (source == destination && source_offset < destination_offset + size &&
+            destination_offset < source_offset + size) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Buffer copy does not support overlapping ranges.");
+        }
+        if (size == 0) {
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for buffer copy.");
+        }
+
+        const auto source_buffer = ensure_easygpu_buffer(source_it->second, *backend);
+        const auto destination_buffer = ensure_easygpu_buffer(destination_it->second, *backend);
+        backend->CopyBuffer(source_buffer, static_cast<size_t>(source_offset), destination_buffer,
+                            static_cast<size_t>(destination_offset), static_cast<size_t>(size));
+        destination_it->second.host_dirty = false;
+        destination_it->second.device_dirty = true;
         return ok();
     });
 }
@@ -11497,12 +11990,13 @@ FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t, void** out_ptr) {
         if (it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
         }
-        if (it->second.device_dirty) {
+        if (it->second.device_dirty || it->second.bytes.size() != it->second.byte_size) {
             auto* backend = GPU::Runtime::Context::GetBackend();
             if (backend == nullptr) {
                 return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for buffer mapping.");
             }
 
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
             download_easygpu_buffer(it->second, *backend);
         }
 
@@ -11513,8 +12007,10 @@ FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t, void** out_ptr) {
 }
 
 FE_API FeResult fe_buffer_unmap(FeBufferHandle buffer) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return g_buffers.find(buffer) == g_buffers.end() ? fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.") : ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        return g_buffers.find(buffer) == g_buffers.end() ? fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.") : ok();
+    });
 }
 
 FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDesc* desc, const void* initial_data,
@@ -11534,7 +12030,14 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
         state.mip_levels = desc->mip_levels;
         state.pixel_format = desc->pixel_format;
         state.access = desc->access;
-        state.bytes.resize(static_cast<size_t>(desc->width) * desc->height * pixel_size(desc->pixel_format));
+        size_t texel_count = 0;
+        size_t byte_count = 0;
+        if (!checked_multiply_size(desc->width, desc->height, &texel_count) ||
+            !checked_multiply_size(texel_count, pixel_size(desc->pixel_format), &byte_count)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture dimensions overflow the host address space.");
+        }
+        state.bytes.resize(byte_count);
+        state.byte_size = byte_count;
         if (initial_data != nullptr) {
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
         }
@@ -11563,8 +12066,16 @@ FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDe
         state.mip_levels = desc->mip_levels;
         state.pixel_format = desc->pixel_format;
         state.access = desc->access;
-        state.bytes.resize(static_cast<size_t>(desc->width) * desc->height * desc->depth *
-                           pixel_size(desc->pixel_format));
+        size_t texel_count = 0;
+        size_t volume_texel_count = 0;
+        size_t byte_count = 0;
+        if (!checked_multiply_size(desc->width, desc->height, &texel_count) ||
+            !checked_multiply_size(texel_count, desc->depth, &volume_texel_count) ||
+            !checked_multiply_size(volume_texel_count, pixel_size(desc->pixel_format), &byte_count)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture dimensions overflow the host address space.");
+        }
+        state.bytes.resize(byte_count);
+        state.byte_size = byte_count;
         if (initial_data != nullptr) {
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
         }
@@ -11591,6 +12102,7 @@ FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
 
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         // Destroy the backend GPU texture if one was created.
         if (it->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
             if (auto* backend = GPU::Runtime::Context::GetBackend(); backend != nullptr) {
@@ -11616,10 +12128,24 @@ FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_
         }
         trace_graphics_step("upload texture2d");
         const auto pixel = pixel_size(it->second.pixel_format);
-        if (it->second.depth != 1 || x + width > it->second.width || y + height > it->second.height) {
+        if (it->second.depth != 1 || !range_fits(x, width, it->second.width) ||
+            !range_fits(y, height, it->second.height)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Texture upload range exceeds texture dimensions.");
         }
         const auto* src = static_cast<const unsigned char*>(data);
+        if (it->second.bytes.size() != it->second.byte_size) {
+            if (it->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
+                auto* backend = GPU::Runtime::Context::GetBackend();
+                if (backend == nullptr) {
+                    return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                                "EasyGPU backend is unavailable for partial texture upload readback.");
+                }
+                std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+                download_easygpu_texture(it->second, *backend);
+            } else {
+                it->second.bytes.resize(it->second.byte_size);
+            }
+        }
         for (uint32_t row = 0; row < height; ++row) {
             const auto dst_offset = (static_cast<size_t>(y + row) * it->second.width + x) * pixel;
             std::memcpy(it->second.bytes.data() + dst_offset, src + static_cast<size_t>(row) * width * pixel,
@@ -11645,14 +12171,17 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
         }
 
         // If the device has newer data, download it first.
-        if (it->second.device_dirty) {
+        if (it->second.device_dirty || it->second.bytes.size() != it->second.byte_size) {
             auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend != nullptr) {
-                download_easygpu_texture(it->second, *backend);
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for texture download.");
             }
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+            download_easygpu_texture(it->second, *backend);
         }
         const auto pixel = pixel_size(it->second.pixel_format);
-        if (it->second.depth != 1 || x + width > it->second.width || y + height > it->second.height) {
+        if (it->second.depth != 1 || !range_fits(x, width, it->second.width) ||
+            !range_fits(y, height, it->second.height)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Texture download range exceeds texture dimensions.");
         }
         auto* dst = static_cast<unsigned char*>(out_data);
@@ -11679,11 +12208,25 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
         }
 
         const auto pixel = pixel_size(it->second.pixel_format);
-        if (x + width > it->second.width || y + height > it->second.height || z + depth > it->second.depth) {
+        if (!range_fits(x, width, it->second.width) || !range_fits(y, height, it->second.height) ||
+            !range_fits(z, depth, it->second.depth)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture upload range exceeds texture dimensions.");
         }
 
         const auto* src = static_cast<const unsigned char*>(data);
+        if (it->second.bytes.size() != it->second.byte_size) {
+            if (it->second.backend_texture != GPU::Backend::INVALID_TEXTURE_HANDLE) {
+                auto* backend = GPU::Runtime::Context::GetBackend();
+                if (backend == nullptr) {
+                    return fail(FE_ERROR_BACKEND_UNAVAILABLE,
+                                "EasyGPU backend is unavailable for partial 3D texture upload readback.");
+                }
+                std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+                download_easygpu_texture(it->second, *backend);
+            } else {
+                it->second.bytes.resize(it->second.byte_size);
+            }
+        }
         for (uint32_t slice = 0; slice < depth; ++slice) {
             for (uint32_t row = 0; row < height; ++row) {
                 const auto dst_offset =
@@ -11713,15 +12256,18 @@ FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint3
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
         }
 
-        if (it->second.device_dirty) {
+        if (it->second.device_dirty || it->second.bytes.size() != it->second.byte_size) {
             auto* backend = GPU::Runtime::Context::GetBackend();
-            if (backend != nullptr) {
-                download_easygpu_texture(it->second, *backend);
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for 3D texture download.");
             }
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+            download_easygpu_texture(it->second, *backend);
         }
 
         const auto pixel = pixel_size(it->second.pixel_format);
-        if (x + width > it->second.width || y + height > it->second.height || z + depth > it->second.depth) {
+        if (!range_fits(x, width, it->second.width) || !range_fits(y, height, it->second.height) ||
+            !range_fits(z, depth, it->second.depth)) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "3D texture download range exceeds texture dimensions.");
         }
 
@@ -11771,6 +12317,7 @@ FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture) {
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for mipmap generation.");
         }
 
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         const auto backend_texture = ensure_easygpu_texture(state, *backend);
         if (backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU texture could not be created for mipmap generation.");
@@ -11901,7 +12448,8 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
 }
 
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
-    return protect([&] {
+    bool destroyed_ad_kernel = false;
+    const auto result = protect([&] {
         if (kernel == 0) {
             return ok();
         }
@@ -11913,44 +12461,83 @@ FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
         }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        destroyed_ad_kernel = it->second.auto_diff;
         erase_compute_kernel_cache(kernel);
+        release_ad_compiled_cache(it->second);
         release_ad_gradient_buffers(it->second);
         g_kernels.erase(it);
         return ok();
     });
+#if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
+    if (destroyed_ad_kernel) {
+        write_coverage_profile_snapshot();
+    }
+#endif
+    return result;
+}
+
+FE_API FeResult fe_kernel_compile(FeKernelHandle kernel) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        if (it->second.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "AD kernels are shape-specialized and compile on their first bound dispatch.");
+        }
+        GPU::Runtime::AutoInitContext();
+        GPU::Runtime::Context::GetInstance().MakeCurrent();
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        return ensure_easygpu_buffer_kernel_compiled(kernel, it->second, *backend) == nullptr
+                   ? fail(FE_ERROR_UNSUPPORTED, "Kernel could not be compiled by the EasyGPU typed dispatch path.")
+                   : ok();
+    });
 }
 
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end() || g_buffers.find(buffer) == g_buffers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or buffer handle.");
-    }
-    it->second.buffers[binding] = buffer;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end() || g_buffers.find(buffer) == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or buffer handle.");
+        }
+        it->second.buffers[binding] = buffer;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end() || g_textures.find(texture) == g_textures.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or texture handle.");
-    }
-    it->second.textures[binding] = texture;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end() || g_textures.find(texture) == g_textures.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or texture handle.");
+        }
+        it->second.textures[binding] = texture;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_kernel_bind_sampler(FeKernelHandle kernel, uint32_t binding, FeSamplerHandle sampler) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_kernels.find(kernel);
-    if (it == g_kernels.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
-    }
-    if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
-    }
-    it->second.samplers[binding] = sampler;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+        }
+        it->second.samplers[binding] = sampler;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* data, uint64_t size) {
@@ -11966,6 +12553,7 @@ FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* 
         auto& kernel_state = it->second;
         if (size > kernel_state.push_constants.capacity()) {
             erase_compute_kernel_cache(kernel);
+            release_ad_compiled_cache(kernel_state);
         }
 
         kernel_state.push_constants.resize(static_cast<size_t>(size));
@@ -11979,7 +12567,7 @@ FE_API FeResult fe_kernel_set_push_constants(FeKernelHandle kernel, const void* 
 FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint32_t group_y, uint32_t group_z,
                                    uint32_t logical_x, uint32_t logical_y, uint32_t logical_z, bool wait) {
     return protect([&] {
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::unique_lock<std::mutex> registry_lock(g_mutex);
         auto it = g_kernels.find(kernel);
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
@@ -12002,34 +12590,54 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         const auto should_profile = profiler_enabled_locked();
         const auto start = std::chrono::steady_clock::now();
         FeResult result = FE_OK;
+        bool submitted_to_backend = false;
+        std::unique_lock<std::mutex> backend_lock(g_backend_mutex);
 
         // Use the AD dispatch path for AutoDiff kernels, which sets up the GradienTape
         // and generates the backward pass after the forward dispatch.
         it->second.last_dispatch_path = FE_DISPATCH_PATH_NONE;
         if (it->second.auto_diff) {
-            if (try_dispatch_easygpu_ad_kernel(it->second, group_x, group_y, group_z, wait)) {
+            if (try_dispatch_easygpu_ad_kernel(it->second, group_x, group_y, group_z, false)) {
                 it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
+                submitted_to_backend = true;
             } else {
                 it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
                 result = g_last_result == FE_OK ? fail(FE_ERROR_UNSUPPORTED, "AD dispatch failed.") : g_last_result;
             }
-        } else if (try_dispatch_easygpu_buffer_kernel(kernel, it->second, group_x, group_y, group_z, wait)) {
+        } else if (try_dispatch_easygpu_buffer_kernel(kernel, it->second, group_x, group_y, group_z, false)) {
             it->second.last_dispatch_path = FE_DISPATCH_PATH_TYPED_EASYGPU;
+            submitted_to_backend = true;
         } else if (has_typed_section7_semantics(it->second)) {
             it->second.last_dispatch_path = FE_DISPATCH_PATH_REJECTED;
             result = g_last_error.empty()
                          ? fail(FE_ERROR_UNSUPPORTED, "Typed EasyGPU dispatch rejected the section 7 kernel.")
                          : FE_ERROR_UNSUPPORTED;
         } else {
-            result = dispatch_simple_buffer_assignment(it->second, group_x, group_y, group_z);
+            result = materialize_kernel_host_shadows(it->second);
+            if (result == FE_OK) {
+                result = dispatch_simple_buffer_assignment(it->second, group_x, group_y, group_z);
+            }
             it->second.last_dispatch_path =
                 result == FE_OK ? FE_DISPATCH_PATH_CPU_REFERENCE_FALLBACK : FE_DISPATCH_PATH_REJECTED;
         }
 
+        const auto profile_name = it->second.debug_name;
+        registry_lock.unlock();
+        if (wait && submitted_to_backend) {
+            auto* backend = GPU::Runtime::Context::GetBackend();
+            if (backend == nullptr) {
+                result = fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend became unavailable while waiting.");
+            } else {
+                backend->Finish();
+            }
+        }
+        backend_lock.unlock();
+
         if (should_profile && result == FE_OK) {
             const auto elapsed =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            record_profiler_event_locked(it->second.debug_name, elapsed, logical_x, logical_y, logical_z);
+            std::lock_guard<std::mutex> profiler_lock(g_mutex);
+            record_profiler_event_locked(profile_name, elapsed, logical_x, logical_y, logical_z);
         }
 
         return result;
@@ -12074,6 +12682,7 @@ FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer
         }
 
         std::string source;
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         if (!try_build_easygpu_optimized_kernel_source(state, &source)) {
             return fail(FE_ERROR_UNSUPPORTED,
                         "Kernel IR is not supported by EasyGPU optimized GLSL inspection on this backend.");
@@ -12096,6 +12705,21 @@ FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t
         }
 
         *out_path = static_cast<uint32_t>(it->second.last_dispatch_path);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_get_compile_count(FeKernelHandle kernel, uint64_t* out_count) {
+    return protect([&] {
+        if (out_count == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_count must not be null.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        *out_count = it->second.compile_count;
         return ok();
     });
 }
@@ -12155,7 +12779,7 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
             return fail(FE_ERROR_INVALID_ARGUMENT, "AD gradient output buffer must not be null.");
         }
 
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::unique_lock<std::mutex> registry_lock(g_mutex);
         auto it = g_kernels.find(kernel);
         if (it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
@@ -12182,8 +12806,11 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD gradient readback.");
         }
 
+        std::unique_lock<std::mutex> backend_lock(g_backend_mutex);
+        const auto backend_buffer = gradient.backend_buffer;
+        registry_lock.unlock();
         backend->DownloadBuffer(
-            gradient.backend_buffer,
+            backend_buffer,
             static_cast<size_t>(offset),
             static_cast<size_t>(size),
             out_data);
@@ -12194,7 +12821,7 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
 FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, uint32_t index, FeBufferHandle destination,
                                                        uint64_t destination_offset, uint64_t destination_size) {
     return protect([&] {
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::unique_lock<std::mutex> registry_lock(g_mutex);
         auto kernel_it = g_kernels.find(kernel);
         if (kernel_it == g_kernels.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
@@ -12219,6 +12846,7 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for AD gradient reduction.");
         }
 
+        std::unique_lock<std::mutex> backend_lock(g_backend_mutex);
         std::string error;
         if (!dispatch_ad_gradient_reduce_to_buffer(
                 kernel_it->second.ad_gradients[index],
@@ -12230,6 +12858,8 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
             return fail(FE_ERROR_UNSUPPORTED, error.empty() ? "AD gradient could not be reduced to the destination buffer." : error.c_str());
         }
 
+        registry_lock.unlock();
+        backend->Finish();
         return ok();
     });
 }
@@ -12385,6 +13015,7 @@ FE_API FeResult fe_graphics_pipeline_destroy(FeGraphicsPipelineHandle pipeline) 
         if (it == g_pipelines.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
         }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         destroy_graphics_pipeline_cache(it->second);
         g_pipelines.erase(it);
         return ok();
@@ -12393,14 +13024,16 @@ FE_API FeResult fe_graphics_pipeline_destroy(FeGraphicsPipelineHandle pipeline) 
 
 FE_API FeResult fe_graphics_pipeline_set_vertex_buffer(FeGraphicsPipelineHandle pipeline, FeBufferHandle buffer,
                                                        uint32_t stride) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
-    }
-    it->second.vertex_buffer = buffer;
-    it->second.vertex_stride = stride;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_pipelines.find(pipeline);
+        if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
+        }
+        it->second.vertex_buffer = buffer;
+        it->second.vertex_stride = stride;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_graphics_pipeline_set_index_buffer(FeGraphicsPipelineHandle pipeline, FeBufferHandle buffer) {
@@ -12411,38 +13044,44 @@ FE_API FeResult fe_graphics_pipeline_set_index_buffer(FeGraphicsPipelineHandle p
 }
 
 FE_API FeResult fe_graphics_pipeline_bind_buffer(FeGraphicsPipelineHandle pipeline, uint32_t binding, FeBufferHandle buffer) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
-    }
-    it->second.buffers[binding] = buffer;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_pipelines.find(pipeline);
+        if (it == g_pipelines.end() || g_buffers.find(buffer) == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or buffer handle.");
+        }
+        it->second.buffers[binding] = buffer;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_graphics_pipeline_bind_texture(FeGraphicsPipelineHandle pipeline, uint32_t binding,
                                                   FeTextureHandle texture) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end() || g_textures.find(texture) == g_textures.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or texture handle.");
-    }
-    it->second.textures[binding] = texture;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_pipelines.find(pipeline);
+        if (it == g_pipelines.end() || g_textures.find(texture) == g_textures.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline or texture handle.");
+        }
+        it->second.textures[binding] = texture;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_graphics_pipeline_bind_sampler(FeGraphicsPipelineHandle pipeline, uint32_t binding,
                                                   FeSamplerHandle sampler) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_pipelines.find(pipeline);
-    if (it == g_pipelines.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline handle.");
-    }
-    if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
-        return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
-    }
-    it->second.samplers[binding] = sampler;
-    return ok();
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_pipelines.find(pipeline);
+        if (it == g_pipelines.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid pipeline handle.");
+        }
+        if (sampler != 0 && g_samplers.find(sampler) == g_samplers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid sampler handle.");
+        }
+        it->second.samplers[binding] = sampler;
+        return ok();
+    });
 }
 
 FE_API FeResult fe_graphics_pipeline_set_push_constants(FeGraphicsPipelineHandle pipeline, const void* data,
@@ -12486,7 +13125,7 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
         if (desc->color_target_count > GPU::Backend::MAX_COLOR_ATTACHMENTS) {
             return fail(FE_ERROR_INVALID_ARGUMENT, "Graphics draw color target count exceeds EasyGPU limits.");
         }
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::unique_lock<std::mutex> registry_lock(g_mutex);
         auto it = g_pipelines.find(pipeline);
         if (it == g_pipelines.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
@@ -12513,14 +13152,29 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
 
         const auto should_profile = profiler_enabled_locked();
         const auto start = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> backend_lock(g_backend_mutex);
         auto result = draw_graphics_pipeline_easygpu(it->second, *desc);
         auto dispatch_path = result == FE_OK ? FE_DISPATCH_PATH_TYPED_EASYGPU : FE_DISPATCH_PATH_REJECTED;
 
         it->second.last_dispatch_path = dispatch_path;
+        const auto profile_name = it->second.debug_name;
+        registry_lock.unlock();
+        if (desc->wait != 0 && result == FE_OK) {
+            trace_graphics_step("finish");
+            auto* backend = GPU::Runtime::Context::GetBackend();
+            if (backend == nullptr) {
+                result = fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend became unavailable while waiting.");
+            } else {
+                backend->Finish();
+            }
+        }
+        backend_lock.unlock();
+
         if (should_profile && result == FE_OK) {
             const auto elapsed =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            record_profiler_event_locked(it->second.debug_name, elapsed, 1, 1, 1);
+            std::lock_guard<std::mutex> profiler_lock(g_mutex);
+            record_profiler_event_locked(profile_name, elapsed, 1, 1, 1);
         }
 
         return result;

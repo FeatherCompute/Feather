@@ -1,6 +1,7 @@
 using Feather.Interop;
 using Feather.Math;
 using Feather.Native;
+using Feather.Resources;
 
 namespace Feather;
 
@@ -8,14 +9,19 @@ public sealed class GpuKernel : IDisposable
 {
     private bool disposed;
     private readonly Type kernelType;
+    private readonly GpuContext context;
+    private readonly object dispatchGate = new();
     internal delegate byte[] IrTransform(ReadOnlySpan<byte> ir);
 
     // Test-only hook used to validate native behavior against transformed generated IR without
     // adding public APIs for raw native kernel creation.
     internal static IrTransform? IrTransformForTesting;
+    // Holds the post-submit window open so tests can verify disposal waits for lease tracking.
+    internal static Action? DispatchSubmittedForTesting;
 
-    private GpuKernel(FeKernelHandle handle, KernelDescriptor descriptor, Type kernelType)
+    private GpuKernel(GpuContext context, FeKernelHandle handle, KernelDescriptor descriptor, Type kernelType)
     {
+        this.context = context;
         Handle = handle;
         Descriptor = descriptor;
         this.kernelType = kernelType;
@@ -31,9 +37,30 @@ public sealed class GpuKernel : IDisposable
     {
         get
         {
-            ThrowIfDisposed();
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_last_dispatch_path(Handle, out var path));
-            return (DispatchPath)path;
+            using var operation = context.EnterOperation();
+            lock (dispatchGate)
+            {
+                ThrowIfDisposed();
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_last_dispatch_path(Handle, out var path));
+                return (DispatchPath)path;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of backend pipelines actually compiled for this kernel handle.
+    /// </summary>
+    public ulong CompilationCount
+    {
+        get
+        {
+            using var operation = context.EnterOperation();
+            lock (dispatchGate)
+            {
+                ThrowIfDisposed();
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_compile_count(Handle, out var count));
+                return count;
+            }
         }
     }
 
@@ -44,6 +71,8 @@ public sealed class GpuKernel : IDisposable
     internal static GpuKernel Create<TKernel>(GpuContext context, bool autoDiff)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
+        ArgumentNullException.ThrowIfNull(context);
+        using var operation = context.EnterOperation();
         var descriptor = TKernel.Descriptor;
         var transformedIr = IrTransformForTesting?.Invoke(TKernel.IR);
         var ir = transformedIr is null ? TKernel.IR : transformedIr.AsSpan();
@@ -58,7 +87,7 @@ public sealed class GpuKernel : IDisposable
                     autoDiff,
                     descriptor.BoundsCheck);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuKernel(handle, descriptor, typeof(TKernel));
+                return new GpuKernel(context, handle, descriptor, typeof(TKernel));
             }
         }
     }
@@ -66,7 +95,7 @@ public sealed class GpuKernel : IDisposable
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        using var gpuKernel = Create<TKernel>(context);
+        var gpuKernel = context.GetOrCreateKernel<TKernel>();
         Dispatch(context, gpuKernel, kernel, size, wait);
     }
 
@@ -94,26 +123,86 @@ public sealed class GpuKernel : IDisposable
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(gpuKernel);
-        gpuKernel.ThrowIfDisposed();
-        if (gpuKernel.kernelType != typeof(TKernel))
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
         {
-            throw new ArgumentException(
-                $"GPU kernel was created for '{gpuKernel.kernelType.FullName}', not "
-                + $"'{typeof(TKernel).FullName}'.",
-                nameof(gpuKernel));
+            var leases = DispatchCore(context, gpuKernel, kernel, size, wait);
+            if (wait)
+            {
+                DisposeLeases(leases);
+                context.CompleteSubmittedWork();
+            }
+            else
+            {
+                context.TrackSubmission(leases);
+            }
         }
-        var command = new GpuKernelCommand(gpuKernel.Handle);
-        TKernel.Bind(in kernel, command);
-        var groups = ComputeGroups(size, TKernel.Descriptor.ThreadGroupSize);
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_dispatch(
-            gpuKernel.Handle,
-            (uint)groups.X,
-            (uint)groups.Y,
-            (uint)groups.Z,
-            (uint)size.X,
-            (uint)size.Y,
-            (uint)size.Z,
-            wait));
+    }
+
+    internal static List<IDisposable> DispatchForQueue<TKernel>(
+        GpuContext context,
+        GpuKernel gpuKernel,
+        TKernel kernel,
+        GpuDispatchSize size)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+        => DispatchCore(context, gpuKernel, kernel, size, wait: false);
+
+    private static List<IDisposable> DispatchCore<TKernel>(
+        GpuContext context,
+        GpuKernel gpuKernel,
+        TKernel kernel,
+        GpuDispatchSize size,
+        bool wait)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        lock (gpuKernel.dispatchGate)
+        {
+            gpuKernel.ThrowIfDisposed();
+            if (!ReferenceEquals(gpuKernel.context, context))
+            {
+                throw new ArgumentException("GPU kernel belongs to a different context.", nameof(gpuKernel));
+            }
+            if (gpuKernel.kernelType != typeof(TKernel))
+            {
+                throw new ArgumentException(
+                    $"GPU kernel was created for '{gpuKernel.kernelType.FullName}', not "
+                    + $"'{typeof(TKernel).FullName}'.",
+                    nameof(gpuKernel));
+            }
+
+            using var command = new GpuKernelCommand(gpuKernel.Handle);
+            TKernel.Bind(in kernel, command);
+            var groups = ComputeGroups(size, gpuKernel.Descriptor.ThreadGroupSize);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_dispatch(
+                gpuKernel.Handle,
+                (uint)groups.X,
+                (uint)groups.Y,
+                (uint)groups.Z,
+                (uint)size.X,
+                (uint)size.Y,
+                (uint)size.Z,
+                wait));
+            DispatchSubmittedForTesting?.Invoke();
+            return command.DetachLeases();
+        }
+    }
+
+    private static void DisposeLeases(List<IDisposable> leases)
+    {
+        foreach (var lease in leases)
+        {
+            lease.Dispose();
+        }
+    }
+
+    public void Compile()
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_compile(Handle));
+        }
     }
 
     /// <summary>
@@ -122,8 +211,12 @@ public sealed class GpuKernel : IDisposable
     /// <returns>The GLSL source produced by EasyGPU for this kernel.</returns>
     public string GetGLSL()
     {
-        ThrowIfDisposed();
-        return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required));
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required));
+        }
     }
 
     /// <summary>
@@ -132,19 +225,26 @@ public sealed class GpuKernel : IDisposable
     /// <returns>The optimized GLSL produced by the active EasyGPU backend.</returns>
     public string GetOptimizedGLSL()
     {
-        ThrowIfDisposed();
-        return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required));
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required));
+        }
     }
 
     public void Dispose()
     {
-        if (disposed)
+        lock (dispatchGate)
         {
-            return;
-        }
+            if (disposed)
+            {
+                return;
+            }
 
-        Handle.Dispose();
-        disposed = true;
+            Handle.Dispose();
+            disposed = true;
+        }
     }
 
     private static int3 ComputeGroups(GpuDispatchSize dispatch, int3 group)
@@ -165,38 +265,56 @@ public sealed class GpuKernel : IDisposable
 /// <summary>
 /// Provides resource and push-constant binding operations for a generated compute kernel dispatch.
 /// </summary>
-public sealed class GpuKernelCommand
+public sealed class GpuKernelCommand : IDisposable
 {
+    private List<IDisposable>? leases = [];
+
     internal GpuKernelCommand(FeKernelHandle handle)
     {
         Handle = handle;
+        leases.Add(new NativeHandleLease(handle));
     }
 
     internal FeKernelHandle Handle { get; }
 
     /// <summary>
-    /// Binds a native buffer handle to a generated kernel resource slot.
+    /// Binds a shader-facing buffer to a generated kernel resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
-    /// <param name="buffer">The native buffer handle.</param>
-    public void BindBuffer(uint binding, Native.FeBufferHandle buffer)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_buffer(Handle, binding, buffer));
+    /// <param name="buffer">The buffer binding.</param>
+    public void BindBuffer(uint binding, IGpuBufferBinding buffer)
+    {
+        var native = buffer as INativeBufferBinding
+            ?? throw new ArgumentException("Buffer binding was not created by Feather.", nameof(buffer));
+        Retain(native.NativeBufferHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_buffer(Handle, binding, native.NativeBufferHandle));
+    }
 
     /// <summary>
     /// Binds a native texture handle to a generated kernel resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
-    /// <param name="texture">The native texture handle.</param>
-    public void BindTexture(uint binding, Native.FeTextureHandle texture)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_texture(Handle, binding, texture));
+    /// <param name="texture">The texture binding.</param>
+    public void BindTexture(uint binding, IGpuTextureBinding texture)
+    {
+        var native = texture as INativeTextureBinding
+            ?? throw new ArgumentException("Texture binding was not created by Feather.", nameof(texture));
+        Retain(native.NativeTextureHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_texture(Handle, binding, native.NativeTextureHandle));
+    }
 
     /// <summary>
     /// Binds a native sampler handle to a generated kernel resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
-    /// <param name="sampler">The native sampler handle.</param>
-    public void BindSampler(uint binding, Native.FeSamplerHandle sampler)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_sampler(Handle, binding, sampler));
+    /// <param name="sampler">The sampler binding.</param>
+    public void BindSampler(uint binding, IGpuSamplerBinding sampler)
+    {
+        var native = sampler as INativeSamplerBinding
+            ?? throw new ArgumentException("Sampler binding was not created by Feather.", nameof(sampler));
+        Retain(native.NativeSamplerHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_sampler(Handle, binding, native.NativeSamplerHandle));
+    }
 
     /// <summary>
     /// Uploads the complete push-constant byte block for the current generated kernel.
@@ -208,5 +326,51 @@ public sealed class GpuKernelCommand
         {
             NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_set_push_constants(Handle, (IntPtr)ptr, (ulong)data.Length));
         }
+    }
+
+    internal List<IDisposable> DetachLeases()
+    {
+        var detached = leases ?? throw new ObjectDisposedException(nameof(GpuKernelCommand));
+        leases = null;
+        return detached;
+    }
+
+    public void Dispose()
+    {
+        if (leases is null)
+        {
+            return;
+        }
+        foreach (var lease in leases)
+        {
+            lease.Dispose();
+        }
+        leases = null;
+    }
+
+    private void Retain(FeSafeHandle handle)
+        => (leases ?? throw new ObjectDisposedException(nameof(GpuKernelCommand))).Add(new NativeHandleLease(handle));
+}
+
+internal sealed class NativeHandleLease : IDisposable
+{
+    private FeSafeHandle? handle;
+
+    public NativeHandleLease(FeSafeHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        var success = false;
+        handle.DangerousAddRef(ref success);
+        if (!success)
+        {
+            throw new ObjectDisposedException(handle.GetType().Name);
+        }
+        this.handle = handle;
+    }
+
+    public void Dispose()
+    {
+        var retained = Interlocked.Exchange(ref handle, null);
+        retained?.DangerousRelease();
     }
 }

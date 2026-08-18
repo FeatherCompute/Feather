@@ -9,4 +9,8 @@
     <Description>SafeHandle and P/Invoke bindings for the Feather EasyGPU C ABI.</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Feather" />
+  </ItemGroup>
+
 </Project>

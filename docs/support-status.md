@@ -15,6 +15,7 @@ Feather is experimental. This page describes the intended stability of each publ
 | Automatic differentiation | Preview | 1D generated kernels, differentiable float and whole-vector buffer values, one scalar loss. |
 | Neural-network helpers | Preview | Useful for small models and samples; not a drop-in replacement for mature ML frameworks. |
 | Profiler and shader inspection | Preview | Useful for diagnostics; exact optimized output depends on backend. |
+| Queue command lists and submission fences | Preview-stable | Reusable compute/copy/barrier/graphics lists with native per-submission Vulkan fences and submission-scoped resource retention. |
 | NuGet packaging | Preview | Packages use the `FeatherCompute*` IDs. Native assets are staged under `artifacts/native-assets` and packed through `FeatherCompute.NativeAssets`; publish only packages built from a full RID matrix. |
 
 ## Summary
@@ -54,6 +55,8 @@ Feather does not choose a backend at runtime. The native EasyGPU build is config
 cmake -S native -B native/build -DEASYGPU_BACKEND=Vulkan
 cmake -S native -B native/build-gl -DEASYGPU_BACKEND=OpenGL
 ```
+
+Vulkan is Feather's primary backend and the capability baseline for new performance and graphics work. OpenGL is a compatibility backend under gradual deprecation: existing low-cost compute, copy, barrier, and sync mappings may remain, but new Vulkan features are not blocked on OpenGL parity. Features that cannot be implemented on OpenGL without extra architecture or maintenance cost are explicitly unsupported there rather than emulated. Applications that require the modern command/fence path or future bindless features should build Vulkan.
 
 Vulkan builds enable SPIRV-Tools by default and use
 `FEATHER_SHADER_OPTIMIZATION_LEVEL=Ultra`. `Ultra` uses SPIRV-Tools' maintained

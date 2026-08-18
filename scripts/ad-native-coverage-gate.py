@@ -41,12 +41,12 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "native/feather_c_api.cpp",
         "AD bridge validation, dispatch, gradient readback, and gradient reduction",
         (
-            (435, 464),
-            (684, 708),
-            (2598, 2642),
-            (5357, 5820),
-            (5878, 6014),
-            (11889, 12042),
+            (495, 524),
+            (746, 770),
+            (2727, 2776),
+            (5673, 6153),
+            (6211, 6346),
+            (12727, 12878),
         ),
         (
             "try_dispatch_easygpu_ad_kernel",
@@ -63,16 +63,16 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
         "native/feather_typed_ir_lowerer.cpp",
         "typed IR to EasyGPU callable/control-flow lowering used by AD",
         (
-            (217, 234),
-            (337, 427),
-            (678, 709),
-            (914, 1043),
-            (1065, 1129),
-            (1213, 1288),
-            (1698, 1720),
-            (1826, 1848),
-            (2682, 2686),
-            (2863, 2870),
+            (223, 240),
+            (344, 772),
+            (1034, 1065),
+            (1270, 1399),
+            (1421, 1485),
+            (1569, 1644),
+            (2057, 2079),
+            (2185, 2241),
+            (3133, 3137),
+            (3313, 3320),
         ),
         (
             "TryLowerToEasyGpuModule",
@@ -273,6 +273,7 @@ def configure_and_build(root: Path, build_dir: Path, *, clean: bool) -> Path:
         "-DEASYGPU_BUILD_WINDOW=OFF",
         "-DEASYGPU_BUILD_WINDOW_EXAMPLES=OFF",
         "-DFEATHER_BUILD_AD_NATIVE_COVERAGE_PROBE=ON",
+        "-DFEATHER_ENABLE_COVERAGE_FLUSH=ON",
     ]
 
     env = os.environ.copy()
@@ -293,10 +294,13 @@ def configure_and_build(root: Path, build_dir: Path, *, clean: bool) -> Path:
 
 def run_ad_tests(root: Path, library: Path, profile_dir: Path) -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
-    profile_pattern = profile_dir / "feather-ad-%p.profraw"
+    profile_pattern = profile_dir / "feather-ad-%p-snapshot-%s.profraw"
+    profile_sink = "NUL" if os.name == "nt" else "/dev/null"
     env = os.environ.copy()
     env["FEATHER_NATIVE_LIBRARY"] = str(library)
-    env["LLVM_PROFILE_FILE"] = str(profile_pattern)
+    env["FEATHER_COVERAGE_PROFILE_PATTERN"] = str(profile_pattern)
+    env["FEATHER_COVERAGE_PROFILE_SINK"] = profile_sink
+    env["LLVM_PROFILE_FILE"] = profile_sink
     commands = (
         [
             "dotnet",
@@ -328,7 +332,22 @@ def run_ad_tests(root: Path, library: Path, profile_dir: Path) -> None:
 
 
 def merge_profiles(root: Path, profile_dir: Path, profdata: Path) -> None:
-    profraws = sorted(profile_dir.glob("*.profraw"))
+    snapshots: dict[str, tuple[int, Path]] = {}
+    profraws: list[Path] = []
+    for profile in sorted(profile_dir.glob("*.profraw")):
+        match = re.fullmatch(r"feather-ad-(\d+)-snapshot-(\d+)\.profraw", profile.name)
+        if match is None:
+            profraws.append(profile)
+            continue
+
+        process_id, sequence_text = match.groups()
+        sequence = int(sequence_text)
+        previous = snapshots.get(process_id)
+        if previous is None or sequence > previous[0]:
+            snapshots[process_id] = (sequence, profile)
+
+    profraws.extend(profile for _, profile in snapshots.values())
+    profraws.sort()
     if not profraws:
         raise SystemExit(f"Native AD coverage gate failed: no .profraw files were produced in {profile_dir}.")
 

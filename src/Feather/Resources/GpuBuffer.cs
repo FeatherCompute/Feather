@@ -52,10 +52,15 @@ public sealed class GpuBuffer<T> : IDisposable
     /// <returns>The created buffer.</returns>
     public static GpuBuffer<T> Create(GpuContext context, int count, BufferAccess access)
     {
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         var desc = new FeBufferDesc((ulong)checked(count * GpuValueLayout<T>.BufferElementStride), (uint)access, (uint)GpuValueLayout<T>.BufferElementStride);
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context.Handle, in desc, IntPtr.Zero, out var handle));
-        return new GpuBuffer<T>(context, handle, count, access);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context.Handle, in desc, IntPtr.Zero, out var handle));
+            return new GpuBuffer<T>(context, handle, count, access);
+        }
     }
 
     /// <summary>
@@ -76,19 +81,61 @@ public sealed class GpuBuffer<T> : IDisposable
     /// Creates a read-only shader binding for this buffer.
     /// </summary>
     /// <returns>The read-only binding view.</returns>
-    public ReadOnlyBuffer<T> AsReadOnly() => new(Handle, Length);
+    public ReadOnlyBuffer<T> AsReadOnly()
+    {
+        ThrowIfDisposed();
+        return new ReadOnlyBuffer<T>(Handle, Length);
+    }
 
     /// <summary>
     /// Creates a write-only shader binding for this buffer.
     /// </summary>
     /// <returns>The write-only binding view.</returns>
-    public WriteOnlyBuffer<T> AsWriteOnly() => new(Handle, Length);
+    public WriteOnlyBuffer<T> AsWriteOnly()
+    {
+        ThrowIfDisposed();
+        return new WriteOnlyBuffer<T>(Handle, Length);
+    }
 
     /// <summary>
     /// Creates a read-write shader binding for this buffer.
     /// </summary>
     /// <returns>The read-write binding view.</returns>
-    public ReadWriteBuffer<T> AsReadWrite() => new(Handle, Length);
+    public ReadWriteBuffer<T> AsReadWrite()
+    {
+        ThrowIfDisposed();
+        return new ReadWriteBuffer<T>(Handle, Length);
+    }
+
+    public static implicit operator ReadOnlyBuffer<T>(GpuBuffer<T> buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (buffer.Access == BufferAccess.WriteOnly)
+        {
+            throw new InvalidOperationException("A write-only GPU buffer cannot be used as a read-only shader binding.");
+        }
+        return buffer.AsReadOnly();
+    }
+
+    public static implicit operator WriteOnlyBuffer<T>(GpuBuffer<T> buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (buffer.Access == BufferAccess.ReadOnly)
+        {
+            throw new InvalidOperationException("A read-only GPU buffer cannot be used as a write-only shader binding.");
+        }
+        return buffer.AsWriteOnly();
+    }
+
+    public static implicit operator ReadWriteBuffer<T>(GpuBuffer<T> buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (buffer.Access != BufferAccess.ReadWrite)
+        {
+            throw new InvalidOperationException("Only a read-write GPU buffer can be used as a read-write shader binding.");
+        }
+        return buffer.AsReadWrite();
+    }
 
     /// <summary>
     /// Uploads CPU values starting at the first element.
@@ -105,26 +152,29 @@ public sealed class GpuBuffer<T> : IDisposable
     {
         ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegative(startIndex);
-        if (startIndex + data.Length > Length)
+        if (startIndex > Length || data.Length > Length - startIndex)
         {
             throw new ArgumentOutOfRangeException(nameof(data), "Upload range exceeds buffer length.");
         }
 
-        if (GpuValueLayout<T>.RequiresBufferRepacking)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            var gpuBytes = new byte[checked(data.Length * GpuValueLayout<T>.BufferElementStride)];
-            GpuValueLayout<T>.PackBuffer(data, gpuBytes);
-            fixed (byte* ptr = gpuBytes)
+            if (GpuValueLayout<T>.RequiresBufferRepacking)
             {
-                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_upload(Handle, (ulong)checked(startIndex * GpuValueLayout<T>.BufferElementStride), (ulong)gpuBytes.Length, (IntPtr)ptr));
+                var gpuBytes = new byte[checked(data.Length * GpuValueLayout<T>.BufferElementStride)];
+                GpuValueLayout<T>.PackBuffer(data, gpuBytes);
+                fixed (byte* ptr = gpuBytes)
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_upload(Handle, (ulong)checked(startIndex * GpuValueLayout<T>.BufferElementStride), (ulong)gpuBytes.Length, (IntPtr)ptr));
+                }
+                return;
             }
 
-            return;
-        }
-
-        fixed (T* ptr = data)
-        {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_upload(Handle, (ulong)checked(startIndex * GpuValueLayout<T>.BufferElementStride), (ulong)checked(data.Length * GpuValueLayout<T>.BufferElementStride), (IntPtr)ptr));
+            fixed (T* ptr = data)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_upload(Handle, (ulong)checked(startIndex * GpuValueLayout<T>.BufferElementStride), (ulong)checked(data.Length * GpuValueLayout<T>.BufferElementStride), (IntPtr)ptr));
+            }
         }
     }
 
@@ -140,21 +190,25 @@ public sealed class GpuBuffer<T> : IDisposable
             throw new ArgumentException("Destination span is shorter than the buffer.", nameof(destination));
         }
 
-        if (GpuValueLayout<T>.RequiresBufferRepacking)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            var gpuBytes = new byte[SizeInBytes];
-            fixed (byte* ptr = gpuBytes)
+            if (GpuValueLayout<T>.RequiresBufferRepacking)
             {
-                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_download(Handle, 0, (ulong)gpuBytes.Length, (IntPtr)ptr));
+                var gpuBytes = new byte[SizeInBytes];
+                fixed (byte* ptr = gpuBytes)
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_download(Handle, 0, (ulong)gpuBytes.Length, (IntPtr)ptr));
+                }
+
+                GpuValueLayout<T>.UnpackBuffer(gpuBytes, destination[..Length]);
+                return;
             }
 
-            GpuValueLayout<T>.UnpackBuffer(gpuBytes, destination[..Length]);
-            return;
-        }
-
-        fixed (T* ptr = destination)
-        {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_download(Handle, 0, (ulong)SizeInBytes, (IntPtr)ptr));
+            fixed (T* ptr = destination)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_download(Handle, 0, (ulong)SizeInBytes, (IntPtr)ptr));
+            }
         }
     }
 
@@ -193,7 +247,7 @@ public sealed class GpuBuffer<T> : IDisposable
 /// Read-only shader view over a GPU buffer.
 /// </summary>
 /// <typeparam name="T">The unmanaged shader element type.</typeparam>
-public readonly struct ReadOnlyBuffer<T> : IGpuBufferBinding
+public readonly struct ReadOnlyBuffer<T> : IGpuBufferBinding, INativeBufferBinding
     where T : unmanaged
 {
     internal ReadOnlyBuffer(FeBufferHandle handle, int length)
@@ -208,7 +262,7 @@ public readonly struct ReadOnlyBuffer<T> : IGpuBufferBinding
     /// Gets the number of logical elements visible to the shader.
     /// </summary>
     public int Length { get; }
-    FeBufferHandle IGpuBufferBinding.NativeBufferHandle => Handle;
+    FeBufferHandle INativeBufferBinding.NativeBufferHandle => Handle;
 
     /// <summary>
     /// Gets a shader-only indexed value.
@@ -222,7 +276,7 @@ public readonly struct ReadOnlyBuffer<T> : IGpuBufferBinding
 /// Write-only shader view over a GPU buffer.
 /// </summary>
 /// <typeparam name="T">The unmanaged shader element type.</typeparam>
-public readonly struct WriteOnlyBuffer<T> : IGpuBufferBinding
+public readonly struct WriteOnlyBuffer<T> : IGpuBufferBinding, INativeBufferBinding
     where T : unmanaged
 {
     internal WriteOnlyBuffer(FeBufferHandle handle, int length)
@@ -237,7 +291,7 @@ public readonly struct WriteOnlyBuffer<T> : IGpuBufferBinding
     /// Gets the number of logical elements visible to the shader.
     /// </summary>
     public int Length { get; }
-    FeBufferHandle IGpuBufferBinding.NativeBufferHandle => Handle;
+    FeBufferHandle INativeBufferBinding.NativeBufferHandle => Handle;
 
     /// <summary>
     /// Sets a shader-only indexed value.
@@ -253,7 +307,7 @@ public readonly struct WriteOnlyBuffer<T> : IGpuBufferBinding
 /// Read-write shader view over a GPU buffer.
 /// </summary>
 /// <typeparam name="T">The unmanaged shader element type.</typeparam>
-public readonly struct ReadWriteBuffer<T> : IGpuBufferBinding
+public readonly struct ReadWriteBuffer<T> : IGpuBufferBinding, INativeBufferBinding
     where T : unmanaged
 {
     internal ReadWriteBuffer(FeBufferHandle handle, int length)
@@ -268,7 +322,7 @@ public readonly struct ReadWriteBuffer<T> : IGpuBufferBinding
     /// Gets the number of logical elements visible to the shader.
     /// </summary>
     public int Length { get; }
-    FeBufferHandle IGpuBufferBinding.NativeBufferHandle => Handle;
+    FeBufferHandle INativeBufferBinding.NativeBufferHandle => Handle;
 
     /// <summary>
     /// Gets a shader-only indexed value by reference.

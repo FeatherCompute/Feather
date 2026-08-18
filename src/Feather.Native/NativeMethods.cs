@@ -213,6 +213,24 @@ public static class NativeMethods
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_context_shutdown(FeContextHandle context);
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_wait_idle(FeContextHandle context);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_submit(FeContextHandle context, out FeFenceHandle out_fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_memory_barrier(FeContextHandle context, uint barrier_flags);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_is_complete(FeFenceHandle fence, [MarshalAs(UnmanagedType.I1)] out bool out_complete);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_wait(FeFenceHandle fence, ulong timeout_nanoseconds, [MarshalAs(UnmanagedType.I1)] out bool out_complete);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_fence_destroy")]
+    public static extern FeResult fe_fence_destroy_raw(IntPtr fence);
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_context_shutdown")]
     public static extern FeResult fe_context_shutdown_raw(IntPtr context);
 
@@ -301,6 +319,14 @@ public static class NativeMethods
     public static extern FeResult fe_buffer_download(FeBufferHandle buffer, ulong offset, ulong size, IntPtr out_data);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_buffer_copy(
+        FeBufferHandle source,
+        ulong source_offset,
+        FeBufferHandle destination,
+        ulong destination_offset,
+        ulong size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_buffer_map(FeBufferHandle buffer, uint mode, out IntPtr out_ptr);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -349,6 +375,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_create_from_ir(FeContextHandle context, in FeKernelCreateDesc desc, out FeKernelHandle out_kernel);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_compile(FeKernelHandle kernel);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_destroy(IntPtr kernel);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -382,6 +411,9 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, out FeDispatchPath out_path);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_get_compile_count(FeKernelHandle kernel, out ulong out_count);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_ad_gradient_count(FeKernelHandle kernel, out uint out_count);

@@ -8,9 +8,26 @@ namespace Feather;
 
 public static class GPU
 {
-    private static readonly Lazy<GpuContext> DefaultContext = new(GpuContext.GetDefault);
+    private static readonly object ContextGate = new();
+    private static GpuContext? defaultContext;
 
-    public static GpuContext Context => DefaultContext.Value;
+    public static GpuContext Context
+    {
+        get
+        {
+            lock (ContextGate)
+            {
+                if (defaultContext is null || defaultContext.IsDisposed)
+                {
+                    defaultContext = GpuContext.GetDefault();
+                }
+
+                return defaultContext;
+            }
+        }
+    }
+
+    public static GpuQueue Queue => Context.Queue;
 
     public static GpuBuffer<T> CreateBuffer<T>(int count, BufferAccess access = BufferAccess.ReadWrite)
         where T : unmanaged
@@ -30,21 +47,25 @@ public static class GPU
         where T : unmanaged
         => CreateBuffer(data, BufferAccess.ReadOnly);
 
-    public static ReadOnlyBuffer<T> CreateReadOnlyBuffer<T>(ReadOnlySpan<T> data)
+    public static GpuBuffer<T> CreateReadOnlyBuffer<T>(ReadOnlySpan<T> data)
         where T : unmanaged
-        => CreateBuffer(data, BufferAccess.ReadOnly).AsReadOnly();
+        => CreateBuffer(data, BufferAccess.ReadOnly);
 
-    public static WriteOnlyBuffer<T> CreateWriteOnlyBuffer<T>(int count)
+    public static GpuBuffer<T> CreateWriteOnlyBuffer<T>(int count)
         where T : unmanaged
-        => CreateBuffer<T>(count, BufferAccess.WriteOnly).AsWriteOnly();
+        => CreateBuffer<T>(count, BufferAccess.WriteOnly);
 
-    public static ReadWriteBuffer<T> CreateReadWriteBuffer<T>(int count)
+    public static GpuBuffer<T> CreateReadWriteBuffer<T>(int count)
         where T : unmanaged
-        => CreateBuffer<T>(count, BufferAccess.ReadWrite).AsReadWrite();
+        => CreateBuffer<T>(count, BufferAccess.ReadWrite);
 
-    public static ReadWriteBuffer<T> CreateReadWriteBuffer<T>(ReadOnlySpan<T> data)
+    public static GpuBuffer<T> CreateReadWriteBuffer<T>(ReadOnlySpan<T> data)
         where T : unmanaged
-        => CreateBuffer(data, BufferAccess.ReadWrite).AsReadWrite();
+        => CreateBuffer(data, BufferAccess.ReadWrite);
+
+    public static void Compile<TKernel>()
+        where TKernel : struct, IGeneratedKernel<TKernel>
+        => Context.Compile<TKernel>();
 
     /// <summary>
     /// Creates a two-dimensional texture with one mip level.
@@ -219,9 +240,6 @@ public static class GPU
     private static class CachedKernelDispatcher<TKernel>
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
-        private static readonly object Gate = new();
-        private static GpuKernel? cachedKernel;
-
         public static DispatchPath Dispatch(TKernel kernel, GpuDispatchSize size, bool wait)
         {
             if (GpuKernel.IrTransformForTesting is not null)
@@ -231,11 +249,20 @@ public static class GPU
                 return uncachedKernel.LastDispatchPath;
             }
 
-            lock (Gate)
+            var context = Context;
+            var cachedKernel = context.GetOrCreateKernel<TKernel>();
+            GpuKernel.Dispatch(context, cachedKernel, kernel, size, wait);
+            return cachedKernel.LastDispatchPath;
+        }
+    }
+
+    internal static void ReleaseDefaultContext(GpuContext context)
+    {
+        lock (ContextGate)
+        {
+            if (ReferenceEquals(defaultContext, context))
             {
-                cachedKernel ??= GpuKernel.Create<TKernel>(Context);
-                GpuKernel.Dispatch(Context, cachedKernel, kernel, size, wait);
-                return cachedKernel.LastDispatchPath;
+                defaultContext = null;
             }
         }
     }

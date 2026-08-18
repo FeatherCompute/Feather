@@ -173,10 +173,12 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 | API | Purpose |
 | --- | --- |
 | `GpuKernel.Create<TKernel>(context)` | Creates a native kernel object. |
+| `Compile()` | Creates the backend shader and pipeline without dispatching. |
 | `GpuKernel.Dispatch(...)` | Dispatches with an explicit context/kernel object. |
 | `GetGLSL()` | Returns unoptimized GLSL. |
 | `GetOptimizedGLSL()` | Returns backend-optimized GLSL inspection text. |
 | `LastDispatchPath` | Last native route. |
+| `CompilationCount` | Number of backend pipelines actually compiled for this kernel handle. |
 
 ## Related Docs
 
@@ -196,7 +198,10 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 ## Lifetime And Errors
 
 - `GpuKernel` is disposable when you create one explicitly.
-- Most applications use `GPU.Dispatch`, which creates and releases native kernel state for that dispatch.
+- `GPU.Dispatch` and the one-shot `GpuKernel.Dispatch` overload use the context-owned kernel cache. Disposing the context releases every cached kernel.
+- `GPU.Compile<TKernel>()` moves ordinary backend shader and pipeline compilation out of first dispatch.
+- AD kernels specialize on the first backward dispatch for a logical shape and resource layout. Matching later dispatches reuse the backward pipeline, gradient buffers, and adjoint workspace.
+- Record compute, buffer-copy, explicit-barrier, and graphics commands in a `GpuCommandList`. Call `Close()`, submit through `GPU.Queue`, and wait on the returned per-submission `GpuFence`. Closed lists are reusable; `Reset()` clears them for re-recording. Bound native resources remain retained until that fence completes.
 - Shader-only marker APIs throw when called on the CPU.
 - Unsupported statements/calls produce generator diagnostics before dispatch.
 

@@ -88,29 +88,33 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
         }
 
         var desc = new FeTexture3DDesc((uint)width, (uint)height, (uint)depth, (uint)mipLevels, (uint)format, (uint)access);
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_create(context.Handle, in desc, IntPtr.Zero, out var handle));
-        return new GpuTexture3D<TPixel, TValue>(context, handle, width, height, depth, mipLevels, format, access);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_create(context.Handle, in desc, IntPtr.Zero, out var handle));
+            return new GpuTexture3D<TPixel, TValue>(context, handle, width, height, depth, mipLevels, format, access);
+        }
     }
 
     /// <summary>
     /// Creates a shader-facing read-only texture view over this texture.
     /// </summary>
-    public ReadOnlyTexture3D<TValue> AsReadOnly() => new(Handle, Size);
+    public ReadOnlyTexture3D<TValue> AsReadOnly() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing write-only texture view over this texture.
     /// </summary>
-    public WriteOnlyTexture3D<TValue> AsWriteOnly() => new(Handle, Size);
+    public WriteOnlyTexture3D<TValue> AsWriteOnly() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing read-write texture view over this texture.
     /// </summary>
-    public ReadWriteTexture3D<TValue> AsReadWrite() => new(Handle, Size);
+    public ReadWriteTexture3D<TValue> AsReadWrite() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing normalized read-write texture view over this texture.
     /// </summary>
-    public ReadWriteNormalizedTexture3D<TValue> AsReadWriteNormalized() => new(Handle, Size);
+    public ReadWriteNormalizedTexture3D<TValue> AsReadWriteNormalized() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Uploads voxels into the base texture level.
@@ -124,9 +128,13 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
             throw new ArgumentException("Voxel span is shorter than texture volume.", nameof(voxels));
         }
 
-        fixed (TPixel* ptr = voxels)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_upload(Handle, 0, 0, 0, (uint)Width, (uint)Height, (uint)Depth, (IntPtr)ptr));
+            fixed (TPixel* ptr = voxels)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_upload(Handle, 0, 0, 0, (uint)Width, (uint)Height, (uint)Depth, (IntPtr)ptr));
+            }
         }
     }
 
@@ -142,9 +150,13 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
             throw new ArgumentException("Voxel span is shorter than texture volume.", nameof(voxels));
         }
 
-        fixed (TPixel* ptr = voxels)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_download(Handle, 0, 0, 0, (uint)Width, (uint)Height, (uint)Depth, (IntPtr)ptr));
+            fixed (TPixel* ptr = voxels)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_download(Handle, 0, 0, 0, (uint)Width, (uint)Height, (uint)Depth, (IntPtr)ptr));
+            }
         }
     }
 
@@ -154,7 +166,11 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
     public void GenerateMipmaps()
     {
         ThrowIfDisposed();
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_generate_mipmaps(Handle));
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_generate_mipmaps(Handle));
+        }
     }
 
     /// <inheritdoc />
@@ -186,12 +202,18 @@ public sealed class GpuTexture3D<TPixel, TValue> : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
     }
+
+    private FeTextureHandle GetNativeHandle()
+    {
+        ThrowIfDisposed();
+        return Handle;
+    }
 }
 
 /// <summary>
 /// Shader-facing read-only three-dimensional texture view.
 /// </summary>
-public readonly struct ReadOnlyTexture3D<T> : IGpuTextureBinding
+public readonly struct ReadOnlyTexture3D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadOnlyTexture3D(FeTextureHandle handle, int3 size)
@@ -207,7 +229,7 @@ public readonly struct ReadOnlyTexture3D<T> : IGpuTextureBinding
     /// </summary>
     public int3 Size { get; }
 
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
 
     /// <summary>
     /// Gets the shader value at a three-dimensional coordinate.
@@ -218,7 +240,7 @@ public readonly struct ReadOnlyTexture3D<T> : IGpuTextureBinding
 /// <summary>
 /// Shader-facing write-only three-dimensional texture view.
 /// </summary>
-public readonly struct WriteOnlyTexture3D<T> : IGpuTextureBinding
+public readonly struct WriteOnlyTexture3D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal WriteOnlyTexture3D(FeTextureHandle handle, int3 size)
@@ -234,7 +256,7 @@ public readonly struct WriteOnlyTexture3D<T> : IGpuTextureBinding
     /// </summary>
     public int3 Size { get; }
 
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
 
     /// <summary>
     /// Sets the shader value at a three-dimensional coordinate.
@@ -248,7 +270,7 @@ public readonly struct WriteOnlyTexture3D<T> : IGpuTextureBinding
 /// <summary>
 /// Shader-facing read-write three-dimensional texture view.
 /// </summary>
-public readonly struct ReadWriteTexture3D<T> : IGpuTextureBinding
+public readonly struct ReadWriteTexture3D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadWriteTexture3D(FeTextureHandle handle, int3 size)
@@ -264,7 +286,7 @@ public readonly struct ReadWriteTexture3D<T> : IGpuTextureBinding
     /// </summary>
     public int3 Size { get; }
 
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
 
     /// <summary>
     /// Gets or sets the shader value at a three-dimensional coordinate.
@@ -279,7 +301,7 @@ public readonly struct ReadWriteTexture3D<T> : IGpuTextureBinding
 /// <summary>
 /// Shader-facing normalized read-write three-dimensional texture view.
 /// </summary>
-public readonly struct ReadWriteNormalizedTexture3D<T> : IGpuTextureBinding
+public readonly struct ReadWriteNormalizedTexture3D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadWriteNormalizedTexture3D(FeTextureHandle handle, int3 size)
@@ -295,7 +317,7 @@ public readonly struct ReadWriteNormalizedTexture3D<T> : IGpuTextureBinding
     /// </summary>
     public int3 Size { get; }
 
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
 
     /// <summary>
     /// Gets or sets the shader value at a three-dimensional coordinate.

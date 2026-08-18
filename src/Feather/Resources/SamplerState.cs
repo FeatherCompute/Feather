@@ -86,7 +86,7 @@ public enum SamplerBorderColor : uint
     IntOpaqueWhite
 }
 
-public readonly struct SamplerState : IDisposable, IGpuSamplerBinding
+public readonly struct SamplerState : IDisposable, IGpuSamplerBinding, INativeSamplerBinding
 {
     internal SamplerState(FeSamplerHandle handle, SamplerDesc desc)
     {
@@ -96,10 +96,11 @@ public readonly struct SamplerState : IDisposable, IGpuSamplerBinding
 
     internal FeSamplerHandle Handle { get; }
     public SamplerDesc Desc { get; }
-    FeSamplerHandle IGpuSamplerBinding.NativeSamplerHandle => Handle;
+    FeSamplerHandle INativeSamplerBinding.NativeSamplerHandle => Handle;
 
     internal static SamplerState Create(GpuContext context, SamplerDesc desc)
     {
+        ArgumentNullException.ThrowIfNull(context);
         var nativeDesc = new FeSamplerDesc(
             (uint)desc.MinFilter,
             (uint)desc.MagFilter,
@@ -115,8 +116,12 @@ public readonly struct SamplerState : IDisposable, IGpuSamplerBinding
             desc.CompareEnabled ? 1u : 0u,
             (uint)desc.CompareOp,
             (uint)desc.BorderColor);
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_sampler_create(context.Handle, in nativeDesc, out var handle));
-        return new SamplerState(handle, desc);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_sampler_create(context.Handle, in nativeDesc, out var handle));
+            return new SamplerState(handle, desc);
+        }
     }
 
     public void Dispose()

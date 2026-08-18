@@ -43,6 +43,12 @@ public class GeneratorAndAnalyzerTests
         Assert.Contains("KernelDimension.One", source);
         Assert.Contains("ResourceKind.Buffer", source);
         Assert.Contains("ResourceAccess.ReadWrite", source);
+        Assert.Contains("private static readonly byte[] __feather_ir", source);
+        Assert.Contains("private static readonly global::Feather.Interop.KernelDescriptor __feather_descriptor", source);
+        Assert.Contains(".IR => __feather_ir;", source);
+        Assert.Contains(".Descriptor => __feather_descriptor;", source);
+        Assert.Contains("private readonly global::Feather.Resources.IGpuBufferBinding", source);
+        Assert.DoesNotContain("global::Feather.Native.FeBufferHandle", source);
 
         var module = ReadGeneratedIr(source);
 
@@ -303,12 +309,19 @@ public class GeneratorAndAnalyzerTests
 
         Assert.Contains("IGeneratedGraphicsPipeline<global::Scratch.TestVS, global::Scratch.TestFS, global::Feather.Math.float4>", source);
         Assert.Contains("GraphicsPipelineDescriptor", source);
-        Assert.Contains(".VertexIR => new byte[]", source);
-        Assert.Contains(".FragmentIR => new byte[]", source);
+        Assert.Contains("private static readonly byte[] __feather_vertex_ir__TestVS_TestFS", source);
+        Assert.Contains("private static readonly byte[] __feather_fragment_ir__TestVS_TestFS", source);
+        Assert.Contains("private static readonly global::Feather.Interop.GraphicsPipelineDescriptor __feather_graphics_descriptor__TestVS_TestFS", source);
+        Assert.DoesNotContain(".VertexIR => new byte[]", source);
+        Assert.DoesNotContain(".FragmentIR => new byte[]", source);
         Assert.Contains("BindVertex", source);
         Assert.Contains("BindFragment", source);
         Assert.Contains("ResourceKind.Buffer", source);
         Assert.Contains("ResourceKind.Sampler", source);
+        Assert.Contains("private readonly global::Feather.Resources.IGpuBufferBinding", source);
+        Assert.Contains("private readonly global::Feather.Resources.IGpuSamplerBinding", source);
+        Assert.DoesNotContain("global::Feather.Native.FeBufferHandle", source);
+        Assert.DoesNotContain("global::Feather.Native.FeSamplerHandle", source);
     }
 
     [Fact]

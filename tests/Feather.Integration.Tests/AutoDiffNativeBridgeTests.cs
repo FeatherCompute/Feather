@@ -44,6 +44,33 @@ public class AutoDiffNativeBridgeTests
     }
 
     [Fact]
+    public unsafe void ADBackwardReusesShapeSpecializedPipelineAndGradientWorkspace()
+    {
+        using var parameters = GPU.CreateBuffer<float>([3f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var gpuKernel = GpuKernel.Create<ScalarQuadraticAdKernel>(GPU.Context);
+        var kernel = new ScalarQuadraticAdKernel(parameters.AsReadWrite(), loss.AsReadWrite());
+
+        DispatchRetained(gpuKernel, kernel, 1);
+        Assert.Equal(1ul, gpuKernel.CompilationCount);
+        DispatchRetained(gpuKernel, kernel, 1);
+
+        Assert.Equal(1ul, gpuKernel.CompilationCount);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_ad_gradient_info(gpuKernel.Handle, 0, out var info));
+        var gradients = new float[checked((int)(info.ByteSize / sizeof(float)))];
+        fixed (float* ptr = gradients)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_read_ad_gradient(
+                gpuKernel.Handle,
+                0,
+                0,
+                info.ByteSize,
+                (IntPtr)ptr));
+        }
+        Assert.InRange(gradients[0], 5.99f, 6.01f);
+    }
+
+    [Fact]
     public void ADBackwardKeepsFusedMultiplyAddPeepholeDisabled()
     {
         using var scale = GPU.CreateBuffer<float>([2f]);

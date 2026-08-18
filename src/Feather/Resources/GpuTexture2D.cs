@@ -13,6 +13,7 @@ public interface IGpuTexture2D
 
 internal interface IGpuTexture2DNative : IGpuTexture2D
 {
+    GpuContext Context { get; }
     FeTextureHandle NativeHandle { get; }
 }
 
@@ -37,6 +38,7 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
 
     internal GpuContext Context { get; }
     internal FeTextureHandle Handle { get; }
+    GpuContext IGpuTexture2DNative.Context => Context;
     FeTextureHandle IGpuTexture2DNative.NativeHandle => GetNativeHandle();
 
     internal FeTextureHandle GetNativeHandle()
@@ -110,34 +112,38 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
         }
 
         var desc = new FeTexture2DDesc((uint)width, (uint)height, (uint)mipLevels, (uint)format, (uint)access);
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(context.Handle, in desc, IntPtr.Zero, out var handle));
-        return new GpuTexture2D<TPixel, TValue>(context, handle, width, height, mipLevels, format, access);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(context.Handle, in desc, IntPtr.Zero, out var handle));
+            return new GpuTexture2D<TPixel, TValue>(context, handle, width, height, mipLevels, format, access);
+        }
     }
 
     /// <summary>
     /// Creates a shader-facing read-only texture view over this texture.
     /// </summary>
-    public ReadOnlyTexture2D<TValue> AsReadOnly() => new(Handle, Size);
+    public ReadOnlyTexture2D<TValue> AsReadOnly() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing write-only texture view over this texture.
     /// </summary>
-    public WriteOnlyTexture2D<TValue> AsWriteOnly() => new(Handle, Size);
+    public WriteOnlyTexture2D<TValue> AsWriteOnly() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing read-write texture view over this texture.
     /// </summary>
-    public ReadWriteTexture2D<TValue> AsReadWrite() => new(Handle, Size);
+    public ReadWriteTexture2D<TValue> AsReadWrite() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing normalized read-write texture view over this texture.
     /// </summary>
-    public ReadWriteNormalizedTexture2D<TValue> AsReadWriteNormalized() => new(Handle, Size);
+    public ReadWriteNormalizedTexture2D<TValue> AsReadWriteNormalized() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Creates a shader-facing sampled texture view over this texture.
     /// </summary>
-    public SampledTexture2D<TValue> AsSampled() => new(Handle, Size);
+    public SampledTexture2D<TValue> AsSampled() => new(GetNativeHandle(), Size);
 
     /// <summary>
     /// Uploads pixels into the base texture level.
@@ -151,9 +157,13 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
             throw new ArgumentException("Pixel span is shorter than texture area.", nameof(pixels));
         }
 
-        fixed (TPixel* ptr = pixels)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_upload(Handle, 0, 0, (uint)Width, (uint)Height, (IntPtr)ptr));
+            fixed (TPixel* ptr = pixels)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_upload(Handle, 0, 0, (uint)Width, (uint)Height, (IntPtr)ptr));
+            }
         }
     }
 
@@ -169,9 +179,13 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
             throw new ArgumentException("Pixel span is shorter than texture area.", nameof(pixels));
         }
 
-        fixed (TPixel* ptr = pixels)
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
         {
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_download(Handle, 0, 0, (uint)Width, (uint)Height, (IntPtr)ptr));
+            fixed (TPixel* ptr = pixels)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_download(Handle, 0, 0, (uint)Width, (uint)Height, (IntPtr)ptr));
+            }
         }
     }
 
@@ -181,7 +195,11 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     public void GenerateMipmaps()
     {
         ThrowIfDisposed();
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_generate_mipmaps(Handle));
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_generate_mipmaps(Handle));
+        }
     }
 
     /// <summary>
@@ -414,7 +432,7 @@ internal static class TextureImageCodec
         where TPixel : unmanaged;
 }
 
-public readonly struct ReadOnlyTexture2D<T> : IGpuTextureBinding
+public readonly struct ReadOnlyTexture2D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadOnlyTexture2D(FeTextureHandle handle, int2 size)
@@ -425,11 +443,11 @@ public readonly struct ReadOnlyTexture2D<T> : IGpuTextureBinding
 
     internal FeTextureHandle Handle { get; }
     public int2 Size { get; }
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
     public T this[int2 xy] => ShaderRuntimeMarker<T>.Value;
 }
 
-public readonly struct WriteOnlyTexture2D<T> : IGpuTextureBinding
+public readonly struct WriteOnlyTexture2D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal WriteOnlyTexture2D(FeTextureHandle handle, int2 size)
@@ -440,14 +458,14 @@ public readonly struct WriteOnlyTexture2D<T> : IGpuTextureBinding
 
     internal FeTextureHandle Handle { get; }
     public int2 Size { get; }
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
     public T this[int2 xy]
     {
         set => _ = value;
     }
 }
 
-public readonly struct ReadWriteTexture2D<T> : IGpuTextureBinding
+public readonly struct ReadWriteTexture2D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadWriteTexture2D(FeTextureHandle handle, int2 size)
@@ -458,7 +476,7 @@ public readonly struct ReadWriteTexture2D<T> : IGpuTextureBinding
 
     internal FeTextureHandle Handle { get; }
     public int2 Size { get; }
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
     public T this[int2 xy]
     {
         get => ShaderRuntimeMarker<T>.Value;
@@ -466,7 +484,7 @@ public readonly struct ReadWriteTexture2D<T> : IGpuTextureBinding
     }
 }
 
-public readonly struct ReadWriteNormalizedTexture2D<T> : IGpuTextureBinding
+public readonly struct ReadWriteNormalizedTexture2D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal ReadWriteNormalizedTexture2D(FeTextureHandle handle, int2 size)
@@ -477,7 +495,7 @@ public readonly struct ReadWriteNormalizedTexture2D<T> : IGpuTextureBinding
 
     internal FeTextureHandle Handle { get; }
     public int2 Size { get; }
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
     public T this[int2 xy]
     {
         get => ShaderRuntimeMarker<T>.Value;
@@ -485,7 +503,7 @@ public readonly struct ReadWriteNormalizedTexture2D<T> : IGpuTextureBinding
     }
 }
 
-public readonly struct SampledTexture2D<T> : IGpuTextureBinding
+public readonly struct SampledTexture2D<T> : IGpuTextureBinding, INativeTextureBinding
     where T : unmanaged
 {
     internal SampledTexture2D(FeTextureHandle handle, int2 size)
@@ -496,7 +514,7 @@ public readonly struct SampledTexture2D<T> : IGpuTextureBinding
 
     internal FeTextureHandle Handle { get; }
     public int2 Size { get; }
-    FeTextureHandle IGpuTextureBinding.NativeTextureHandle => Handle;
+    FeTextureHandle INativeTextureBinding.NativeTextureHandle => Handle;
 
     public T Sample(SamplerState sampler, float2 uv) => ShaderRuntimeMarker<T>.Value;
 

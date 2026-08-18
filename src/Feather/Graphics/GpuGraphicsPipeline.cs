@@ -11,9 +11,12 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
     where TVaryings : unmanaged
 {
     private bool disposed;
+    private readonly GpuContext context;
+    private readonly object dispatchGate = new();
 
-    private GpuGraphicsPipeline(FeGraphicsPipelineHandle handle, GraphicsPipelineDesc desc)
+    private GpuGraphicsPipeline(GpuContext context, FeGraphicsPipelineHandle handle, GraphicsPipelineDesc desc)
     {
+        this.context = context;
         Handle = handle;
         Desc = desc;
     }
@@ -28,9 +31,13 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
     {
         get
         {
-            ThrowIfDisposed();
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_get_last_dispatch_path(Handle, out var path));
-            return (DispatchPath)path;
+            using var operation = context.EnterOperation();
+            lock (dispatchGate)
+            {
+                ThrowIfDisposed();
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_get_last_dispatch_path(Handle, out var path));
+                return (DispatchPath)path;
+            }
         }
     }
 
@@ -101,7 +108,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     normalized.Raster.DepthClamp ? 1u : 0u,
                     normalized.DebugName ?? typeof(TVertexShader).Name + "+" + typeof(TFragmentShader).Name);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(handle, normalized);
+                return new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(context, handle, normalized);
             }
         }
     }
@@ -248,10 +255,21 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         GraphicsDrawDesc drawDesc,
         bool wait)
     {
-        var command = new GpuGraphicsCommand(Handle);
-        TVertexShader.BindVertex(in vertexShader, command);
-        TFragmentShader.BindFragment(in fragmentShader, command);
-        DrawNative(targets, depthTarget, vertexCount, FeBufferHandle.Null, indexed: false, drawDesc, wait);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            var leases = ExecuteDraw(
+                vertexShader,
+                fragmentShader,
+                targets,
+                depthTarget,
+                vertexCount,
+                FeBufferHandle.Null,
+                indexed: false,
+                drawDesc,
+                wait);
+            CompleteImmediateDraw(leases, wait);
+        }
     }
 
     /// <summary>
@@ -268,8 +286,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         where TIndex : unmanaged
     {
         ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(indices);
-        DrawIndexedCore(vertexShader, fragmentShader, [target], null, indices.GetNativeHandle(), (uint)indices.Length, default, wait);
+        var indexBuffer = GetValidatedIndexBuffer(indices);
+        DrawIndexedCore(vertexShader, fragmentShader, [target], null, indexBuffer, (uint)indices.Length, default, wait);
     }
 
     /// <summary>
@@ -289,8 +307,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         where TIndex : unmanaged
     {
         ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(indices);
-        DrawIndexedCore(vertexShader, fragmentShader, [target], depthTarget, indices.GetNativeHandle(), (uint)indices.Length, default, wait);
+        var indexBuffer = GetValidatedIndexBuffer(indices);
+        DrawIndexedCore(vertexShader, fragmentShader, [target], depthTarget, indexBuffer, (uint)indices.Length, default, wait);
     }
 
     public void DrawIndexed<TIndex>(
@@ -303,8 +321,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         where TIndex : unmanaged
     {
         ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(indices);
-        DrawIndexedCore(vertexShader, fragmentShader, targets, null, indices.GetNativeHandle(), (uint)indices.Length, drawDesc, wait);
+        var indexBuffer = GetValidatedIndexBuffer(indices);
+        DrawIndexedCore(vertexShader, fragmentShader, targets, null, indexBuffer, (uint)indices.Length, drawDesc, wait);
     }
 
     public void DrawIndexed<TIndex>(
@@ -319,8 +337,19 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(depthTarget);
+        var indexBuffer = GetValidatedIndexBuffer(indices);
+        DrawIndexedCore(vertexShader, fragmentShader, targets, depthTarget, indexBuffer, (uint)indices.Length, drawDesc, wait);
+    }
+
+    private FeBufferHandle GetValidatedIndexBuffer<TIndex>(GpuBuffer<TIndex> indices)
+        where TIndex : unmanaged
+    {
         ArgumentNullException.ThrowIfNull(indices);
-        DrawIndexedCore(vertexShader, fragmentShader, targets, depthTarget, indices.GetNativeHandle(), (uint)indices.Length, drawDesc, wait);
+        if (!ReferenceEquals(indices.Context, context))
+        {
+            throw new ArgumentException("The index buffer belongs to a different GPU context.", nameof(indices));
+        }
+        return indices.GetNativeHandle();
     }
 
     private void DrawIndexedCore(
@@ -333,13 +362,75 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         GraphicsDrawDesc drawDesc,
         bool wait)
     {
-        var command = new GpuGraphicsCommand(Handle);
-        TVertexShader.BindVertex(in vertexShader, command);
-        TFragmentShader.BindFragment(in fragmentShader, command);
-        DrawNative(targets, depthTarget, indexCount, indexBuffer, indexed: true, drawDesc, wait);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            var leases = ExecuteDraw(
+                vertexShader,
+                fragmentShader,
+                targets,
+                depthTarget,
+                indexCount,
+                indexBuffer,
+                indexed: true,
+                drawDesc,
+                wait);
+            CompleteImmediateDraw(leases, wait);
+        }
+    }
+
+    internal GpuContext Context => context;
+
+    internal List<IDisposable> DrawForQueue(
+        TVertexShader vertexShader,
+        TFragmentShader fragmentShader,
+        ReadOnlySpan<IGpuTexture2D> targets,
+        IGpuTexture2D? depthTarget,
+        uint count,
+        FeBufferHandle indexBuffer,
+        bool indexed,
+        GraphicsDrawDesc drawDesc)
+        => ExecuteDraw(vertexShader, fragmentShader, targets, depthTarget, count, indexBuffer, indexed, drawDesc, wait: false);
+
+    private List<IDisposable> ExecuteDraw(
+        TVertexShader vertexShader,
+        TFragmentShader fragmentShader,
+        ReadOnlySpan<IGpuTexture2D> targets,
+        IGpuTexture2D? depthTarget,
+        uint count,
+        FeBufferHandle indexBuffer,
+        bool indexed,
+        GraphicsDrawDesc drawDesc,
+        bool wait)
+    {
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            using var command = new GpuGraphicsCommand(Handle);
+            TVertexShader.BindVertex(in vertexShader, command);
+            TFragmentShader.BindFragment(in fragmentShader, command);
+            DrawNative(command, targets, depthTarget, count, indexBuffer, indexed, drawDesc, wait);
+            return command.DetachLeases();
+        }
+    }
+
+    private void CompleteImmediateDraw(List<IDisposable> leases, bool wait)
+    {
+        if (!wait)
+        {
+            context.TrackSubmission(leases);
+            return;
+        }
+
+        foreach (var lease in leases)
+        {
+            lease.Dispose();
+        }
+        context.CompleteSubmittedWork();
     }
 
     private unsafe void DrawNative(
+        GpuGraphicsCommand command,
         ReadOnlySpan<IGpuTexture2D> targets,
         IGpuTexture2D? depthTarget,
         uint count,
@@ -362,8 +453,14 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
             {
                 throw new ArgumentException("Graphics draw targets must be Feather GPU textures.", nameof(targets));
             }
+            if (!ReferenceEquals(native.Context, context))
+            {
+                throw new ArgumentException("Graphics draw targets must belong to this pipeline's context.", nameof(targets));
+            }
 
-            colorHandles[i] = native.NativeHandle.RawValue;
+            var targetHandle = native.NativeHandle;
+            command.Retain(targetHandle);
+            colorHandles[i] = targetHandle.RawValue;
         }
 
         ulong depthHandle = 0;
@@ -373,8 +470,19 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
             {
                 throw new ArgumentException("Graphics depth target must be a Feather GPU texture.", nameof(depthTarget));
             }
+            if (!ReferenceEquals(nativeDepth.Context, context))
+            {
+                throw new ArgumentException("Graphics depth target must belong to this pipeline's context.", nameof(depthTarget));
+            }
 
-            depthHandle = nativeDepth.NativeHandle.RawValue;
+            var nativeDepthHandle = nativeDepth.NativeHandle;
+            command.Retain(nativeDepthHandle);
+            depthHandle = nativeDepthHandle.RawValue;
+        }
+
+        if (indexed)
+        {
+            command.Retain(indexBuffer);
         }
 
         fixed (ulong* colorPtr = colorHandles)
@@ -671,13 +779,15 @@ public readonly record struct GraphicsDrawDesc
     public uint FirstInstance { get; init; }
 }
 
-public sealed class GpuGraphicsCommand
+public sealed class GpuGraphicsCommand : IDisposable
 {
     private byte[]? pushConstants;
+    private List<IDisposable>? leases = [];
 
     internal GpuGraphicsCommand(FeGraphicsPipelineHandle handle)
     {
         Handle = handle;
+        Retain(handle);
     }
 
     internal FeGraphicsPipelineHandle Handle { get; }
@@ -685,34 +795,54 @@ public sealed class GpuGraphicsCommand
     /// <summary>
     /// Sets the vertex buffer consumed by the generated graphics pipeline.
     /// </summary>
-    /// <param name="buffer">The native buffer handle.</param>
+    /// <param name="buffer">The vertex buffer.</param>
     /// <param name="stride">The vertex stride in bytes.</param>
-    public void SetVertexBuffer(Native.FeBufferHandle buffer, uint stride)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_set_vertex_buffer(Handle, buffer, stride));
+    public void SetVertexBuffer<T>(GpuBuffer<T> buffer, uint stride)
+        where T : unmanaged
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        Retain(buffer.Handle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_set_vertex_buffer(Handle, buffer.Handle, stride));
+    }
 
     /// <summary>
     /// Binds a native buffer handle to a generated graphics resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
     /// <param name="buffer">The native buffer handle.</param>
-    public void BindBuffer(uint binding, Native.FeBufferHandle buffer)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_buffer(Handle, binding, buffer));
+    public void BindBuffer(uint binding, IGpuBufferBinding buffer)
+    {
+        var native = buffer as INativeBufferBinding
+            ?? throw new ArgumentException("Buffer binding was not created by Feather.", nameof(buffer));
+        Retain(native.NativeBufferHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_buffer(Handle, binding, native.NativeBufferHandle));
+    }
 
     /// <summary>
     /// Binds a native texture handle to a generated graphics resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
     /// <param name="texture">The native texture handle.</param>
-    public void BindTexture(uint binding, Native.FeTextureHandle texture)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_texture(Handle, binding, texture));
+    public void BindTexture(uint binding, IGpuTextureBinding texture)
+    {
+        var native = texture as INativeTextureBinding
+            ?? throw new ArgumentException("Texture binding was not created by Feather.", nameof(texture));
+        Retain(native.NativeTextureHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_texture(Handle, binding, native.NativeTextureHandle));
+    }
 
     /// <summary>
     /// Binds a native sampler handle to a generated graphics resource slot.
     /// </summary>
     /// <param name="binding">The shader binding index.</param>
     /// <param name="sampler">The native sampler handle.</param>
-    public void BindSampler(uint binding, Native.FeSamplerHandle sampler)
-        => NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_sampler(Handle, binding, sampler));
+    public void BindSampler(uint binding, IGpuSamplerBinding sampler)
+    {
+        var native = sampler as INativeSamplerBinding
+            ?? throw new ArgumentException("Sampler binding was not created by Feather.", nameof(sampler));
+        Retain(native.NativeSamplerHandle);
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_bind_sampler(Handle, binding, native.NativeSamplerHandle));
+    }
 
     /// <summary>
     /// Uploads the complete push-constant byte block for the current generated graphics pipeline.
@@ -748,5 +878,28 @@ public sealed class GpuGraphicsCommand
 
         data.CopyTo(pushConstants.AsSpan((int)offset, data.Length));
         SetPushConstants(pushConstants);
+    }
+
+    internal void Retain(FeSafeHandle handle)
+        => (leases ?? throw new ObjectDisposedException(nameof(GpuGraphicsCommand))).Add(new NativeHandleLease(handle));
+
+    internal List<IDisposable> DetachLeases()
+    {
+        var detached = leases ?? throw new ObjectDisposedException(nameof(GpuGraphicsCommand));
+        leases = null;
+        return detached;
+    }
+
+    public void Dispose()
+    {
+        if (leases is null)
+        {
+            return;
+        }
+        foreach (var lease in leases)
+        {
+            lease.Dispose();
+        }
+        leases = null;
     }
 }

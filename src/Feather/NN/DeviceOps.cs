@@ -102,7 +102,7 @@ internal static class NnDeviceOps
                 output.AsReadWriteBuffer(),
                 new Uniform<int>(featureSize),
                 new Uniform<float>(epsilon)),
-            input.ElementCount / featureSize);
+            checked((input.ElementCount / featureSize) * ReductionChunkSize));
         NnDispatchTrace.Record("LayerNorm.Forward", path);
         return output;
     }
@@ -126,7 +126,7 @@ internal static class NnDeviceOps
                 new Uniform<float>(epsilon),
                 new Uniform<float>(momentum),
                 new Uniform<int>(training ? 1 : 0)),
-            featureSize);
+            checked(featureSize * ReductionChunkSize));
         NnDispatchTrace.Record("BatchNorm1D.Forward", path);
         return output;
     }
@@ -159,7 +159,7 @@ internal static class NnDeviceOps
                 output.AsReadWriteBuffer(),
                 new Uniform<int>(classes),
                 new Uniform<int>(log ? 1 : 0)),
-            rows);
+            checked(rows * ReductionChunkSize));
         NnDispatchTrace.Record(log ? "Activation.LogSoftmax" : "Activation.Softmax", path);
         return output;
     }
@@ -463,10 +463,12 @@ public readonly partial struct NnSoftmaxKernel(
 {
     public void Execute()
     {
-        int row = ThreadIds.X;
+        int row = GroupIds.X;
+        int lane = LocalIds.X;
         int offset = row * classes.Value;
-        float maximum = input[offset];
-        for (int cls = 1; cls < classes.Value; cls++)
+        var reduction = new SharedMemory<float>(256);
+        float maximum = -3.402823466e+38f;
+        for (int cls = lane; cls < classes.Value; cls += 256)
         {
             float value = input[offset + cls];
             if (value > maximum)
@@ -474,15 +476,37 @@ public readonly partial struct NnSoftmaxKernel(
                 maximum = value;
             }
         }
+        reduction[lane] = maximum;
+        GpuBarrier.Workgroup();
+        for (int stride = 128; stride > 0; stride /= 2)
+        {
+            if (lane < stride && reduction[lane + stride] > reduction[lane])
+            {
+                reduction[lane] = reduction[lane + stride];
+            }
+            GpuBarrier.Workgroup();
+        }
+        maximum = reduction[0];
 
         float sumExp = 0f;
-        for (int cls = 0; cls < classes.Value; cls++)
+        for (int cls = lane; cls < classes.Value; cls += 256)
         {
             sumExp += ShaderMath.Exp(input[offset + cls] - maximum);
         }
+        reduction[lane] = sumExp;
+        GpuBarrier.Workgroup();
+        for (int stride = 128; stride > 0; stride /= 2)
+        {
+            if (lane < stride)
+            {
+                reduction[lane] += reduction[lane + stride];
+            }
+            GpuBarrier.Workgroup();
+        }
+        sumExp = reduction[0];
 
         float logSum = ShaderMath.Log(sumExp);
-        for (int cls = 0; cls < classes.Value; cls++)
+        for (int cls = lane; cls < classes.Value; cls += 256)
         {
             float shifted = input[offset + cls] - maximum;
             if (log.Value != 0)
@@ -527,25 +551,45 @@ public readonly partial struct NnLayerNormForwardKernel(
 {
     public void Execute()
     {
-        int row = ThreadIds.X;
+        int row = GroupIds.X;
+        int lane = LocalIds.X;
         int offset = row * featureSize.Value;
+        var reduction = new SharedMemory<float>(256);
         float mean = 0f;
-        for (int feature = 0; feature < featureSize.Value; feature++)
+        for (int feature = lane; feature < featureSize.Value; feature += 256)
         {
             mean += input[offset + feature];
         }
-
-        mean /= featureSize.Value;
+        reduction[lane] = mean;
+        GpuBarrier.Workgroup();
+        for (int stride = 128; stride > 0; stride /= 2)
+        {
+            if (lane < stride)
+            {
+                reduction[lane] += reduction[lane + stride];
+            }
+            GpuBarrier.Workgroup();
+        }
+        mean = reduction[0] / featureSize.Value;
         float variance = 0f;
-        for (int feature = 0; feature < featureSize.Value; feature++)
+        for (int feature = lane; feature < featureSize.Value; feature += 256)
         {
             float centered = input[offset + feature] - mean;
             variance += centered * centered;
         }
-
-        variance /= featureSize.Value;
+        reduction[lane] = variance;
+        GpuBarrier.Workgroup();
+        for (int stride = 128; stride > 0; stride /= 2)
+        {
+            if (lane < stride)
+            {
+                reduction[lane] += reduction[lane + stride];
+            }
+            GpuBarrier.Workgroup();
+        }
+        variance = reduction[0] / featureSize.Value;
         float inverseStdDev = 1f / ShaderMath.Sqrt(variance + epsilon.Value);
-        for (int feature = 0; feature < featureSize.Value; feature++)
+        for (int feature = lane; feature < featureSize.Value; feature += 256)
         {
             float normalized = (input[offset + feature] - mean) * inverseStdDev;
             output[offset + feature] = (normalized * gamma[feature]) + beta[feature];
@@ -570,32 +614,55 @@ public readonly partial struct NnBatchNormForwardKernel(
 {
     public void Execute()
     {
-        int feature = ThreadIds.X;
+        int feature = GroupIds.X;
+        int lane = LocalIds.X;
+        var reduction = new SharedMemory<float>(256);
         float mean = runningMean[feature];
         float variance = runningVariance[feature];
         if (training.Value != 0)
         {
             mean = 0f;
-            for (int row = 0; row < batch.Value; row++)
+            for (int row = lane; row < batch.Value; row += 256)
             {
                 mean += input[(row * featureSize.Value) + feature];
             }
-
-            mean /= batch.Value;
+            reduction[lane] = mean;
+            GpuBarrier.Workgroup();
+            for (int stride = 128; stride > 0; stride /= 2)
+            {
+                if (lane < stride)
+                {
+                    reduction[lane] += reduction[lane + stride];
+                }
+                GpuBarrier.Workgroup();
+            }
+            mean = reduction[0] / batch.Value;
             variance = 0f;
-            for (int row = 0; row < batch.Value; row++)
+            for (int row = lane; row < batch.Value; row += 256)
             {
                 float centered = input[(row * featureSize.Value) + feature] - mean;
                 variance += centered * centered;
             }
-
-            variance /= batch.Value;
-            runningMean[feature] = ((1f - momentum.Value) * runningMean[feature]) + (momentum.Value * mean);
-            runningVariance[feature] = ((1f - momentum.Value) * runningVariance[feature]) + (momentum.Value * variance);
+            reduction[lane] = variance;
+            GpuBarrier.Workgroup();
+            for (int stride = 128; stride > 0; stride /= 2)
+            {
+                if (lane < stride)
+                {
+                    reduction[lane] += reduction[lane + stride];
+                }
+                GpuBarrier.Workgroup();
+            }
+            variance = reduction[0] / batch.Value;
+            if (lane == 0)
+            {
+                runningMean[feature] = ((1f - momentum.Value) * runningMean[feature]) + (momentum.Value * mean);
+                runningVariance[feature] = ((1f - momentum.Value) * runningVariance[feature]) + (momentum.Value * variance);
+            }
         }
 
         float inverseStdDev = 1f / ShaderMath.Sqrt(variance + epsilon.Value);
-        for (int row = 0; row < batch.Value; row++)
+        for (int row = lane; row < batch.Value; row += 256)
         {
             int index = (row * featureSize.Value) + feature;
             float normalized = (input[index] - mean) * inverseStdDev;

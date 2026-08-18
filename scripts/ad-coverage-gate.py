@@ -47,7 +47,7 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
         ((12, 34), (44, 124), (128, 144), (150, 181), (190, 339)),
         ("Feather/AD/AD.cs",),
     ),
-    ScopeEntry("src/Feather/Core/GPU.cs", "GPU.CreateADKernel facade", ((173, 178),), ("Feather/Core/GPU.cs",)),
+    ScopeEntry("src/Feather/Core/GPU.cs", "GPU.CreateADKernel facade", ((200, 205),), ("Feather/Core/GPU.cs",)),
     ScopeEntry("src/Feather/Kernels/GpuKernel.cs", "retained dispatch path that drives native AD", ((35, 92),), ("Feather/Kernels/GpuKernel.cs",)),
     ScopeEntry("src/Feather.Native/NativeMethods.cs", "AD native P/Invoke declarations", ((230, 248),), ("Feather.Native/NativeMethods.cs",)),
     ScopeEntry("src/Feather.Native/NativeStructs.cs", "AD kernel-create flag and gradient metadata ABI", ((112, 130), (176, 205)), ("Feather.Native/NativeStructs.cs",)),

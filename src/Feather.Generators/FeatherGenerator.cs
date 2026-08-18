@@ -144,9 +144,8 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             {{nsOpen}}partial struct {{model.Name}} : global::Feather.Interop.IGeneratedKernel<{{model.Name}}>
             {
             {{accessors}}
-                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedKernel<{{model.Name}}>.IR => new byte[] { {{ir}} };
-
-                static global::Feather.Interop.KernelDescriptor global::Feather.Interop.IGeneratedKernel<{{model.Name}}>.Descriptor => new(
+                private static readonly byte[] __feather_ir = new byte[] { {{ir}} };
+                private static readonly global::Feather.Interop.KernelDescriptor __feather_descriptor = new(
                     {{dimension}},
                     new global::Feather.Math.int3({{model.ThreadGroup.X}}, {{model.ThreadGroup.Y}}, {{model.ThreadGroup.Z}}),
                     new global::Feather.Interop.ResourceDescriptor[]
@@ -157,6 +156,10 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                     {{model.BoundsCheck.ToString().ToLowerInvariant()}},
                     {{model.AutoDiff.ToString().ToLowerInvariant()}},
                     "{{model.Name}}");
+
+                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedKernel<{{model.Name}}>.IR => __feather_ir;
+
+                static global::Feather.Interop.KernelDescriptor global::Feather.Interop.IGeneratedKernel<{{model.Name}}>.Descriptor => __feather_descriptor;
 
                 static void global::Feather.Interop.IGeneratedKernel<{{model.Name}}>.Bind(in {{model.Name}} kernel, global::Feather.GpuKernelCommand command)
                 {
@@ -530,6 +533,14 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                 private static readonly byte[] {{fragmentIrField}} = {{decodeIrMethod}}("{{fragmentIr}}");
                 internal static global::System.ReadOnlySpan<byte> {{vertexIrField}}_span => {{vertexIrField}};
                 internal static global::System.ReadOnlySpan<byte> {{fragmentIrField}}_span => {{fragmentIrField}};
+                private static readonly global::Feather.Interop.GraphicsPipelineDescriptor __feather_graphics_descriptor{{accessorSuffix}} = new(
+                    new global::Feather.Interop.ResourceDescriptor[]
+                    {
+            {{resources}}
+                    },
+                    {{pushConstants}},
+                    "{{pipeline.VertexShader.Name}}",
+                    "{{pipeline.FragmentShader.Name}}");
 
                 private static byte[] {{decodeIrMethod}}(string encoded)
                 {
@@ -541,21 +552,11 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                     return expanded.ToArray();
                 }
 
-                // IR used to be duplicated inline for both shader types:
-                // .VertexIR => new byte[]
-                // .FragmentIR => new byte[]
                 static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.IR => {{vertexIrField}};
                 static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.VertexIR => {{vertexIrField}};
                 static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.FragmentIR => {{fragmentIrField}};
 
-                static global::Feather.Interop.GraphicsPipelineDescriptor global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.Descriptor => new(
-                    new global::Feather.Interop.ResourceDescriptor[]
-                    {
-            {{resources}}
-                    },
-                    {{pushConstants}},
-                    "{{pipeline.VertexShader.Name}}",
-                    "{{pipeline.FragmentShader.Name}}");
+                static global::Feather.Interop.GraphicsPipelineDescriptor global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.Descriptor => __feather_graphics_descriptor{{accessorSuffix}};
 
                 static void global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.BindVertex(in {{pipeline.VertexShader.FullyQualifiedMetadataName}} shader, global::Feather.Graphics.GpuGraphicsCommand command)
                 {
@@ -570,11 +571,7 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             partial struct {{pipeline.FragmentShader.Name}} : global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>
             {
             {{fragmentAccessors}}
-                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.IR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{vertexIrField}}_span;
-                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.VertexIR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{vertexIrField}}_span;
-                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.FragmentIR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{fragmentIrField}}_span;
-
-                static global::Feather.Interop.GraphicsPipelineDescriptor global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.Descriptor => new(
+                private static readonly global::Feather.Interop.GraphicsPipelineDescriptor __feather_graphics_descriptor{{accessorSuffix}} = new(
                     new global::Feather.Interop.ResourceDescriptor[]
                     {
             {{resources}}
@@ -582,6 +579,11 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                     {{pushConstants}},
                     "{{pipeline.VertexShader.Name}}",
                     "{{pipeline.FragmentShader.Name}}");
+                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.IR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{vertexIrField}}_span;
+                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.VertexIR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{vertexIrField}}_span;
+                static global::System.ReadOnlySpan<byte> global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.FragmentIR => {{pipeline.VertexShader.FullyQualifiedMetadataName}}.{{fragmentIrField}}_span;
+
+                static global::Feather.Interop.GraphicsPipelineDescriptor global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.Descriptor => __feather_graphics_descriptor{{accessorSuffix}};
 
                 static void global::Feather.Interop.IGeneratedGraphicsPipeline<{{pipeline.VertexShader.FullyQualifiedMetadataName}}, {{pipeline.FragmentShader.FullyQualifiedMetadataName}}, {{pipeline.VaryingsTypeName}}>.BindVertex(in {{pipeline.VertexShader.FullyQualifiedMetadataName}} shader, global::Feather.Graphics.GpuGraphicsCommand command)
                 {
@@ -637,33 +639,33 @@ public sealed class FeatherGenerator : IIncrementalGenerator
         var builder = new StringBuilder();
         foreach (var resource in model.Resources.Items)
         {
-            builder.AppendLine("    // Generated binding accessors bridge primary-constructor resources to native handles.");
+            builder.AppendLine("    // Generated accessors bridge primary-constructor resources to dispatch binding code.");
             switch (resource.Kind)
             {
                 case ResourceKindModel.Buffer:
-                    builder.Append("    private readonly global::Feather.Native.FeBufferHandle __feather_buffer_")
+                    builder.Append("    private readonly global::Feather.Resources.IGpuBufferBinding __feather_buffer_")
                         .Append(resource.Name)
                         .Append(accessorSuffix)
-                        .Append("() => ((global::Feather.Resources.IGpuBufferBinding)")
+                        .Append("() => ")
                         .Append(resource.Name)
-                        .AppendLine(").NativeBufferHandle;");
+                        .AppendLine(";");
                     break;
                 case ResourceKindModel.Texture2D:
                 case ResourceKindModel.Texture3D:
-                    builder.Append("    private readonly global::Feather.Native.FeTextureHandle __feather_texture_")
+                    builder.Append("    private readonly global::Feather.Resources.IGpuTextureBinding __feather_texture_")
                         .Append(resource.Name)
                         .Append(accessorSuffix)
-                        .Append("() => ((global::Feather.Resources.IGpuTextureBinding)")
+                        .Append("() => ")
                         .Append(resource.Name)
-                        .AppendLine(").NativeTextureHandle;");
+                        .AppendLine(";");
                     break;
                 case ResourceKindModel.Sampler:
-                    builder.Append("    private readonly global::Feather.Native.FeSamplerHandle __feather_sampler_")
+                    builder.Append("    private readonly global::Feather.Resources.IGpuSamplerBinding __feather_sampler_")
                         .Append(resource.Name)
                         .Append(accessorSuffix)
-                        .Append("() => ((global::Feather.Resources.IGpuSamplerBinding)")
+                        .Append("() => ")
                         .Append(resource.Name)
-                        .AppendLine(").NativeSamplerHandle;");
+                        .AppendLine(";");
                     break;
                 case ResourceKindModel.PushConstant:
                     builder.Append("    private readonly ")

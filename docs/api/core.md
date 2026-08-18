@@ -27,9 +27,9 @@ DispatchPath path = GPU.DispatchAndGetPath(
 | `Context` | Lazily creates and returns the default `GpuContext`. |
 | `CreateBuffer<T>(count, access)` | Allocates a typed GPU buffer. |
 | `CreateBuffer<T>(data, access)` | Allocates and uploads a typed GPU buffer. |
-| `CreateReadOnlyBuffer<T>(data)` | Convenience allocation returning `ReadOnlyBuffer<T>`. |
-| `CreateWriteOnlyBuffer<T>(count)` | Convenience allocation returning `WriteOnlyBuffer<T>`. |
-| `CreateReadWriteBuffer<T>(count/data)` | Convenience allocation returning `ReadWriteBuffer<T>`. |
+| `CreateReadOnlyBuffer<T>(data)` | Returns an owning `GpuBuffer<T>` configured for read-only shader access. |
+| `CreateWriteOnlyBuffer<T>(count)` | Returns an owning `GpuBuffer<T>` configured for write-only shader access. |
+| `CreateReadWriteBuffer<T>(count/data)` | Returns an owning read-write `GpuBuffer<T>`. |
 | `CreateIndexBuffer<T>(data)` | Creates a read-only buffer for indexed graphics draws. |
 | `CreateTexture2D<TPixel,TValue>(...)` | Allocates a 2D texture. |
 | `CreateTexture3D<TPixel,TValue>(...)` | Allocates a 3D texture. |
@@ -43,6 +43,8 @@ DispatchPath path = GPU.DispatchAndGetPath(
 | `CreateADKernel<TKernel>(kernel)` | Creates an AD wrapper for a generated 1D kernel. |
 | `Dispatch(kernel, int/int2/int3, wait)` | Dispatches generated 1D/2D/3D compute kernels. |
 | `DispatchAndGetPath(...)` | Dispatches and returns the native route used. |
+| `Compile<TKernel>()` | Precompiles and caches a generated compute pipeline without dispatching it. |
+| `Queue` | Default queue used to create command lists, submit work, and wait on fences. |
 
 ## `GpuContext`
 
@@ -51,9 +53,63 @@ DispatchPath path = GPU.DispatchAndGetPath(
 | `BackendType` | Active backend type. |
 | `Caps` | Backend capabilities and limits. |
 | `GetDefault()` | Creates the default context. |
+| `Compile<TKernel>()` | Precompiles a context-owned generated kernel. |
+| `WaitIdle()` | Waits for queued GPU work and releases retained submission resources. |
 | `Dispose()` | Releases the native context handle. |
 
 Most applications use `GPU.Context` rather than constructing contexts manually.
+
+Buffer views returned by `.AsReadOnly()`, `.AsWriteOnly()`, and `.AsReadWrite()` are non-owning shader bindings. Keep and dispose the `GpuBuffer<T>` owner. The convenience allocation methods return that owner rather than a view whose owner would otherwise be lost.
+Owning buffers implicitly convert to a compatible shader view, so existing constructor calls can continue to pass a convenience-factory result directly.
+
+## Queue, Command Lists, And Fences
+
+`GPU.Queue` is the context's ordered submission queue. A `GpuCommandList` starts in the recording state, must be closed before submission, and can then be submitted repeatedly. `Reset()` clears it and returns it to recording. `IsClosed`, `IsDisposed`, and `Count` expose its current recording state without changing it.
+
+```csharp
+using var source = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+using var destination = GPU.CreateBuffer<float>(4);
+using var commands = GPU.Queue.CreateCommandList();
+
+commands.CopyBuffer(source, destination);
+commands.MemoryBarrier(GpuMemoryBarrier.Buffer);
+commands.Dispatch(new MyKernel(destination.AsReadWrite()), destination.Length);
+commands.Close();
+
+await using var fence = GPU.Queue.Submit(commands);
+await fence.WaitAsync();
+```
+
+Command lists record these command families:
+
+| API | Recorded operation |
+| --- | --- |
+| `Dispatch(kernel, int/int2/int3)` | Generated compute dispatch. |
+| `CopyBuffer(source, destination)` | Full type-safe GPU buffer copy. |
+| `CopyBuffer(source, sourceIndex, destination, destinationIndex, count)` | Element-range GPU buffer copy. |
+| `MemoryBarrier(flags)` | Explicit buffer, texture, uniform, or all-resource dependency. |
+| `Draw(...)` | Non-indexed graphics draw with single-target, color/depth, and multi-target overloads. |
+| `DrawIndexed(...)` | Indexed graphics draw with an explicit index buffer and matching target overloads. |
+| `Close()` | Ends recording; idempotent. |
+| `Reset()` | Clears commands and resumes recording. |
+
+`GpuQueue.Submit` snapshots the closed list, executes it as one ordered managed queue operation, and returns a fence for that exact native submission. Other command-list submissions, immediate dispatch/draw calls, and managed buffer/texture transfers cannot interleave its replay. Compute bindings, copy buffers, graphics pipelines, vertex/index buffers, shader resources, and render targets are retained by the fence until completion. Resetting or disposing the command list after `Submit` does not change an in-flight submission.
+
+`GpuFence` provides:
+
+| API | Semantics |
+| --- | --- |
+| `IsCompleted` | Polls the native submission without waiting for GPU completion. |
+| `Wait()` | Waits indefinitely. |
+| `Wait(timeout)` | Returns `false` on timeout and `true` on completion. |
+| `WaitAsync(token)` | Shared non-blocking completion observation with per-caller cancellation. |
+| `WaitAsync(timeout, token)` | Shared asynchronous observation with per-caller timeout and cancellation. |
+| `IsDisposed` | Reports whether the native submission marker has been released. |
+| `Dispose()` / `DisposeAsync()` | Waits for completion before releasing retained resources and the native fence. |
+
+Concurrent waiters and concurrent synchronous/asynchronous disposal are supported. One caller performs each native wait or release operation while the others observe the same result. A failed deterministic dispose remains retryable. If a fence is abandoned, its finalizer schedules a non-blocking reaper that waits for submission completion before releasing retained resources and the native marker; it does not block the CLR finalizer thread or free in-flight resources early.
+
+Use `GPU.Queue.WaitIdle()` only when all outstanding work must finish. Prefer a fence when waiting for one submission, since it does not turn a local dependency into a device-wide idle point.
 
 ## Capabilities
 
@@ -95,6 +151,7 @@ Console.WriteLine($"{caps.BackendType}: {caps.MaxWorkGroupSizeX}x{caps.MaxWorkGr
 | `SampleCount` | Graphics MSAA sample count. |
 | `GpuLayout` | GPU struct layout selection. |
 | `DispatchPath` | Native route used by a dispatch/draw. |
+| `GpuMemoryBarrier` | Explicit command-list memory dependency flags. |
 
 ## Profiler
 

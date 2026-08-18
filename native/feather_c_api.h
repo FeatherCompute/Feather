@@ -31,6 +31,7 @@ typedef uint64_t FeADKernelHandle;
 typedef uint64_t FeTensorHandle;
 typedef uint64_t FeWindowHandle;
 typedef uint64_t FeTexturePresenterHandle;
+typedef uint64_t FeFenceHandle;
 
 typedef enum FeResult {
     FE_OK = 0,
@@ -50,6 +51,14 @@ typedef enum FeDispatchPath {
     FE_DISPATCH_PATH_GRAPHICS_FALLBACK = 3,
     FE_DISPATCH_PATH_REJECTED = 4
 } FeDispatchPath;
+
+typedef enum FeMemoryBarrierFlags {
+    FE_MEMORY_BARRIER_NONE = 0,
+    FE_MEMORY_BARRIER_BUFFER = 1u << 0,
+    FE_MEMORY_BARRIER_TEXTURE = 1u << 1,
+    FE_MEMORY_BARRIER_UNIFORM = 1u << 2,
+    FE_MEMORY_BARRIER_ALL = FE_MEMORY_BARRIER_BUFFER | FE_MEMORY_BARRIER_TEXTURE | FE_MEMORY_BARRIER_UNIFORM
+} FeMemoryBarrierFlags;
 
 typedef struct FeBackendCaps {
     uint32_t backend_type;
@@ -253,8 +262,14 @@ typedef struct FeADGradientInfo {
 FE_API FeResult fe_context_get_default(FeContextHandle* out_context);
 FE_API FeResult fe_context_initialize(FeContextHandle context);
 FE_API FeResult fe_context_shutdown(FeContextHandle context);
+FE_API FeResult fe_context_wait_idle(FeContextHandle context);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
+FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
+FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
+FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete);
+FE_API FeResult fe_fence_wait(FeFenceHandle fence, uint64_t timeout_nanoseconds, bool* out_complete);
+FE_API FeResult fe_fence_destroy(FeFenceHandle fence);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_runtime_flush_caches(void);
 FE_API FeResult fe_runtime_shutdown(void);
@@ -289,6 +304,8 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
 FE_API FeResult fe_buffer_destroy(FeBufferHandle buffer);
 FE_API FeResult fe_buffer_upload(FeBufferHandle buffer, uint64_t offset, uint64_t size, const void* data);
 FE_API FeResult fe_buffer_download(FeBufferHandle buffer, uint64_t offset, uint64_t size, void* out_data);
+FE_API FeResult fe_buffer_copy(FeBufferHandle source, uint64_t source_offset, FeBufferHandle destination,
+                               uint64_t destination_offset, uint64_t size);
 FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t mode, void** out_ptr);
 FE_API FeResult fe_buffer_unmap(FeBufferHandle buffer);
 
@@ -314,6 +331,7 @@ FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler);
 
 FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernelCreateDesc* desc,
                                          FeKernelHandle* out_kernel);
+FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_bind_texture(FeKernelHandle kernel, uint32_t binding, FeTextureHandle texture);
@@ -325,6 +343,7 @@ FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t b
 FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                              size_t* out_required_size);
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path);
+FE_API FeResult fe_kernel_get_compile_count(FeKernelHandle kernel, uint64_t* out_count);
 FE_API FeResult fe_kernel_get_ad_gradient_count(FeKernelHandle kernel, uint32_t* out_count);
 FE_API FeResult fe_kernel_get_ad_gradient_info(FeKernelHandle kernel, uint32_t index, FeADGradientInfo* out_info);
 FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index, uint64_t offset, uint64_t size,

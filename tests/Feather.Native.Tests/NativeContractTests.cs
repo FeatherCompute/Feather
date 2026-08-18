@@ -18,6 +18,137 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeBufferRangesRejectUnsignedWraparound()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            var desc = new FeBufferDesc(16, mode: 2, elementStride: 4);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context, in desc, IntPtr.Zero, out var buffer));
+            using (buffer)
+            {
+                var data = Marshal.AllocHGlobal(4);
+                try
+                {
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_buffer_upload(buffer, ulong.MaxValue, 2, data));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_buffer_download(buffer, ulong.MaxValue, 2, data));
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(data);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void NativeSubmissionFenceTracksQueuedBufferCopy()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
+            var desc = new FeBufferDesc(16, mode: 2, elementStride: 4);
+            var sourceData = new[] { 3, 5, 8, 13 };
+            var sourcePointer = Marshal.AllocHGlobal(16);
+            var resultPointer = Marshal.AllocHGlobal(16);
+            try
+            {
+                Marshal.Copy(sourceData, 0, sourcePointer, sourceData.Length);
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context, in desc, sourcePointer, out var source));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context, in desc, IntPtr.Zero, out var destination));
+                using (source)
+                using (destination)
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_copy(source, 0, destination, 0, 16));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_memory_barrier(context, 1u));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(context, out var fence));
+                    using (fence)
+                    {
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_wait(fence, 0, out _));
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_wait(fence, ulong.MaxValue, out var completed));
+                        Assert.True(completed);
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_is_complete(fence, out completed));
+                        Assert.True(completed);
+                    }
+
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_download(destination, 0, 16, resultPointer));
+                    var result = new int[4];
+                    Marshal.Copy(resultPointer, result, 0, result.Length);
+                    Assert.Equal(sourceData, result);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(resultPointer);
+                Marshal.FreeHGlobal(sourcePointer);
+            }
+        }
+    }
+
+    [Fact]
+    public void NativeQueueRejectsUnknownBarrierFlags()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            Assert.Equal(
+                FeResult.ErrorInvalidArgument,
+                NativeMethods.fe_queue_memory_barrier(context, uint.MaxValue));
+        }
+    }
+
+    [Fact]
+    public void NativeTextureRangesRejectUnsignedWraparound()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            var texture2DDesc = new FeTexture2DDesc(1, 1, 1, pixelFormat: 3, access: 2);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(
+                context,
+                in texture2DDesc,
+                IntPtr.Zero,
+                out var texture2D));
+            var texture3DDesc = new FeTexture3DDesc(1, 1, 1, 1, pixelFormat: 3, access: 2);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture3d_create(
+                context,
+                in texture3DDesc,
+                IntPtr.Zero,
+                out var texture3D));
+
+            using (texture2D)
+            using (texture3D)
+            {
+                var data = Marshal.AllocHGlobal(8);
+                try
+                {
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_upload(texture2D, uint.MaxValue, 0, 2, 1, data));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_download(texture2D, 0, uint.MaxValue, 1, 2, data));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture3d_upload(texture3D, 0, 0, uint.MaxValue, 1, 1, 2, data));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture3d_download(texture3D, uint.MaxValue, 0, 0, 2, 1, 1, data));
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(data);
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void NativeRuntimeBilinearlyUpscalesRgba8()
     {
         var source = new byte[]

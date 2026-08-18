@@ -97,8 +97,16 @@ public:
 		_runtimeTextures[binding] = textureHandle;
 	}
 
+	void BindRuntimeTextureSampler(uint32_t binding, const GPU::Backend::SamplerDesc &sampler) override {
+		_runtimeTextureSamplers[binding] = sampler;
+	}
+
 	const std::unordered_map<uint32_t, uint32_t> &GetRuntimeTextureBindings() const override {
 		return _runtimeTextures;
+	}
+
+	const std::unordered_map<uint32_t, GPU::Backend::SamplerDesc> &GetRuntimeTextureSamplerBindings() const override {
+		return _runtimeTextureSamplers;
 	}
 
 	std::string RegisterUniform(
@@ -150,6 +158,7 @@ private:
 	std::vector<uint32_t> _textureBindings;
 	std::unordered_map<uint32_t, uint32_t> _runtimeBuffers;
 	std::unordered_map<uint32_t, uint32_t> _runtimeTextures;
+	std::unordered_map<uint32_t, GPU::Backend::SamplerDesc> _runtimeTextureSamplers;
 	std::vector<std::string> _callableDeclarations;
 	std::vector<std::function<void()>> _callableGenerators;
 };

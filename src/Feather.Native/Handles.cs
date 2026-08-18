@@ -74,3 +74,24 @@ public sealed class FeTexturePresenterHandle : FeSafeHandle
 {
     protected override bool ReleaseHandle() => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_texture_presenter_destroy(handle).Succeeded();
 }
+
+public sealed class FeFenceHandle : FeSafeHandle
+{
+    internal FeResult ReleaseSubmission()
+    {
+        if (IsInvalid || IsClosed || NativeMethods.IsProcessExiting)
+        {
+            SetHandleAsInvalid();
+            return FeResult.Ok;
+        }
+
+        var result = NativeMethods.fe_fence_destroy_raw(DangerousGetHandle());
+        if (result.Succeeded())
+        {
+            SetHandleAsInvalid();
+        }
+        return result;
+    }
+
+    protected override bool ReleaseHandle() => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_fence_destroy_raw(handle).Succeeded();
+}

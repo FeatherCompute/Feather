@@ -32,6 +32,74 @@ public class GraphicsRasterizationTests
     }
 
     [Fact]
+    public void CommandListDrawRetainsPipelineAndVertexResourcesUntilFenceCompletion()
+    {
+        var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(1, -1, 0, 1),
+            new float4(0, 1, 0, 1)
+        ]);
+        using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(8, 8, PixelFormat.Rgba8);
+        target.Upload([.. Enumerable.Repeat(new Rgba32(31, 32, 33, 34), 64)]);
+        var pipeline = GPU.CreateGraphicsPipeline<RasterVertexShader, RasterFragmentShader, float4>();
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.Draw(
+            pipeline,
+            new RasterVertexShader(vertices.AsReadOnly()),
+            new RasterFragmentShader(),
+            target,
+            vertexCount: 3);
+        commands.Close();
+
+        using var fence = GPU.Queue.Submit(commands);
+        vertices.Dispose();
+        pipeline.Dispose();
+        fence.Wait();
+
+        var readback = new Rgba32[64];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => pixel != new Rgba32(31, 32, 33, 34));
+    }
+
+    [Fact]
+    public void CommandListIndexedDrawRetainsIndexAndDepthResourcesUntilFenceCompletion()
+    {
+        var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(1, -1, 0, 1),
+            new float4(0, 1, 0, 1)
+        ]);
+        var indices = GPU.CreateIndexBuffer<ushort>([0, 1, 2]);
+        using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(8, 8, PixelFormat.Rgba8);
+        var depth = GPU.CreateDepthTexture2D(8, 8);
+        target.Upload([.. Enumerable.Repeat(new Rgba32(41, 42, 43, 44), 64)]);
+        var pipeline = GPU.CreateGraphicsPipeline<RasterVertexShader, RasterFragmentShader, float4>(
+            new GraphicsPipelineDesc { DepthTest = true, DepthWrite = true });
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.DrawIndexed(
+            pipeline,
+            new RasterVertexShader(vertices.AsReadOnly()),
+            new RasterFragmentShader(),
+            target,
+            depth,
+            indices);
+        commands.Close();
+
+        using var fence = GPU.Queue.Submit(commands);
+        vertices.Dispose();
+        indices.Dispose();
+        depth.Dispose();
+        pipeline.Dispose();
+        fence.Wait();
+
+        var readback = new Rgba32[64];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => pixel != new Rgba32(41, 42, 43, 44));
+    }
+
+    [Fact]
     public void DrawWithDepthTargetRasterizesColorTargetThroughTypedPath()
     {
         using var vertices = GPU.CreateBuffer<float4>(
@@ -137,8 +205,8 @@ public class GraphicsRasterizationTests
         using var target = GPU.CreateRenderTexture2D<Rgba32, Rgba32>(8, 8, PixelFormat.Rgba8);
         using var pipeline = GPU.CreateGraphicsPipeline<RasterVertexShader, RasterFragmentShader, float4>();
 
-        var command = new GpuGraphicsCommand(pipeline.Handle);
-        command.SetVertexBuffer(vertices.Handle, (uint)vertices.ElementStride);
+        using var command = new GpuGraphicsCommand(pipeline.Handle);
+        command.SetVertexBuffer(vertices, (uint)vertices.ElementStride);
 
         var staleStateException = Assert.Throws<FeatherNativeException>(
             () => NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_set_index_buffer(pipeline.Handle, indices.Handle)));

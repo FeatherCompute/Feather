@@ -13,6 +13,251 @@ namespace Feather.Integration.Tests;
 public class GeneratedComputeDispatchTests
 {
     [Fact]
+    public void CompilePrewarmsCachedKernelBeforeDispatch()
+    {
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
+        using var compiled = GpuKernel.Create<CopyKernel>(GPU.Context);
+        Assert.Equal(0ul, compiled.CompilationCount);
+        compiled.Compile();
+        Assert.Equal(1ul, compiled.CompilationCount);
+
+        GpuKernel.Dispatch(
+            GPU.Context,
+            compiled,
+            new CopyKernel(input.AsReadOnly(), output.AsReadWrite()),
+            new GpuDispatchSize(4, 1, 1),
+            wait: true);
+
+        Assert.Equal(DispatchPath.TypedEasyGpu, compiled.LastDispatchPath);
+        Assert.Equal(1ul, compiled.CompilationCount);
+        Assert.Equal([1, 2, 3, 4], output.ToArray());
+    }
+
+    [Fact]
+    public void QueueFenceRetainsResourcesUntilSubmittedWorkCompletes()
+    {
+        var input = GPU.CreateBuffer<float>([4, 3, 2, 1]);
+        using var output = GPU.CreateBuffer<float>(4);
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.Dispatch(new CopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
+        commands.Close();
+
+        using var fence = GPU.Queue.Submit(commands);
+        input.Dispose();
+        fence.Wait();
+
+        Assert.True(fence.IsCompleted);
+        Assert.Equal([4, 3, 2, 1], output.ToArray());
+    }
+
+    [Fact]
+    public void ClosedCommandListCanBeResubmittedAndReset()
+    {
+        using var source = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var destination = GPU.CreateBuffer<float>(4);
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.CopyBuffer(source, destination);
+        commands.MemoryBarrier(GpuMemoryBarrier.Buffer);
+
+        Assert.Throws<InvalidOperationException>(() => GPU.Queue.Submit(commands));
+        commands.Close();
+        commands.Close();
+        Assert.True(commands.IsClosed);
+        Assert.Equal(2, commands.Count);
+
+        using (var first = GPU.Queue.Submit(commands))
+        {
+            _ = first.Wait(TimeSpan.Zero);
+            first.Wait();
+        }
+        Assert.Equal([1, 2, 3, 4], destination.ToArray());
+
+        source.Upload([8, 7, 6, 5]);
+        using (var second = GPU.Queue.Submit(commands))
+        {
+            second.Wait();
+        }
+        Assert.Equal([8, 7, 6, 5], destination.ToArray());
+
+        commands.Reset();
+        Assert.False(commands.IsClosed);
+        Assert.Equal(0, commands.Count);
+        commands.Dispatch(new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()), 4);
+        commands.Close();
+        using var third = GPU.Queue.Submit(commands);
+        third.Wait();
+        Assert.Equal([8, 7, 6, 5], destination.ToArray());
+    }
+
+    [Fact]
+    public async Task FenceSupportsCancelableAsyncWait()
+    {
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.Close();
+        await using var fence = GPU.Queue.Submit(commands);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await fence.WaitAsync(cancellation.Token));
+        await fence.WaitAsync();
+        Assert.True(fence.IsCompleted);
+    }
+
+    [Fact]
+    public async Task FenceCoordinatesConcurrentTimedAndAsyncWaiters()
+    {
+        using var source = GPU.CreateBuffer<float>([9, 8, 7, 6]);
+        using var destination = GPU.CreateBuffer<float>(4);
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.CopyBuffer(source, destination);
+        commands.Close();
+        await using var fence = GPU.Queue.Submit(commands);
+
+        var blockingWait = Task.Run(() => fence.Wait(TimeSpan.FromSeconds(30)));
+        var asynchronousWait = fence.WaitAsync(TimeSpan.FromSeconds(30)).AsTask();
+        var results = await Task.WhenAll(blockingWait, asynchronousWait);
+
+        Assert.All(results, Assert.True);
+        Assert.True(fence.IsCompleted);
+        Assert.Equal([9, 8, 7, 6], destination.ToArray());
+    }
+
+    [Fact]
+    public async Task FenceCoordinatesConcurrentSynchronousAndAsynchronousDispose()
+    {
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.Close();
+        var fence = GPU.Queue.Submit(commands);
+
+        var synchronousDispose = Task.Run(fence.Dispose);
+        var asynchronousDispose = fence.DisposeAsync().AsTask();
+        await Task.WhenAll(synchronousDispose, asynchronousDispose);
+
+        Assert.True(fence.IsCompleted);
+        Assert.True(fence.IsDisposed);
+        fence.Dispose();
+        await fence.DisposeAsync();
+    }
+
+    [Fact]
+    public void ConvenienceBufferFactoriesReturnOwningResources()
+    {
+        using var readOnly = GPU.CreateReadOnlyBuffer<float>([1, 2]);
+        using var writeOnly = GPU.CreateWriteOnlyBuffer<float>(2);
+        using var readWrite = GPU.CreateReadWriteBuffer<float>([3, 4]);
+
+        Assert.Equal(BufferAccess.ReadOnly, readOnly.Access);
+        Assert.Equal(BufferAccess.WriteOnly, writeOnly.Access);
+        Assert.Equal(BufferAccess.ReadWrite, readWrite.Access);
+        Assert.Equal([1, 2], readOnly.ToArray());
+        Assert.Equal([3, 4], readWrite.ToArray());
+    }
+
+    [Fact]
+    [Trait("Coverage", "NativeReferenceFallback")]
+    public void CpuFallbackMaterializesBuffersAfterGpuDispatch()
+    {
+        using var source = GPU.CreateBuffer<int>([8, 6, 4, 2]);
+        using var zero = GPU.CreateBuffer<int>([0, 0, 0, 0]);
+        using var intermediate = GPU.CreateBuffer<int>(4);
+        using var destination = GPU.CreateBuffer<int>(4);
+        using var typed = GpuKernel.Create<AddIntegerBuffersKernel>(GPU.Context);
+        GpuKernel.Dispatch(
+            GPU.Context,
+            typed,
+            new AddIntegerBuffersKernel(source.AsReadOnly(), zero.AsReadOnly(), intermediate.AsReadWrite()),
+            new GpuDispatchSize(4, 1, 1),
+            wait: true);
+        Assert.Equal(DispatchPath.TypedEasyGpu, typed.LastDispatchPath);
+
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripSection7ForNativeReferenceFallback;
+            using var fallback = GpuKernel.Create<Copy2DKernel>(GPU.Context);
+            GpuKernel.Dispatch(
+                GPU.Context,
+                fallback,
+                new Copy2DKernel(intermediate.AsReadOnly(), destination.AsReadWrite()),
+                new GpuDispatchSize(4, 1, 1),
+                wait: true);
+
+            Assert.Equal(DispatchPath.CpuReferenceFallback, fallback.LastDispatchPath);
+            Assert.Equal([8, 6, 4, 2], destination.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
+    public void DisposedDefaultContextWrapperCanBeRecreated()
+    {
+        var first = GpuContext.GetDefault();
+        _ = first.BackendType;
+        first.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => _ = first.BackendType);
+        using var second = GpuContext.GetDefault();
+        Assert.NotEqual(BackendType.Unavailable, second.BackendType);
+    }
+
+    [Fact]
+    public async Task ContextDisposeWaitsForDispatchSubmissionTracking()
+    {
+        var context = GpuContext.GetDefault();
+        using var input = GpuBuffer<float>.Create(context, [4, 3, 2, 1], BufferAccess.ReadOnly);
+        using var output = GpuBuffer<float>.Create(context, 4, BufferAccess.ReadWrite);
+        var kernel = context.GetOrCreateKernel<CopyKernel>();
+        using var submitted = new ManualResetEventSlim();
+        using var allowTracking = new ManualResetEventSlim();
+        var dispatchTask = Task.CompletedTask;
+        var disposeTask = Task.CompletedTask;
+
+        try
+        {
+            GpuKernel.DispatchSubmittedForTesting = () =>
+            {
+                submitted.Set();
+                if (!allowTracking.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    throw new TimeoutException("Timed out while holding the dispatch submission window.");
+                }
+            };
+            dispatchTask = Task.Run(() => GpuKernel.Dispatch(
+                context,
+                kernel,
+                new CopyKernel(input.AsReadOnly(), output.AsReadWrite()),
+                new GpuDispatchSize(4, 1, 1),
+                wait: false));
+
+            Assert.True(submitted.Wait(TimeSpan.FromSeconds(10)));
+            disposeTask = Task.Run(context.Dispose);
+            Assert.True(SpinWait.SpinUntil(() => context.IsDisposing, TimeSpan.FromSeconds(10)));
+            Assert.False(disposeTask.IsCompleted);
+
+            allowTracking.Set();
+            await Task.WhenAll(dispatchTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.True(context.IsDisposed);
+        }
+        finally
+        {
+            GpuKernel.DispatchSubmittedForTesting = null;
+            allowTracking.Set();
+            try
+            {
+                await Task.WhenAll(dispatchTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            finally
+            {
+                context.Dispose();
+            }
+        }
+    }
+
+    [Fact]
     [Trait("Coverage", "NativeReferenceFallback")]
     public void DispatchCopiesBufferThroughNativeFallback()
     {
@@ -3998,7 +4243,7 @@ public readonly struct RawSwizzleWriteKernel(ReadWriteBuffer<float4> output) : I
 
     public static void Bind(in RawSwizzleWriteKernel kernel, GpuKernelCommand command)
     {
-        command.BindBuffer(0, ((IGpuBufferBinding)kernel._output).NativeBufferHandle);
+        command.BindBuffer(0, kernel._output);
     }
 }
 
