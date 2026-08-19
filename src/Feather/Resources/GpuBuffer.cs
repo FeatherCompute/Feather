@@ -23,6 +23,12 @@ public sealed class GpuBuffer<T> : IDisposable
     internal GpuContext Context { get; }
     internal FeBufferHandle Handle { get; }
 
+    internal FeBufferHandle GetNativeHandle()
+    {
+        ThrowIfDisposed();
+        return Handle;
+    }
+
     /// <summary>
     /// Gets the number of logical elements in the buffer.
     /// </summary>

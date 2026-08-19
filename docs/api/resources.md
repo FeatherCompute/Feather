@@ -79,8 +79,34 @@ tex.Save("output.tga");
 | `AsSampled()` | Creates `SampledTexture2D<TValue>`. |
 | `Upload(pixels)` | Uploads base-level pixels. |
 | `Read(pixels)` | Downloads base-level pixels. |
+| `BeginReadback(staging, x, y, width, height, offset)` | Submits a non-blocking region copy into a `GpuBuffer<byte>`. |
 | `GenerateMipmaps()` | Generates mipmaps when supported. |
 | `Save(path)` | Saves the base level as TGA. |
+
+### Scoped asynchronous readback
+
+Use `BeginReadback` for preview and streaming paths that must not call a blocking texture download:
+
+```csharp
+using var staging = GpuBuffer<byte>.Create(context, width * height * 4, BufferAccess.ReadWrite);
+using var readback = texture.BeginReadback(staging, 0, 0, width, height);
+
+await readback.WaitAsync(cancellationToken);
+var mapping = readback.Map();
+try
+{
+    mapping.CopyTo(frameBytes);
+}
+finally
+{
+    mapping.Dispose();
+}
+```
+
+`ReadbackOperation` retains the texture and staging buffer even if their owners dispose them after submission. A
+mapping is stack-confined, exposes no pointer or escaping span, and can be consumed exactly once. Disposing a pending
+operation cancels ownership without waiting for the GPU or draining the device. `GpuContext.OperationCounters` exposes
+the synchronization counters used by integration tests to prove this property.
 
 Shader texture views use `int2` coordinates. Sampled textures provide:
 
@@ -120,7 +146,7 @@ new Uniform<float4x4>(mvp)
 
 ## Lifetime And Errors
 
-- Host-owned `GpuBuffer<T>`, `GpuTexture2D<,>`, `GpuTexture3D<,>`, and `SamplerState` are disposable.
+- Host-owned `GpuBuffer<T>`, `GpuTexture2D<,>`, `GpuTexture3D<,>`, `SamplerState`, and `ReadbackOperation` are disposable.
 - Shader-facing views are lightweight values and do not own native handles.
 - Access-mode violations are generator diagnostics.
 - Unsupported texture formats are native errors.

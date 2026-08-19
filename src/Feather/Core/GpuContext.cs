@@ -1,4 +1,5 @@
 using Feather.Native;
+using Feather.Resources;
 
 namespace Feather;
 
@@ -7,6 +8,7 @@ public sealed class GpuContext : IDisposable
     private readonly object gate = new();
     private readonly Dictionary<(Type KernelType, bool AutoDiff), GpuKernel> kernels = [];
     private readonly List<IDisposable> pendingSubmissions = [];
+    private readonly List<WeakReference<ReadbackOperation>> readbackOperations = [];
     private int activeOperations;
     private bool disposing;
     private bool disposed;
@@ -75,6 +77,25 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets a point-in-time snapshot of backend synchronization and readback operations.
+    /// </summary>
+    public BackendOperationCounters OperationCounters
+    {
+        get
+        {
+            using var operation = EnterOperation();
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_operation_counters(Handle, out var counters));
+            return new BackendOperationCounters(
+                counters.FinishCalls,
+                counters.DeviceWaitIdleCalls,
+                counters.GlobalDrainCalls,
+                counters.BlockingSubmissionWaitCalls,
+                counters.BlockingTextureDownloadCalls,
+                counters.AsyncTextureReadbackCalls);
+        }
+    }
+
     public static GpuContext GetDefault()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var handle));
@@ -120,6 +141,7 @@ public sealed class GpuContext : IDisposable
 
             try
             {
+                CancelReadbacksForShutdownLocked();
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(Handle));
                 DisposePendingSubmissionsLocked();
                 foreach (var kernel in kernels.Values)
@@ -172,6 +194,25 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    internal void RegisterReadback(ReadbackOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed || disposing, this);
+            PruneReadbacksLocked(operation);
+            readbackOperations.Add(new WeakReference<ReadbackOperation>(operation));
+        }
+    }
+
+    internal void UnregisterReadback(ReadbackOperation operation)
+    {
+        lock (gate)
+        {
+            PruneReadbacksLocked(operation);
+        }
+    }
+
     internal void TransferSubmittedWorkTo(List<IDisposable> destination)
     {
         lock (gate)
@@ -214,6 +255,35 @@ public sealed class GpuContext : IDisposable
             lease.Dispose();
         }
         pendingSubmissions.Clear();
+    }
+
+    private void CancelReadbacksForShutdownLocked()
+    {
+        var operations = new List<ReadbackOperation>(readbackOperations.Count);
+        foreach (var weak in readbackOperations)
+        {
+            if (weak.TryGetTarget(out var operation))
+            {
+                operations.Add(operation);
+            }
+        }
+        readbackOperations.Clear();
+
+        foreach (var operation in operations)
+        {
+            operation.CancelForContextShutdown();
+        }
+    }
+
+    private void PruneReadbacksLocked(ReadbackOperation? remove)
+    {
+        for (var index = readbackOperations.Count - 1; index >= 0; index--)
+        {
+            if (!readbackOperations[index].TryGetTarget(out var operation) || ReferenceEquals(operation, remove))
+            {
+                readbackOperations.RemoveAt(index);
+            }
+        }
     }
 
     private void ExitOperation()
@@ -264,3 +334,14 @@ public readonly record struct BackendCaps(
     bool SupportsNN,
     bool SupportsDepthClamp,
     bool SupportsNonFillPolygonMode);
+
+/// <summary>
+/// Backend counters used to prove that asynchronous paths avoid global drains and blocking downloads.
+/// </summary>
+public readonly record struct BackendOperationCounters(
+    ulong FinishCalls,
+    ulong DeviceWaitIdleCalls,
+    ulong GlobalDrainCalls,
+    ulong BlockingSubmissionWaitCalls,
+    ulong BlockingTextureDownloadCalls,
+    ulong AsyncTextureReadbackCalls);

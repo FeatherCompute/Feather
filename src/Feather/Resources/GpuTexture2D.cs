@@ -190,6 +190,34 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     }
 
     /// <summary>
+    /// Submits an asynchronous copy of a texture region into caller-owned byte staging storage.
+    /// The returned operation owns both native resources until it is consumed or disposed.
+    /// </summary>
+    public ReadbackOperation BeginReadback(
+        GpuBuffer<byte> staging,
+        int x,
+        int y,
+        int width,
+        int height,
+        long stagingByteOffset = 0)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(staging);
+        return ReadbackOperation.Begin(
+            Context,
+            Handle,
+            Width,
+            Height,
+            Format,
+            staging,
+            x,
+            y,
+            width,
+            height,
+            stagingByteOffset);
+    }
+
+    /// <summary>
     /// Requests native mipmap generation for the allocated mip chain.
     /// </summary>
     public void GenerateMipmaps()
