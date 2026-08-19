@@ -1,5 +1,6 @@
 using Feather.Native;
 using Feather.Resources;
+using System.Reflection;
 
 namespace Feather;
 
@@ -219,6 +220,39 @@ public sealed class GpuContext : IDisposable
 
             return kernel;
         }
+    }
+
+    /// <summary>
+    /// Releases cached generated kernels whose managed kernel types belong to one assembly.
+    /// Render hosts call this after the assembly generation's GPU submissions complete and
+    /// before unloading a collectible AssemblyLoadContext; otherwise the context cache would
+    /// retain the generated Type objects and pin that load context indefinitely.
+    /// </summary>
+    /// <param name="assembly">The retiring generated-pass assembly.</param>
+    /// <returns>The number of cached kernel variants released.</returns>
+    public int ReleaseCachedKernels(Assembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        using var operation = EnterOperation();
+        List<GpuKernel> released;
+        lock (gate)
+        {
+            var keys = kernels.Keys
+                .Where(key => ReferenceEquals(key.KernelType.Assembly, assembly))
+                .ToArray();
+            released = new List<GpuKernel>(keys.Length);
+            foreach (var key in keys)
+            {
+                released.Add(kernels[key]);
+                kernels.Remove(key);
+            }
+        }
+
+        foreach (var kernel in released)
+        {
+            kernel.Dispose();
+        }
+        return released.Count;
     }
 
     internal void TrackSubmission(IEnumerable<IDisposable> leases)

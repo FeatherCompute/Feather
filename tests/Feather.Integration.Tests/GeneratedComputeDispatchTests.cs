@@ -35,6 +35,21 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void CachedKernelsCanBeReleasedForAnAssemblyGeneration()
+    {
+        using var context = GpuContext.GetDefault();
+        var first = context.GetOrCreateKernel<CopyKernel>();
+        Assert.Same(first, context.GetOrCreateKernel<CopyKernel>());
+
+        int released = context.ReleaseCachedKernels(typeof(CopyKernel).Assembly);
+
+        Assert.Equal(1, released);
+        Assert.Throws<ObjectDisposedException>(() => _ = first.CompilationCount);
+        var replacement = context.GetOrCreateKernel<CopyKernel>();
+        Assert.NotSame(first, replacement);
+    }
+
+    [Fact]
     public void QueueFenceRetainsResourcesUntilSubmittedWorkCompletes()
     {
         var input = GPU.CreateBuffer<float>([4, 3, 2, 1]);
