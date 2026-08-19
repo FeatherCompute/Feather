@@ -39,6 +39,25 @@ public struct FeBackendCaps
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public readonly struct FeBackendOperationCounters
+{
+    public readonly ulong FinishCalls;
+    public readonly ulong DeviceWaitIdleCalls;
+    public readonly ulong GlobalDrainCalls;
+    public readonly ulong BlockingSubmissionWaitCalls;
+    public readonly ulong BlockingTextureDownloadCalls;
+    public readonly ulong AsyncTextureReadbackCalls;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeReadbackMapping
+{
+    public readonly IntPtr Data;
+    public readonly ulong ByteSize;
+    public readonly ulong RowPitch;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public struct FeWindowDesc
 {
     public uint Width;

@@ -241,6 +241,11 @@ public static class NativeMethods
     public static extern FeResult fe_context_get_caps(FeContextHandle context, out FeBackendCaps out_caps);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_get_operation_counters(
+        FeContextHandle context,
+        out FeBackendOperationCounters out_counters);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_get_last_error(IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -346,6 +351,38 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture2d_download(FeTextureHandle texture, uint x, uint y, uint width, uint height, IntPtr out_data);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_texture2d_begin_readback(
+        FeContextHandle context,
+        FeTextureHandle texture,
+        FeBufferHandle staging_buffer,
+        uint x,
+        uint y,
+        uint width,
+        uint height,
+        ulong staging_offset,
+        out FeReadbackHandle out_readback);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_readback_is_complete(
+        FeReadbackHandle readback,
+        [MarshalAs(UnmanagedType.I1)] out bool out_complete);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_readback_wait(
+        FeReadbackHandle readback,
+        ulong timeout_nanoseconds,
+        [MarshalAs(UnmanagedType.I1)] out bool out_complete);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_readback_map(FeReadbackHandle readback, out FeReadbackMapping out_mapping);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_readback_unmap(FeReadbackHandle readback);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_readback_destroy")]
+    public static extern FeResult fe_readback_destroy_raw(IntPtr readback);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture3d_upload(FeTextureHandle texture, uint x, uint y, uint z, uint width, uint height, uint depth, IntPtr data);

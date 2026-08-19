@@ -95,3 +95,25 @@ public sealed class FeFenceHandle : FeSafeHandle
 
     protected override bool ReleaseHandle() => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_fence_destroy_raw(handle).Succeeded();
 }
+
+public sealed class FeReadbackHandle : FeSafeHandle
+{
+    internal FeResult ReleaseReadback()
+    {
+        if (IsInvalid || IsClosed || NativeMethods.IsProcessExiting)
+        {
+            SetHandleAsInvalid();
+            return FeResult.Ok;
+        }
+
+        var result = NativeMethods.fe_readback_destroy_raw(DangerousGetHandle());
+        if (result.Succeeded())
+        {
+            SetHandleAsInvalid();
+        }
+        return result;
+    }
+
+    protected override bool ReleaseHandle()
+        => IsInvalid || NativeMethods.IsProcessExiting || NativeMethods.fe_readback_destroy_raw(handle).Succeeded();
+}

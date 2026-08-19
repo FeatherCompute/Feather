@@ -32,6 +32,7 @@ typedef uint64_t FeTensorHandle;
 typedef uint64_t FeWindowHandle;
 typedef uint64_t FeTexturePresenterHandle;
 typedef uint64_t FeFenceHandle;
+typedef uint64_t FeReadbackHandle;
 
 typedef enum FeResult {
     FE_OK = 0,
@@ -72,6 +73,15 @@ typedef struct FeBackendCaps {
     uint32_t supports_depth_clamp;
     uint32_t supports_non_fill_polygon_mode;
 } FeBackendCaps;
+
+typedef struct FeBackendOperationCounters {
+    uint64_t finish_calls;
+    uint64_t device_wait_idle_calls;
+    uint64_t global_drain_calls;
+    uint64_t blocking_submission_wait_calls;
+    uint64_t blocking_texture_download_calls;
+    uint64_t async_texture_readback_calls;
+} FeBackendOperationCounters;
 
 typedef struct FeWindowDesc {
     uint32_t width;
@@ -123,6 +133,12 @@ typedef struct FeTexture3DDesc {
     uint32_t pixel_format;
     uint32_t access;
 } FeTexture3DDesc;
+
+typedef struct FeReadbackMapping {
+    const void* data;
+    uint64_t byte_size;
+    uint64_t row_pitch;
+} FeReadbackMapping;
 
 typedef struct FeSamplerDesc {
     uint32_t min_filter;
@@ -265,6 +281,7 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context);
 FE_API FeResult fe_context_wait_idle(FeContextHandle context);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
+FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBackendOperationCounters* out_counters);
 FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
 FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete);
@@ -322,6 +339,14 @@ FE_API FeResult fe_texture3d_upload(FeTextureHandle texture, uint32_t x, uint32_
                                     uint32_t height, uint32_t depth, const void* data);
 FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint32_t y, uint32_t z, uint32_t width,
                                       uint32_t height, uint32_t depth, void* out_data);
+FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHandle texture,
+                                            FeBufferHandle staging_buffer, uint32_t x, uint32_t y, uint32_t width,
+                                            uint32_t height, uint64_t staging_offset, FeReadbackHandle* out_readback);
+FE_API FeResult fe_readback_is_complete(FeReadbackHandle readback, bool* out_complete);
+FE_API FeResult fe_readback_wait(FeReadbackHandle readback, uint64_t timeout_nanoseconds, bool* out_complete);
+FE_API FeResult fe_readback_map(FeReadbackHandle readback, FeReadbackMapping* out_mapping);
+FE_API FeResult fe_readback_unmap(FeReadbackHandle readback);
+FE_API FeResult fe_readback_destroy(FeReadbackHandle readback);
 FE_API FeResult fe_texture_generate_mipmaps(FeTextureHandle texture);
 FE_API FeResult fe_bilinear_upscale_rgba8(const uint8_t* source, uint32_t source_width, uint32_t source_height,
                                           uint8_t* destination, uint32_t width, uint32_t height);

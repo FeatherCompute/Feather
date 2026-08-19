@@ -248,6 +248,17 @@ struct FenceState {
     bool released = false;
 };
 
+enum class ReadbackMappingState : uint8_t { NeverMapped, Mapped, Consumed };
+
+struct ReadbackState {
+    GPU::Backend::SubmissionHandle submission = GPU::Backend::INVALID_SUBMISSION_HANDLE;
+    size_t byte_size = 0;
+    size_t row_pitch = 0;
+    std::mutex mutex;
+    ReadbackMappingState mapping_state = ReadbackMappingState::NeverMapped;
+    bool released = false;
+};
+
 struct GraphicsPushConstantLayoutEntry {
     uint32_t binding = UINT32_MAX;
     std::string name;
@@ -618,6 +629,7 @@ std::unordered_map<FeKernelHandle, KernelState> g_kernels;
 std::unordered_map<FeKernelHandle, ComputeKernelCache> g_compute_kernel_caches;
 std::unordered_map<FeGraphicsPipelineHandle, GraphicsPipelineState> g_pipelines;
 std::unordered_map<FeFenceHandle, std::shared_ptr<FenceState>> g_fences;
+std::unordered_map<FeReadbackHandle, std::shared_ptr<ReadbackState>> g_readbacks;
 #if FEATHER_BUILD_WINDOW
 std::unordered_map<FeWindowHandle, WindowState> g_windows;
 std::unordered_map<FeTexturePresenterHandle, TexturePresenterState> g_texture_presenters;
@@ -789,6 +801,31 @@ void destroy_backend_resources_for_shutdown() {
         } catch (...) {
         }
 
+        for (auto& [handle, readback] : g_readbacks) {
+            (void)handle;
+            if (readback->released) {
+                continue;
+            }
+
+            bool can_release = true;
+            if (readback->mapping_state == ReadbackMappingState::Mapped) {
+                try {
+                    backend->UnmapTextureReadback(readback->submission);
+                    readback->mapping_state = ReadbackMappingState::Consumed;
+                } catch (...) {
+                    can_release = false;
+                }
+            }
+
+            if (can_release) {
+                try {
+                    backend->ReleaseSubmission(readback->submission);
+                } catch (...) {
+                }
+            }
+            readback->released = true;
+        }
+
         for (auto& [handle, fence] : g_fences) {
             (void)handle;
             try {
@@ -797,6 +834,7 @@ void destroy_backend_resources_for_shutdown() {
             }
         }
     }
+    g_readbacks.clear();
     g_fences.clear();
 
 #if FEATHER_BUILD_WINDOW
@@ -865,6 +903,7 @@ void destroy_backend_resources_for_shutdown() {
 }
 
 void abandon_native_resources_for_process_exit() {
+    g_readbacks.clear();
     g_fences.clear();
 #if FEATHER_BUILD_WINDOW
     for (auto& [handle, presenter] : g_texture_presenters) {
@@ -1155,6 +1194,10 @@ size_t pixel_size(uint32_t format) {
     default:
         return 4;
     }
+}
+
+bool is_color_pixel_format(uint32_t format) {
+    return format >= 1 && format <= 10;
 }
 
 const char* pixel_format_name(uint32_t format) {
@@ -4932,7 +4975,7 @@ GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backe
         GPU::Backend::BufferDesc desc;
         desc.sizeInBytes = buffer.byte_size;
         desc.mode = easygpu_buffer_storage_mode(buffer.mode);
-        desc.initialData = buffer.bytes.empty() ? nullptr : buffer.bytes.data();
+        desc.initialData = buffer.host_dirty && buffer.bytes.size() == buffer.byte_size ? buffer.bytes.data() : nullptr;
         buffer.backend_buffer = backend.CreateBuffer(desc);
         if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
             throw std::runtime_error("EasyGPU backend failed to create buffer.");
@@ -5019,7 +5062,8 @@ GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::B
     desc.height = texture.height;
     desc.depth = texture.depth;
     desc.format = backend_format;
-    desc.initialData = texture.pixel_format == 100 || texture.bytes.empty() ? nullptr : texture.bytes.data();
+    desc.initialData =
+        texture.pixel_format == 100 || !texture.host_dirty || texture.bytes.empty() ? nullptr : texture.bytes.data();
     desc.mipLevels = texture.mip_levels;
     desc.usage = easygpu_texture_usage_flags(texture);
 
@@ -11264,6 +11308,12 @@ FE_API FeResult fe_runtime_shutdown(void) {
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
+        std::vector<std::unique_lock<std::mutex>> readback_locks;
+        readback_locks.reserve(g_readbacks.size());
+        for (const auto& [handle, readback] : g_readbacks) {
+            (void)handle;
+            readback_locks.emplace_back(readback->mutex);
+        }
         std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
         destroy_backend_resources_for_shutdown();
         return ok();
@@ -11349,6 +11399,32 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend type is unavailable.");
         }
 
+        return ok();
+    });
+}
+
+FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBackendOperationCounters* out_counters) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_counters == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_counters must not be null.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        const auto counters = backend->GetOperationCounters();
+        *out_counters = FeBackendOperationCounters{counters.finishCalls,
+                                                   counters.deviceWaitIdleCalls,
+                                                   counters.globalDrainCalls,
+                                                   counters.blockingSubmissionWaitCalls,
+                                                   counters.blockingTextureDownloadCalls,
+                                                   counters.asyncTextureReadbackCalls};
         return ok();
     });
 }
@@ -11852,6 +11928,7 @@ FE_API FeResult fe_buffer_create(FeContextHandle context, const FeBufferDesc* de
         state.stride = desc->element_stride;
         if (initial_data != nullptr) {
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
+            state.host_dirty = true;
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -12050,6 +12127,7 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
         state.byte_size = byte_count;
         if (initial_data != nullptr) {
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
+            state.host_dirty = true;
         }
         std::lock_guard<std::mutex> lock(g_mutex);
         const auto handle = next_handle();
@@ -12088,6 +12166,7 @@ FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDe
         state.byte_size = byte_count;
         if (initial_data != nullptr) {
             std::memcpy(state.bytes.data(), initial_data, state.bytes.size());
+            state.host_dirty = true;
         }
 
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -12200,6 +12279,263 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
             std::memcpy(dst + static_cast<size_t>(row) * width * pixel, it->second.bytes.data() + src_offset,
                         static_cast<size_t>(width) * pixel);
         }
+        return ok();
+    });
+}
+
+FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHandle texture,
+                                            FeBufferHandle staging_buffer, uint32_t x, uint32_t y, uint32_t width,
+                                            uint32_t height, uint64_t staging_offset, FeReadbackHandle* out_readback) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_readback == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_readback must not be null.");
+        }
+        *out_readback = 0;
+        if (width == 0 || height == 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback region must be non-empty.");
+        }
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        auto texture_it = g_textures.find(texture);
+        auto staging_it = g_buffers.find(staging_buffer);
+        if (texture_it == g_textures.end() || staging_it == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Texture readback references an invalid resource handle.");
+        }
+
+        auto& texture_state = texture_it->second;
+        auto& staging_state = staging_it->second;
+        if (texture_state.depth != 1 || !is_color_pixel_format(texture_state.pixel_format)) {
+            return fail(FE_ERROR_UNSUPPORTED, "Asynchronous readback supports 2D color textures only.");
+        }
+        if (!range_fits(x, width, texture_state.width) || !range_fits(y, height, texture_state.height)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback region exceeds texture dimensions.");
+        }
+
+        const size_t bytes_per_pixel = pixel_size(texture_state.pixel_format);
+        size_t row_pitch = 0;
+        size_t byte_size = 0;
+        if (!checked_multiply_size(static_cast<size_t>(width), bytes_per_pixel, &row_pitch) ||
+            !checked_multiply_size(row_pitch, static_cast<size_t>(height), &byte_size)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback byte size overflows the host address space.");
+        }
+        if ((staging_offset % 4) != 0 || (staging_offset % bytes_per_pixel) != 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Texture readback staging offset must satisfy four-byte and pixel alignment.");
+        }
+        if (!range_fits(staging_offset, byte_size, staging_state.byte_size)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback range exceeds the staging buffer.");
+        }
+        if (staging_offset > std::numeric_limits<size_t>::max()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback staging offset exceeds the host address space.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        const auto backend_texture = ensure_easygpu_texture(texture_state, *backend);
+        const auto backend_staging = ensure_easygpu_buffer(staging_state, *backend);
+        if (backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE ||
+            backend_staging == GPU::Backend::INVALID_BUFFER_HANDLE) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "Texture readback resources could not be materialized.");
+        }
+
+        auto state = std::make_shared<ReadbackState>();
+        state->submission = backend->BeginTextureReadback(backend_texture, x, y, width, height, backend_staging,
+                                                          static_cast<size_t>(staging_offset));
+        state->byte_size = byte_size;
+        state->row_pitch = row_pitch;
+
+        const auto handle = next_handle();
+        g_readbacks.emplace(handle, std::move(state));
+        *out_readback = handle;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_readback_is_complete(FeReadbackHandle readback, bool* out_complete) {
+    return protect([&] {
+        if (out_complete == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_complete must not be null.");
+        }
+        *out_complete = false;
+
+        std::shared_ptr<ReadbackState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_readbacks.find(readback);
+            if (it == g_readbacks.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid readback handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> readback_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Readback handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_complete = backend->IsSubmissionComplete(state->submission);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_readback_wait(FeReadbackHandle readback, uint64_t timeout_nanoseconds, bool* out_complete) {
+    return protect([&] {
+        if (out_complete == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_complete must not be null.");
+        }
+        *out_complete = false;
+
+        std::shared_ptr<ReadbackState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_readbacks.find(readback);
+            if (it == g_readbacks.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid readback handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> readback_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Readback handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_complete = backend->WaitForSubmission(state->submission, timeout_nanoseconds);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_readback_map(FeReadbackHandle readback, FeReadbackMapping* out_mapping) {
+    return protect([&] {
+        if (out_mapping == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_mapping must not be null.");
+        }
+        *out_mapping = FeReadbackMapping{};
+
+        std::shared_ptr<ReadbackState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_readbacks.find(readback);
+            if (it == g_readbacks.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid readback handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> readback_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Readback handle has been destroyed.");
+        }
+        if (state->mapping_state != ReadbackMappingState::NeverMapped) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Readback mapping has already been consumed.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        if (!backend->IsSubmissionComplete(state->submission)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Readback is not complete.");
+        }
+
+        const auto mapping = backend->MapTextureReadback(state->submission);
+        if (mapping.data == nullptr || mapping.byteSize != state->byte_size || mapping.rowPitch != state->row_pitch) {
+            try {
+                backend->UnmapTextureReadback(state->submission);
+                state->mapping_state = ReadbackMappingState::Consumed;
+            } catch (...) {
+            }
+            return fail(FE_ERROR_UNKNOWN, "EasyGPU returned inconsistent readback mapping metadata.");
+        }
+
+        state->mapping_state = ReadbackMappingState::Mapped;
+        *out_mapping = FeReadbackMapping{mapping.data, static_cast<uint64_t>(mapping.byteSize),
+                                         static_cast<uint64_t>(mapping.rowPitch)};
+        return ok();
+    });
+}
+
+FE_API FeResult fe_readback_unmap(FeReadbackHandle readback) {
+    return protect([&] {
+        std::shared_ptr<ReadbackState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_readbacks.find(readback);
+            if (it == g_readbacks.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid readback handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> readback_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Readback handle has been destroyed.");
+        }
+        if (state->mapping_state != ReadbackMappingState::Mapped) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Readback is not mapped.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        backend->UnmapTextureReadback(state->submission);
+        state->mapping_state = ReadbackMappingState::Consumed;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_readback_destroy(FeReadbackHandle readback) {
+    return protect([&] {
+        if (readback == 0 || g_runtime_shutting_down.load(std::memory_order_acquire)) {
+            return ok();
+        }
+
+        std::shared_ptr<ReadbackState> state;
+        std::unique_lock<std::mutex> readback_lock;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_readbacks.find(readback);
+            if (it == g_readbacks.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid readback handle.");
+            }
+            state = it->second;
+            readback_lock = std::unique_lock<std::mutex>(state->mutex);
+            if (state->released) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Readback handle has been destroyed.");
+            }
+            g_readbacks.erase(it);
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            state->released = true;
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        if (state->mapping_state == ReadbackMappingState::Mapped) {
+            backend->UnmapTextureReadback(state->submission);
+            state->mapping_state = ReadbackMappingState::Consumed;
+        }
+        backend->ReleaseSubmission(state->submission);
+        state->released = true;
         return ok();
     });
 }

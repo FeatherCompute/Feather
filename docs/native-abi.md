@@ -123,6 +123,19 @@ Sampler descriptors carry filter, address, mip, comparison, anisotropy, and bord
 
 The typed EasyGPU texture bridge supports the runtime formats documented in [Support Status](support-status.md). Unsupported formats return explicit unsupported-format errors instead of falling back silently.
 
+Asynchronous 2D color readback uses a submission-scoped ABI rather than exposing a buffer mapping:
+
+- `fe_texture2d_begin_readback` validates the region, byte size, staging capacity, and Vulkan copy alignment before it submits.
+- `fe_readback_is_complete` and `fe_readback_wait` observe the exact submission.
+- `fe_readback_map` returns tightly packed `data`, `byte_size`, and `row_pitch` metadata exactly once.
+- `fe_readback_unmap` consumes that mapping exactly once.
+- `fe_readback_destroy` releases pending ownership without waiting; it also safely unmaps an abandoned active mapping.
+
+`FeReadbackHandle` is intentionally distinct from `FeFenceHandle`: its lifetime includes the completed-to-mapped CPU
+visibility window. `fe_context_get_operation_counters` exposes finish, device-idle, global-drain, blocking-wait,
+blocking-download, and asynchronous-readback counts so tests can prove that cold empty resources and cancellation stay
+off blocking paths.
+
 ## Layout Bridge
 
 Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring EasyGPU std430 layout rules:

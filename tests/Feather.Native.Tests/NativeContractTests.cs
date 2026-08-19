@@ -185,6 +185,205 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeAsyncTextureReadbackMapsExactlyOnceWithStableMetadata()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
+            const int width = 5;
+            const int height = 3;
+            const int offset = 12;
+            var source = Enumerable.Range(0, width * height * 4)
+                .Select(index => (byte)((index * 37 + 11) & 0xff))
+                .ToArray();
+            var sourcePointer = Marshal.AllocHGlobal(source.Length);
+            try
+            {
+                Marshal.Copy(source, 0, sourcePointer, source.Length);
+                var textureDesc = new FeTexture2DDesc(width, height, 1, pixelFormat: 3, access: 3);
+                var stagingDesc = new FeBufferDesc((ulong)(offset + source.Length), mode: 3, elementStride: 1);
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(
+                    context,
+                    in textureDesc,
+                    sourcePointer,
+                    out var texture));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(
+                    context,
+                    in stagingDesc,
+                    IntPtr.Zero,
+                    out var staging));
+                using (texture)
+                using (staging)
+                {
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_begin_readback(
+                            context,
+                            texture,
+                            staging,
+                            0,
+                            0,
+                            0,
+                            height,
+                            0,
+                            out _));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_begin_readback(
+                            context,
+                            texture,
+                            staging,
+                            width - 1,
+                            0,
+                            2,
+                            height,
+                            0,
+                            out _));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_begin_readback(
+                            context,
+                            texture,
+                            staging,
+                            0,
+                            0,
+                            width,
+                            height,
+                            2,
+                            out _));
+                    Assert.Equal(
+                        FeResult.ErrorInvalidArgument,
+                        NativeMethods.fe_texture2d_begin_readback(
+                            context,
+                            texture,
+                            staging,
+                            0,
+                            0,
+                            width,
+                            height,
+                            ulong.MaxValue - 3,
+                            out _));
+
+                    var depthDesc = new FeTexture2DDesc(1, 1, 1, pixelFormat: 101, access: 6);
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(
+                        context,
+                        in depthDesc,
+                        IntPtr.Zero,
+                        out var depth));
+                    using (depth)
+                    {
+                        Assert.Equal(
+                            FeResult.ErrorUnsupported,
+                            NativeMethods.fe_texture2d_begin_readback(
+                                context,
+                                depth,
+                                staging,
+                                0,
+                                0,
+                                1,
+                                1,
+                                0,
+                                out _));
+                    }
+
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_begin_readback(
+                        context,
+                        texture,
+                        staging,
+                        0,
+                        0,
+                        width,
+                        height,
+                        offset,
+                        out var readback));
+                    using (readback)
+                    {
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_readback_wait(
+                            readback,
+                            ulong.MaxValue,
+                            out var completed));
+                        Assert.True(completed);
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_readback_map(readback, out var mapping));
+                        Assert.Equal((ulong)source.Length, mapping.ByteSize);
+                        Assert.Equal((ulong)(width * 4), mapping.RowPitch);
+                        Assert.NotEqual(IntPtr.Zero, mapping.Data);
+
+                        var actual = new byte[source.Length];
+                        Marshal.Copy(mapping.Data, actual, 0, actual.Length);
+                        Assert.Equal(source, actual);
+                        Assert.Equal(
+                            FeResult.ErrorInvalidArgument,
+                            NativeMethods.fe_readback_map(readback, out _));
+
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_readback_unmap(readback));
+                        Assert.Equal(FeResult.ErrorInvalidArgument, NativeMethods.fe_readback_unmap(readback));
+                        Assert.Equal(
+                            FeResult.ErrorInvalidArgument,
+                            NativeMethods.fe_readback_map(readback, out _));
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(sourcePointer);
+            }
+        }
+    }
+
+    [Fact]
+    public void ColdNativeReadbackAndCancellationAvoidBlockingOperations()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
+            var textureDesc = new FeTexture2DDesc(4, 4, 1, pixelFormat: 3, access: 5);
+            var stagingDesc = new FeBufferDesc(64, mode: 3, elementStride: 1);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_create(
+                context,
+                in textureDesc,
+                IntPtr.Zero,
+                out var texture));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(
+                context,
+                in stagingDesc,
+                IntPtr.Zero,
+                out var staging));
+            using (texture)
+            using (staging)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_operation_counters(context, out var before));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_begin_readback(
+                    context,
+                    texture,
+                    staging,
+                    0,
+                    0,
+                    4,
+                    4,
+                    0,
+                    out var readback));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_operation_counters(context, out var afterBegin));
+                Assert.Equal(before.AsyncTextureReadbackCalls + 1, afterBegin.AsyncTextureReadbackCalls);
+                Assert.Equal(before.FinishCalls, afterBegin.FinishCalls);
+                Assert.Equal(before.DeviceWaitIdleCalls, afterBegin.DeviceWaitIdleCalls);
+                Assert.Equal(before.GlobalDrainCalls, afterBegin.GlobalDrainCalls);
+                Assert.Equal(before.BlockingSubmissionWaitCalls, afterBegin.BlockingSubmissionWaitCalls);
+                Assert.Equal(before.BlockingTextureDownloadCalls, afterBegin.BlockingTextureDownloadCalls);
+
+                var rawReadback = readback.DangerousGetHandle();
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_readback_destroy_raw(rawReadback));
+                readback.SetHandleAsInvalid();
+                readback.Dispose();
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_operation_counters(context, out var afterDestroy));
+                Assert.Equal(afterBegin.GlobalDrainCalls, afterDestroy.GlobalDrainCalls);
+                Assert.Equal(afterBegin.BlockingSubmissionWaitCalls, afterDestroy.BlockingSubmissionWaitCalls);
+            }
+        }
+    }
+
+    [Fact]
     public void NativeRuntimeBilinearlyUpscalesRgba8()
     {
         var source = new byte[]
@@ -242,6 +441,16 @@ public class NativeContractTests
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());
         Assert.Equal(0, Marshal.OffsetOf<FeTexture2DDesc>(nameof(FeTexture2DDesc.Width)).ToInt32());
         Assert.Equal(16, Marshal.OffsetOf<FeTexture2DDesc>(nameof(FeTexture2DDesc.Access)).ToInt32());
+    }
+
+    [Fact]
+    public void ReadbackDescriptorsHaveStableSequentialLayout()
+    {
+        Assert.Equal(24, Marshal.SizeOf<FeReadbackMapping>());
+        Assert.Equal(0, Marshal.OffsetOf<FeReadbackMapping>(nameof(FeReadbackMapping.Data)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeReadbackMapping>(nameof(FeReadbackMapping.ByteSize)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeReadbackMapping>(nameof(FeReadbackMapping.RowPitch)).ToInt32());
+        Assert.Equal(48, Marshal.SizeOf<FeBackendOperationCounters>());
     }
 
     [Fact]
