@@ -56,7 +56,7 @@ See [Packaging](packaging.md) for project and asset guidance.
 
 ## Backend Initialization
 
-`fe_context_initialize`, `fe_context_get_backend_type`, and `fe_context_get_caps` initialize/query the EasyGPU runtime. If the backend cannot initialize, Feather returns `FE_ERROR_BACKEND_UNAVAILABLE` instead of reporting placeholder capabilities.
+`fe_context_initialize`, `fe_context_get_backend_type`, and `fe_context_get_caps` initialize/query the EasyGPU runtime. `fe_context_get_device_info` reports the live adapter, driver and backend versions, the maximum 2D texture dimension, timestamp-query support, and the native ABI version without changing the stable `FeBackendCaps` layout. `fe_runtime_abi_version` exposes the same ABI version without requiring an initialized device. If the backend cannot initialize, Feather returns `FE_ERROR_BACKEND_UNAVAILABLE` instead of reporting placeholder capabilities.
 
 `BackendCaps` exposes:
 

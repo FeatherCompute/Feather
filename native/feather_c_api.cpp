@@ -11389,8 +11389,8 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
             static_cast<uint32_t>(std::max(max_y, 0)),
             static_cast<uint32_t>(std::max(max_z, 0)),
             caps.supportsGraphics ? 1u : 0u,
-            0u,
-            0u,
+            1u,
+            1u,
             supports_window,
             caps.supportsDepthClamp ? 1u : 0u,
             caps.supportsNonFillPolygonMode ? 1u : 0u
@@ -11401,6 +11401,43 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
 
         return ok();
     });
+}
+
+FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeBackendDeviceInfo* out_info) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_info == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_info must not be null.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        const auto caps = backend->GetCaps();
+        *out_info = FeBackendDeviceInfo{};
+        out_info->native_abi_version = 1u;
+        out_info->max_texture_dimension_2d = caps.maxTextureDimension2D;
+        out_info->supports_timestamp_queries = caps.supportsTimestampQueries ? 1u : 0u;
+        copy_fixed_c_string(out_info->adapter_name, sizeof(out_info->adapter_name), caps.adapterName);
+        copy_fixed_c_string(out_info->driver_version, sizeof(out_info->driver_version), caps.driverVersion);
+        copy_fixed_c_string(out_info->backend_version, sizeof(out_info->backend_version), caps.versionString);
+
+        if (out_info->adapter_name[0] == '\0' || out_info->driver_version[0] == '\0' ||
+            out_info->backend_version[0] == '\0' || out_info->max_texture_dimension_2d == 0) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU device identity is incomplete.");
+        }
+
+        return ok();
+    });
+}
+
+FE_API uint32_t fe_runtime_abi_version(void) {
+    return 1u;
 }
 
 FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBackendOperationCounters* out_counters) {

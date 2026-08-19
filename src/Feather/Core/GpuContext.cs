@@ -78,6 +78,41 @@ public sealed class GpuContext : IDisposable
     }
 
     /// <summary>
+    /// Gets the live adapter, driver, backend, and image-limit identity reported by EasyGPU.
+    /// </summary>
+    public BackendDeviceInfo DeviceInfo
+    {
+        get
+        {
+            using var operation = EnterOperation();
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_device_info(Handle, out var info));
+            return CreateDeviceInfo(info);
+        }
+    }
+
+    private static unsafe BackendDeviceInfo CreateDeviceInfo(FeBackendDeviceInfo info)
+    {
+        return new BackendDeviceInfo(
+            info.NativeAbiVersion,
+            info.MaxTextureDimension2D,
+            info.SupportsTimestampQueries != 0,
+            FixedUtf8(info.AdapterName, 256),
+            FixedUtf8(info.DriverVersion, 128),
+            FixedUtf8(info.BackendVersion, 64));
+
+        static string FixedUtf8(byte* value, int capacity)
+        {
+            var length = 0;
+            while (length < capacity && value[length] != 0)
+            {
+                length++;
+            }
+
+            return System.Text.Encoding.UTF8.GetString(value, length);
+        }
+    }
+
+    /// <summary>
     /// Gets a point-in-time snapshot of backend synchronization and readback operations.
     /// </summary>
     public BackendOperationCounters OperationCounters
@@ -334,6 +369,17 @@ public readonly record struct BackendCaps(
     bool SupportsNN,
     bool SupportsDepthClamp,
     bool SupportsNonFillPolygonMode);
+
+/// <summary>
+/// Stable identity and image limits for the initialized native backend.
+/// </summary>
+public readonly record struct BackendDeviceInfo(
+    uint NativeAbiVersion,
+    uint MaxTextureDimension2D,
+    bool SupportsTimestampQueries,
+    string AdapterName,
+    string DriverVersion,
+    string BackendVersion);
 
 /// <summary>
 /// Backend counters used to prove that asynchronous paths avoid global drains and blocking downloads.

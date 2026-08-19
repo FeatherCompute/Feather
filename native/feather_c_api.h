@@ -74,6 +74,16 @@ typedef struct FeBackendCaps {
     uint32_t supports_non_fill_polygon_mode;
 } FeBackendCaps;
 
+typedef struct FeBackendDeviceInfo {
+    uint32_t native_abi_version;
+    uint32_t max_texture_dimension_2d;
+    uint32_t supports_timestamp_queries;
+    uint32_t reserved;
+    char adapter_name[256];
+    char driver_version[128];
+    char backend_version[64];
+} FeBackendDeviceInfo;
+
 typedef struct FeBackendOperationCounters {
     uint64_t finish_calls;
     uint64_t device_wait_idle_calls;
@@ -281,6 +291,7 @@ FE_API FeResult fe_context_shutdown(FeContextHandle context);
 FE_API FeResult fe_context_wait_idle(FeContextHandle context);
 FE_API FeResult fe_context_get_backend_type(FeContextHandle context, uint32_t* out_backend);
 FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_caps);
+FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeBackendDeviceInfo* out_info);
 FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBackendOperationCounters* out_counters);
 FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
@@ -409,6 +420,7 @@ FE_API FeResult fe_profiler_query(const char* name, FeProfilerQueryResult* out_r
 FE_API FeResult fe_profiler_get_formatted(char* buffer, size_t buffer_size, size_t* out_required_size);
 
 FE_API uint32_t fe_ir_bridge_contract_version(void);
+FE_API uint32_t fe_runtime_abi_version(void);
 FE_API FeResult fe_ir_validate(const void* ir_data, uint64_t ir_size);
 
 #ifdef __cplusplus

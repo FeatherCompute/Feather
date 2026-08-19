@@ -9,6 +9,7 @@ public class NativeContractTests
     public void NativeRuntimeCanLoadContractExport()
     {
         Assert.Equal(1u, NativeMethods.fe_ir_bridge_contract_version());
+        Assert.Equal(1u, NativeMethods.fe_runtime_abi_version());
     }
 
     [Fact]
@@ -640,5 +641,17 @@ public class NativeContractTests
         Assert.Equal(28, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsWindow)).ToInt32());
         Assert.Equal(32, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsDepthClamp)).ToInt32());
         Assert.Equal(36, Marshal.OffsetOf<FeBackendCaps>(nameof(FeBackendCaps.SupportsNonFillPolygonMode)).ToInt32());
+    }
+
+    [Fact]
+    public void BackendDeviceInfoHasStableSequentialLayout()
+    {
+        Assert.Equal(464, Marshal.SizeOf<FeBackendDeviceInfo>());
+        Assert.Equal(0, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.NativeAbiVersion)).ToInt32());
+        Assert.Equal(4, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.MaxTextureDimension2D)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.SupportsTimestampQueries)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.AdapterName)).ToInt32());
+        Assert.Equal(272, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.DriverVersion)).ToInt32());
+        Assert.Equal(400, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.BackendVersion)).ToInt32());
     }
 }

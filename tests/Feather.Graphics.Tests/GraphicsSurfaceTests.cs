@@ -39,4 +39,21 @@ public class GraphicsSurfaceTests
         Assert.True(caps.SupportsDepthClamp);
         Assert.True(caps.SupportsNonFillPolygonMode);
     }
+
+    [Fact]
+    public void BackendDeviceInfoCarriesStablePipelineIdentity()
+    {
+        var info = new BackendDeviceInfo(
+            NativeAbiVersion: 1,
+            MaxTextureDimension2D: 8192,
+            SupportsTimestampQueries: true,
+            AdapterName: "test-adapter",
+            DriverVersion: "test-driver",
+            BackendVersion: "1.3");
+
+        Assert.Equal("test-adapter", info.AdapterName);
+        Assert.Equal("test-driver", info.DriverVersion);
+        Assert.Equal(8192u, info.MaxTextureDimension2D);
+        Assert.True(info.SupportsTimestampQueries);
+    }
 }

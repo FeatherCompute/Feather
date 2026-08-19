@@ -28,6 +28,15 @@ public class NativeResourceRoundTripTests
         Assert.True(caps.MaxWorkGroupSizeX > 0);
         Assert.True(caps.MaxWorkGroupSizeY > 0);
         Assert.True(caps.MaxWorkGroupSizeZ > 0);
+        Assert.Equal(1u, caps.SupportsAD);
+        Assert.Equal(1u, caps.SupportsNN);
+
+        var device = GPU.Context.DeviceInfo;
+        Assert.Equal(1u, device.NativeAbiVersion);
+        Assert.True(device.MaxTextureDimension2D > 0);
+        Assert.False(string.IsNullOrWhiteSpace(device.AdapterName));
+        Assert.False(string.IsNullOrWhiteSpace(device.DriverVersion));
+        Assert.False(string.IsNullOrWhiteSpace(device.BackendVersion));
     }
 
     [Fact]

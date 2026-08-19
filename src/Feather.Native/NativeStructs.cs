@@ -38,6 +38,18 @@ public struct FeBackendCaps
     public uint SupportsNonFillPolygonMode;
 }
 
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+public unsafe struct FeBackendDeviceInfo
+{
+    public uint NativeAbiVersion;
+    public uint MaxTextureDimension2D;
+    public uint SupportsTimestampQueries;
+    public uint Reserved;
+    public fixed byte AdapterName[256];
+    public fixed byte DriverVersion[128];
+    public fixed byte BackendVersion[64];
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public readonly struct FeBackendOperationCounters
 {

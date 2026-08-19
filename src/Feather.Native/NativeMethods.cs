@@ -241,6 +241,11 @@ public static class NativeMethods
     public static extern FeResult fe_context_get_caps(FeContextHandle context, out FeBackendCaps out_caps);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_get_device_info(
+        FeContextHandle context,
+        out FeBackendDeviceInfo out_info);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_context_get_operation_counters(
         FeContextHandle context,
         out FeBackendOperationCounters out_counters);
@@ -529,6 +534,9 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern uint fe_ir_bridge_contract_version();
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint fe_runtime_abi_version();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_ir_validate(IntPtr ir_data, ulong ir_size);
