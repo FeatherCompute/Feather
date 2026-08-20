@@ -193,6 +193,17 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeTextureDeclaredAccessPreparationRejectsInvalidHandle()
+    {
+        Assert.Equal(
+            FeResult.ErrorInvalidHandle,
+            NativeMethods.fe_texture_prepare_declared_access(FeTextureHandle.Null));
+        Assert.Equal(
+            FeResult.ErrorInvalidHandle,
+            NativeMethods.fe_texture_prepare_sampled_access(FeTextureHandle.Null));
+    }
+
+    [Fact]
     public void NativeAsyncTextureReadbackMapsExactlyOnceWithStableMetadata()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));

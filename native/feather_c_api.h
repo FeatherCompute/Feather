@@ -376,6 +376,10 @@ FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDe
 FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture);
 FE_API FeResult fe_texture_destroy(FeTextureHandle texture);
+/** Record a resource-scoped transition back to the texture's declared access; does not submit or wait. */
+FE_API FeResult fe_texture_prepare_declared_access(FeTextureHandle texture);
+/** Record a resource-scoped transition to sampled access; does not submit or wait. */
+FE_API FeResult fe_texture_prepare_sampled_access(FeTextureHandle texture);
 FE_API FeResult fe_texture2d_upload(FeTextureHandle texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                                     const void* data);
 FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height,

@@ -150,6 +150,30 @@ public class NativeResourceRoundTripTests
         Assert.Equal(pixels, readback);
     }
 
+    [Fact]
+    public async Task TextureDeclaredAccessPreparationRecordsWithoutGlobalWait()
+    {
+        var context = GPU.Context;
+        using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(
+            4,
+            4,
+            PixelFormat.Rgba8,
+            TextureAccess.RenderTarget);
+        var before = context.OperationCounters;
+
+        texture.PrepareSampledAccess();
+        texture.PrepareDeclaredAccess();
+        await using var fence = GPU.Queue.Signal();
+        Assert.True(await fence.WaitAsync(TimeSpan.FromSeconds(30)));
+
+        var after = context.OperationCounters;
+        Assert.Equal(before.FinishCalls, after.FinishCalls);
+        Assert.Equal(before.DeviceWaitIdleCalls, after.DeviceWaitIdleCalls);
+        Assert.Equal(before.GlobalDrainCalls, after.GlobalDrainCalls);
+        Assert.Equal(before.BlockingSubmissionWaitCalls, after.BlockingSubmissionWaitCalls);
+        Assert.Equal(before.BlockingTextureDownloadCalls, after.BlockingTextureDownloadCalls);
+    }
+
     private static ulong CompilationObservations(BackendShaderCacheCounters counters) =>
         counters.MemoryCacheHits + counters.DiskCacheHits + counters.FrontendCompilations;
 

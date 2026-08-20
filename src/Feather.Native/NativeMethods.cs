@@ -377,6 +377,12 @@ public static class NativeMethods
     public static extern FeResult fe_texture_destroy(IntPtr texture);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_texture_prepare_declared_access(FeTextureHandle texture);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_texture_prepare_sampled_access(FeTextureHandle texture);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture2d_upload(FeTextureHandle texture, uint x, uint y, uint width, uint height, IntPtr data);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

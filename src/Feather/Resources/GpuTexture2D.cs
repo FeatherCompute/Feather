@@ -146,6 +146,37 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     public SampledTexture2D<TValue> AsSampled() => new(GetNativeHandle(), Size);
 
     /// <summary>
+    /// Records a resource-scoped transition back to this texture's declared access mode.
+    /// The transition is appended to the current queue command stream and neither submits
+    /// nor waits. Auxiliary consumers use this after inspection or conversion so their
+    /// state changes do not leak into the owning graph's next measured interval.
+    /// </summary>
+    public void PrepareDeclaredAccess()
+    {
+        ThrowIfDisposed();
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_prepare_declared_access(Handle));
+        }
+    }
+
+    /// <summary>
+    /// Records a resource-scoped transition to sampled access without submitting or waiting.
+    /// Viewer boundaries use this to keep a render target in a stable post-graph state that
+    /// both sampled consumers and the next graph frame can consume deterministically.
+    /// </summary>
+    public void PrepareSampledAccess()
+    {
+        ThrowIfDisposed();
+        using var operation = Context.EnterOperation();
+        lock (Context.QueueGate)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_prepare_sampled_access(Handle));
+        }
+    }
+
+    /// <summary>
     /// Uploads pixels into the base texture level.
     /// </summary>
     /// <param name="pixels">The source pixels. The span must contain at least <c>Width * Height</c> elements.</param>

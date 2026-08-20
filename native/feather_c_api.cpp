@@ -4970,6 +4970,26 @@ uint32_t easygpu_texture_usage_flags(const TextureState& texture) {
     return usage;
 }
 
+GPU::Backend::TextureAccessState easygpu_texture_access_state(uint32_t access) {
+    using GPU::Backend::TextureAccessState;
+    switch (access) {
+    case 1:
+        return TextureAccessState::StorageRead;
+    case 2:
+        return TextureAccessState::StorageWrite;
+    case 3:
+        return TextureAccessState::StorageReadWrite;
+    case 4:
+        return TextureAccessState::Sampled;
+    case 5:
+        return TextureAccessState::ColorAttachment;
+    case 6:
+        return TextureAccessState::DepthStencilAttachment;
+    default:
+        throw std::runtime_error("Texture has an invalid declared access mode.");
+    }
+}
+
 GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backend::Backend& backend) {
     if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
         GPU::Backend::BufferDesc desc;
@@ -12389,6 +12409,45 @@ FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
         }
 
         g_textures.erase(it);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_texture_prepare_declared_access(FeTextureHandle texture) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_textures.find(texture);
+        if (it == g_textures.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
+        }
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for texture access preparation.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        const auto backend_texture = ensure_easygpu_texture(it->second, *backend);
+        backend->PrepareTextureAccess(backend_texture, easygpu_texture_access_state(it->second.access));
+        return ok();
+    });
+}
+
+FE_API FeResult fe_texture_prepare_sampled_access(FeTextureHandle texture) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_textures.find(texture);
+        if (it == g_textures.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
+        }
+        if (it->second.access == 6) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Depth/stencil textures cannot be prepared for sampled color access.");
+        }
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable for texture access preparation.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        const auto backend_texture = ensure_easygpu_texture(it->second, *backend);
+        backend->PrepareTextureAccess(backend_texture, GPU::Backend::TextureAccessState::Sampled);
         return ok();
     });
 }
