@@ -11,7 +11,8 @@ public enum FeResult : uint
     ErrorBackendUnavailable = 4,
     ErrorShaderCompileFailed = 5,
     ErrorOutOfMemory = 6,
-    ErrorUnsupported = 7
+    ErrorUnsupported = 7,
+    ErrorDeviceLost = 8
 }
 
 public enum FeDispatchPath : uint

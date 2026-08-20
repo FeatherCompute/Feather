@@ -11068,6 +11068,11 @@ template <typename Func> FeResult protect(Func&& func) {
         return fail(FE_ERROR_OUT_OF_MEMORY, "Native allocation failed.");
     } catch (const std::exception& ex) {
         const std::string message = ex.what();
+        if (message.find("device was lost") != std::string::npos ||
+            message.find("VK_ERROR_DEVICE_LOST") != std::string::npos) {
+            const auto decorated = "EasyGPU device lost: " + message;
+            return fail(FE_ERROR_DEVICE_LOST, decorated.c_str());
+        }
         if (message.find("backend") != std::string::npos || message.find("Backend") != std::string::npos ||
             message.find("Vulkan") != std::string::npos || message.find("OpenGL") != std::string::npos ||
             message.find("GPU context") != std::string::npos || message.find("Context not initialized") != std::string::npos) {

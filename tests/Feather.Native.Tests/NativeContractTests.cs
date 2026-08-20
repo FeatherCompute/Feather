@@ -6,6 +6,13 @@ namespace Feather.Native.Tests;
 public class NativeContractTests
 {
     [Fact]
+    public void ResultCodesKeepDeviceLossDistinctFromGenericBackendFailure()
+    {
+        Assert.Equal(4u, (uint)FeResult.ErrorBackendUnavailable);
+        Assert.Equal(8u, (uint)FeResult.ErrorDeviceLost);
+    }
+
+    [Fact]
     public void NativeRuntimeCanLoadContractExport()
     {
         Assert.Equal(1u, NativeMethods.fe_ir_bridge_contract_version());

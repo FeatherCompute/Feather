@@ -145,6 +145,10 @@ cache hits, disk misses, frontend compilations, write failures, and the last fro
 `tracking_supported = 1`; unsupported backends report false. These counters are backend evidence and must not be inferred
 from a Studio pipeline-descriptor compatibility hit or converted into sampled-source hotness.
 
+Native exceptions that report Vulkan device loss map to the distinct `FE_ERROR_DEVICE_LOST` result. Callers must stop
+submission and enter their explicit recovery/offline state; they must not treat this as an ordinary shader compile or
+generic backend-unavailable failure and continue using existing GPU resources.
+
 ## Layout Bridge
 
 Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring EasyGPU std430 layout rules:

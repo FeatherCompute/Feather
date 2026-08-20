@@ -42,7 +42,8 @@ typedef enum FeResult {
     FE_ERROR_BACKEND_UNAVAILABLE = 4,
     FE_ERROR_SHADER_COMPILE_FAILED = 5,
     FE_ERROR_OUT_OF_MEMORY = 6,
-    FE_ERROR_UNSUPPORTED = 7
+    FE_ERROR_UNSUPPORTED = 7,
+    FE_ERROR_DEVICE_LOST = 8
 } FeResult;
 
 typedef enum FeDispatchPath {
