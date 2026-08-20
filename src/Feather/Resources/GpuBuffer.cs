@@ -50,12 +50,12 @@ public sealed class GpuBuffer<T> : IDisposable
     internal int ElementStride => GpuValueLayout<T>.BufferElementStride;
 
     /// <summary>
-    /// Creates an empty typed GPU buffer.
+    /// Creates a typed GPU buffer with unspecified initial contents.
     /// </summary>
     /// <param name="context">The GPU context that owns the buffer.</param>
     /// <param name="count">The number of logical elements.</param>
     /// <param name="access">The shader access mode.</param>
-    /// <returns>The created buffer.</returns>
+    /// <returns>The created buffer. Upload or fully write its contents before reading them.</returns>
     public static GpuBuffer<T> Create(GpuContext context, int count, BufferAccess access)
     {
         ArgumentNullException.ThrowIfNull(context);

@@ -66,6 +66,15 @@ See [Packaging](packaging.md) for project and asset guidance.
 - AD/NN capability flags.
 - Optional raster features such as depth clamp and non-fill polygon modes.
 
+## Resource Initialization
+
+Passing `NULL` as `initial_data` to `fe_buffer_create`, `fe_texture2d_create`, or
+`fe_texture3d_create` leaves the resource's initial contents unspecified. Callers
+must upload data or completely write every range they later read. Native creation
+does not turn an internal host shadow into an implicit zero upload: doing so would
+add blocking submission waits to cold asynchronous readback. A readback submission
+fully overwrites its requested staging range before that range can be mapped.
+
 ## Queue Submission And Fences
 
 The native queue ABI exposes completion of one EasyGPU submission rather than mapping every fence wait to `Finish()`:

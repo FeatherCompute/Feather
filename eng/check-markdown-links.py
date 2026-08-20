@@ -50,7 +50,12 @@ def check_file(path: Path) -> list[str]:
 def main() -> int:
     errors: list[str] = []
     for path in sorted(ROOT.rglob("*.md")):
-        if any(part in {"EasyGPU", "bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in path.parts):
+        relative_parts = path.relative_to(ROOT).parts
+        if any(part in {"EasyGPU", "bin", "obj", "artifacts", ".git", ".idea", ".VSCodeCounter"} for part in relative_parts):
+            continue
+        if len(relative_parts) > 1 and relative_parts[0] == "native" and (
+            relative_parts[1].startswith("build") or relative_parts[1].startswith("cmake-build")
+        ):
             continue
         errors.extend(check_file(path))
 

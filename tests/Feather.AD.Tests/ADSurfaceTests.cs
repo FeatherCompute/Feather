@@ -230,7 +230,7 @@ public class ADSurfaceTests
     [Fact]
     public void GpuFacadeCreatesAdKernel()
     {
-        using var input = GPU.CreateBuffer<float>(4);
+        using var input = GPU.CreateBuffer<float>([0, 0, 0, 0]);
         using var output = GPU.CreateBuffer<float>(4);
         using var kernel = GPU.CreateADKernel(new AdSmokeKernel(input.AsReadWrite(), output.AsReadWrite()));
 

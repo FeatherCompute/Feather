@@ -4975,6 +4975,8 @@ GPU::Backend::BufferHandle ensure_easygpu_buffer(BufferState& buffer, GPU::Backe
         GPU::Backend::BufferDesc desc;
         desc.sizeInBytes = buffer.byte_size;
         desc.mode = easygpu_buffer_storage_mode(buffer.mode);
+        // Null initial data deliberately leaves backend contents unspecified. Supplying the zero-filled
+        // host shadow here makes Vulkan/Metal wait for an upload and breaks cold asynchronous readback.
         desc.initialData = buffer.host_dirty && buffer.bytes.size() == buffer.byte_size ? buffer.bytes.data() : nullptr;
         buffer.backend_buffer = backend.CreateBuffer(desc);
         if (buffer.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
@@ -5062,6 +5064,7 @@ GPU::Backend::TextureHandle ensure_easygpu_texture(TextureState& texture, GPU::B
     desc.height = texture.height;
     desc.depth = texture.depth;
     desc.format = backend_format;
+    // As with buffers, null initial data must not become an implicit blocking zero upload.
     desc.initialData =
         texture.pixel_format == 100 || !texture.host_dirty || texture.bytes.empty() ? nullptr : texture.bytes.data();
     desc.mipLevels = texture.mip_levels;
