@@ -455,6 +455,10 @@ public class NativeContractTests
         Assert.Equal(88, Marshal.SizeOf<FeBackendResourceCounters>());
         Assert.Equal(0, Marshal.OffsetOf<FeBackendResourceCounters>(nameof(FeBackendResourceCounters.TrackingSupported)).ToInt32());
         Assert.Equal(80, Marshal.OffsetOf<FeBackendResourceCounters>(nameof(FeBackendResourceCounters.LiveMsaaAttachments)).ToInt32());
+        Assert.Equal(80, Marshal.SizeOf<FeBackendShaderCacheCounters>());
+        Assert.Equal(0, Marshal.OffsetOf<FeBackendShaderCacheCounters>(nameof(FeBackendShaderCacheCounters.TrackingSupported)).ToInt32());
+        Assert.Equal(48, Marshal.OffsetOf<FeBackendShaderCacheCounters>(nameof(FeBackendShaderCacheCounters.LastFrontendMilliseconds)).ToInt32());
+        Assert.Equal(72, Marshal.OffsetOf<FeBackendShaderCacheCounters>(nameof(FeBackendShaderCacheCounters.LastDiskCacheHit)).ToInt32());
     }
 
     [Fact]

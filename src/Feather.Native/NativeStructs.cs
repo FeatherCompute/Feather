@@ -78,6 +78,21 @@ public readonly struct FeBackendResourceCounters
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public readonly struct FeBackendShaderCacheCounters
+{
+    public readonly ulong TrackingSupported;
+    public readonly ulong MemoryCacheHits;
+    public readonly ulong DiskCacheHits;
+    public readonly ulong DiskCacheMisses;
+    public readonly ulong FrontendCompilations;
+    public readonly ulong DiskCacheWriteFailures;
+    public readonly double LastFrontendMilliseconds;
+    public readonly double LastOptimizationMilliseconds;
+    public readonly ulong LastMemoryCacheHit;
+    public readonly ulong LastDiskCacheHit;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public readonly struct FeReadbackMapping
 {
     public readonly IntPtr Data;

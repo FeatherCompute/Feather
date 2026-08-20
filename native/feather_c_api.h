@@ -107,6 +107,19 @@ typedef struct FeBackendResourceCounters {
     uint64_t live_msaa_attachments;
 } FeBackendResourceCounters;
 
+typedef struct FeBackendShaderCacheCounters {
+    uint64_t tracking_supported;
+    uint64_t memory_cache_hits;
+    uint64_t disk_cache_hits;
+    uint64_t disk_cache_misses;
+    uint64_t frontend_compilations;
+    uint64_t disk_cache_write_failures;
+    double last_frontend_milliseconds;
+    double last_optimization_milliseconds;
+    uint64_t last_memory_cache_hit;
+    uint64_t last_disk_cache_hit;
+} FeBackendShaderCacheCounters;
+
 typedef struct FeWindowDesc {
     uint32_t width;
     uint32_t height;
@@ -308,6 +321,7 @@ FE_API FeResult fe_context_get_caps(FeContextHandle context, FeBackendCaps* out_
 FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeBackendDeviceInfo* out_info);
 FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBackendOperationCounters* out_counters);
 FE_API FeResult fe_context_get_resource_counters(FeContextHandle context, FeBackendResourceCounters* out_counters);
+FE_API FeResult fe_context_get_shader_cache_counters(FeContextHandle context, FeBackendShaderCacheCounters* out_counters);
 FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
 FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete);

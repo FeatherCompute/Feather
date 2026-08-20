@@ -158,6 +158,30 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets cumulative backend shader frontend/optimizer cache counters. These are exact
+    /// backend observations, not inferred from a Studio descriptor key or pass duration.
+    /// </summary>
+    public BackendShaderCacheCounters ShaderCacheCounters
+    {
+        get
+        {
+            using var operation = EnterOperation();
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_shader_cache_counters(Handle, out var counters));
+            return new BackendShaderCacheCounters(
+                counters.TrackingSupported != 0,
+                counters.MemoryCacheHits,
+                counters.DiskCacheHits,
+                counters.DiskCacheMisses,
+                counters.FrontendCompilations,
+                counters.DiskCacheWriteFailures,
+                counters.LastFrontendMilliseconds,
+                counters.LastOptimizationMilliseconds,
+                counters.LastMemoryCacheHit != 0,
+                counters.LastDiskCacheHit != 0);
+        }
+    }
+
     public static GpuContext GetDefault()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var handle));
@@ -467,3 +491,18 @@ public readonly record struct BackendResourceCounters(
     ulong CachedSamplers,
     ulong CachedSubmissionResources,
     ulong LiveMsaaAttachments);
+
+/// <summary>
+/// Exact cumulative shader compilation/cache counters reported by the native backend.
+/// </summary>
+public readonly record struct BackendShaderCacheCounters(
+    bool TrackingSupported,
+    ulong MemoryCacheHits,
+    ulong DiskCacheHits,
+    ulong DiskCacheMisses,
+    ulong FrontendCompilations,
+    ulong DiskCacheWriteFailures,
+    double LastFrontendMilliseconds,
+    double LastOptimizationMilliseconds,
+    bool LastMemoryCacheHit,
+    bool LastDiskCacheHit);

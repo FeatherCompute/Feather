@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Feather.Graphics;
+using Feather.Math;
 using Feather.Native;
 using Feather.Resources;
 
@@ -87,6 +89,49 @@ public class NativeResourceRoundTripTests
     }
 
     [Fact]
+    public void ShaderCacheCountersObserveRealRepeatedGraphicsCompilation()
+    {
+        var context = GPU.Context;
+        var before = context.ShaderCacheCounters;
+        if (context.BackendType != BackendType.Vulkan)
+        {
+            Assert.False(before.TrackingSupported);
+            return;
+        }
+
+        Assert.True(before.TrackingSupported);
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(3, -1, 0, 1),
+            new float4(-1, 3, 0, 1),
+        ]);
+        using var target = GPU.CreateTexture2D<Rgba32, Rgba32>(
+            4, 4, PixelFormat.Rgba8, TextureAccess.RenderTarget);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+
+        using var first = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>();
+        first.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedFragmentShader(sampler),
+            target,
+            vertexCount: 3);
+        var afterFirst = context.ShaderCacheCounters;
+        Assert.True(CompilationObservations(afterFirst) >= CompilationObservations(before) + 2);
+
+        using var second = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>();
+        second.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedFragmentShader(sampler),
+            target,
+            vertexCount: 3);
+        var afterSecond = context.ShaderCacheCounters;
+        Assert.True(afterSecond.MemoryCacheHits >= afterFirst.MemoryCacheHits + 2);
+        Assert.True(double.IsFinite(afterSecond.LastFrontendMilliseconds));
+        Assert.True(double.IsFinite(afterSecond.LastOptimizationMilliseconds));
+    }
+
+    [Fact]
     public void TextureUploadAndDownloadRoundTripThroughNativeAbi()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(2, 2, PixelFormat.Rgba8);
@@ -104,6 +149,9 @@ public class NativeResourceRoundTripTests
         texture.Read(readback);
         Assert.Equal(pixels, readback);
     }
+
+    private static ulong CompilationObservations(BackendShaderCacheCounters counters) =>
+        counters.MemoryCacheHits + counters.DiskCacheHits + counters.FrontendCompilations;
 
     [Fact]
     public void TextureGenerateMipmapsCallsNativeAbiAndPreservesBaseLevel()

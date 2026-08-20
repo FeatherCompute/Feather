@@ -140,6 +140,11 @@ off blocking paths.
 sampler, and submission-resource cache counts. Vulkan reports `tracking_supported = 1`; unsupported backends report false
 instead of returning zeros that could be mistaken for leak evidence. The counters intentionally do not estimate GPU bytes.
 
+`fe_context_get_shader_cache_counters` exposes cumulative EasyGPU shader frontend/optimizer observations: memory and disk
+cache hits, disk misses, frontend compilations, write failures, and the last frontend/optimizer durations. Vulkan reports
+`tracking_supported = 1`; unsupported backends report false. These counters are backend evidence and must not be inferred
+from a Studio pipeline-descriptor compatibility hit or converted into sampled-source hotness.
+
 ## Layout Bridge
 
 Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring EasyGPU std430 layout rules:

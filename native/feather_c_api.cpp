@@ -11497,6 +11497,38 @@ FE_API FeResult fe_context_get_resource_counters(FeContextHandle context, FeBack
     });
 }
 
+FE_API FeResult fe_context_get_shader_cache_counters(FeContextHandle context, FeBackendShaderCacheCounters* out_counters) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_counters == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_counters must not be null.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        const auto counters = backend->GetShaderCompilationStats();
+        const bool tracking_supported =
+            GPU::Runtime::Context::GetInstance().GetBackendType() == GPU::Backend::BackendType::Vulkan;
+        *out_counters = FeBackendShaderCacheCounters{tracking_supported ? 1u : 0u,
+                                                     counters.memoryCacheHits,
+                                                     counters.diskCacheHits,
+                                                     counters.diskCacheMisses,
+                                                     counters.frontendCompilations,
+                                                     counters.diskCacheWriteFailures,
+                                                     counters.lastFrontendMilliseconds,
+                                                     counters.lastOptimizationMilliseconds,
+                                                     counters.lastMemoryCacheHit ? 1u : 0u,
+                                                     counters.lastDiskCacheHit ? 1u : 0u};
+        return ok();
+    });
+}
+
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size) {
     return write_string(g_last_error, buffer, buffer_size, out_required_size);
 }
