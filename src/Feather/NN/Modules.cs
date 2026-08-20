@@ -666,10 +666,9 @@ public abstract class Optimizer : IDisposable
 
         var values = Feather.GPU.CreateBuffer<float>(parameter.ElementCount);
         tensor = new Tensor<float>(parameter.Value.Shape, values);
-        if (initialValue != 0f)
-        {
-            NnDeviceOps.Fill(tensor, initialValue);
-        }
+        // Optimizer moments are mathematically initialized state. A count-only GPU buffer has
+        // unspecified contents, so zero must be written just as explicitly as a non-zero seed.
+        NnDeviceOps.Fill(tensor, initialValue);
 
         state.Add(parameter, tensor);
         return tensor;
