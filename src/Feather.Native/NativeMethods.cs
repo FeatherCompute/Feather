@@ -220,6 +220,15 @@ public static class NativeMethods
     public static extern FeResult fe_queue_submit(FeContextHandle context, out FeFenceHandle out_fence);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_begin_submission_timestamp(FeContextHandle context, out uint out_query);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_submit_timestamped(
+        FeContextHandle context,
+        uint query,
+        out FeFenceHandle out_fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_queue_memory_barrier(FeContextHandle context, uint barrier_flags);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -227,6 +236,12 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_fence_wait(FeFenceHandle fence, ulong timeout_nanoseconds, [MarshalAs(UnmanagedType.I1)] out bool out_complete);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_try_get_timestamp(
+        FeFenceHandle fence,
+        [MarshalAs(UnmanagedType.I1)] out bool out_available,
+        out ulong out_elapsed_nanoseconds);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_fence_destroy")]
     public static extern FeResult fe_fence_destroy_raw(IntPtr fence);

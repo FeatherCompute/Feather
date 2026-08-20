@@ -574,6 +574,93 @@ public sealed class GpuQueue
         return SubmitSnapshots(snapshots);
     }
 
+    /// <summary>
+    /// Records one aggregate GPU timestamp interval around <paramref name="record"/> and submits
+    /// the exact command stream that owns it. Unsupported backends still submit normally; the
+    /// returned fence then reports no GPU timestamp rather than substituting CPU or fence time.
+    /// </summary>
+    public GpuTimestampedSubmission<T> SubmitTimestamped<T>(Func<T> record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            var leases = new List<IDisposable>();
+            FeFenceHandle? nativeFence = null;
+            GpuFence? managedFence = null;
+            var failureSubmissionReaping = false;
+            try
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_begin_submission_timestamp(
+                    context.Handle,
+                    out var timestampQuery));
+
+                T result = default!;
+                ExceptionDispatchInfo? recordingFailure = null;
+                try
+                {
+                    result = record();
+                }
+                catch (Exception exception)
+                {
+                    recordingFailure = ExceptionDispatchInfo.Capture(exception);
+                }
+
+                if (timestampQuery == 0)
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(
+                        context.Handle,
+                        out var submittedFence));
+                    nativeFence = submittedFence;
+                }
+                else
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit_timestamped(
+                        context.Handle,
+                        timestampQuery,
+                        out var submittedFence));
+                    nativeFence = submittedFence;
+                }
+
+                context.TransferSubmittedWorkTo(leases);
+                managedFence = new GpuFence(
+                    nativeFence ?? throw new InvalidOperationException("Native timestamped submission returned no fence."),
+                    leases);
+                nativeFence = null;
+                if (recordingFailure is not null)
+                {
+                    ReapFailedTimestampedSubmission(managedFence);
+                    managedFence = null;
+                    failureSubmissionReaping = true;
+                    recordingFailure.Throw();
+                }
+
+                return new GpuTimestampedSubmission<T>(
+                    result,
+                    managedFence ?? throw new InvalidOperationException("Timestamped submission returned no fence."));
+            }
+            catch when (failureSubmissionReaping)
+            {
+                throw;
+            }
+            catch
+            {
+                try
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(context.Handle));
+                    context.CompleteSubmittedWork();
+                }
+                finally
+                {
+                    managedFence?.Dispose();
+                    nativeFence?.Dispose();
+                    DisposeLeases(leases);
+                }
+                throw;
+            }
+        }
+    }
+
     private GpuCommandList.IRecordedGpuCommand[] Snapshot(GpuCommandList commandList, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(commandList, parameterName);
@@ -625,6 +712,21 @@ public sealed class GpuQueue
 
     public void WaitIdle() => context.WaitIdle();
 
+    private static void ReapFailedTimestampedSubmission(GpuFence fence)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await fence.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine("[feather] failed timestamped submission retirement: " + exception.Message);
+            }
+        });
+    }
+
     private static void DisposeLeases(List<IDisposable> leases)
     {
         foreach (var lease in leases)
@@ -634,6 +736,9 @@ public sealed class GpuQueue
         leases.Clear();
     }
 }
+
+/// <summary>Result and queue fence for one aggregate timestamped submission.</summary>
+public readonly record struct GpuTimestampedSubmission<T>(T Result, GpuFence Fence);
 
 /// <summary>
 /// Represents completion of one queue submission.
@@ -711,6 +816,28 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Attempts to resolve the real GPU timestamp interval owned by this submission without
+    /// waiting. Returns false when pending, unsupported, or invalid; it never substitutes a
+    /// CPU duration or fence latency.
+    /// </summary>
+    public bool TryGetGpuElapsedNanoseconds(out ulong elapsedNanoseconds)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposeState == 2, this);
+        }
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp(
+            handle,
+            out var available,
+            out elapsedNanoseconds));
+        if (available)
+        {
+            MarkCompleted();
+        }
+        return available;
     }
 
     public void Wait() => _ = Wait(Timeout.InfiniteTimeSpan);

@@ -86,6 +86,7 @@ Queue submission APIs are:
 | --- | --- |
 | `Submit(commandList)` | Submits one closed list and returns its completion fence. |
 | `Submit(commandLists)` | Validates and snapshots every closed list before atomically replaying them in order behind one fence. An empty list is valid. |
+| `SubmitTimestamped(record)` | Records one callback under exclusive queue ownership, submits that exact command stream, and returns the callback result plus its completion fence. Unsupported backends still submit normally and report timing unavailable. |
 | `Signal()` | Inserts an empty queue-ordered completion point after work already recorded on the queue. |
 | `WaitIdle()` | Waits for all outstanding work; prefer a fence for local dependencies. |
 
@@ -115,6 +116,7 @@ The next submitted fence also adopts resource leases from earlier immediate non-
 | `Wait(timeout)` | Returns `false` on timeout and `true` on completion. |
 | `WaitAsync(token)` | Shared non-blocking completion observation with per-caller cancellation. |
 | `WaitAsync(timeout, token)` | Shared asynchronous observation with per-caller timeout and cancellation. |
+| `TryGetGpuElapsedNanoseconds(out elapsed)` | Resolves the real aggregate GPU interval owned by a timestamped submission without waiting. Returns `false` for pending, unsupported, or invalid results; never substitutes CPU or fence latency. |
 | `IsDisposed` | Reports whether the native submission marker has been released. |
 | `Dispose()` / `DisposeAsync()` | Waits for completion before releasing retained resources and the native fence. |
 

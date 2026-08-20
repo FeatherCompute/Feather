@@ -11169,6 +11169,53 @@ FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fenc
     });
 }
 
+FE_API FeResult fe_queue_begin_submission_timestamp(FeContextHandle context, uint32_t* out_query) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_query == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_query must not be null.");
+        }
+        *out_query = 0;
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_query = backend->BeginSubmissionTimestamp();
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_submit_timestamped(FeContextHandle context, uint32_t query, FeFenceHandle* out_fence) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (query == 0 || out_fence == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "A timestamp query and out_fence are required.");
+        }
+        *out_fence = 0;
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        auto state = std::make_shared<FenceState>();
+        state->submission = backend->SubmitTimestamped(query);
+
+        const auto handle = next_handle();
+        g_fences.emplace(handle, std::move(state));
+        *out_fence = handle;
+        return ok();
+    });
+}
+
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags) {
     return protect([&] {
         if (context != kDefaultContext) {
@@ -11249,6 +11296,40 @@ FE_API FeResult fe_fence_wait(FeFenceHandle fence, uint64_t timeout_nanoseconds,
             return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
         }
         *out_complete = backend->WaitForSubmission(state->submission, timeout_nanoseconds);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_try_get_timestamp(FeFenceHandle fence, bool* out_available,
+                                           uint64_t* out_elapsed_nanoseconds) {
+    return protect([&] {
+        if (out_available == nullptr || out_elapsed_nanoseconds == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Timestamp availability and elapsed outputs are required.");
+        }
+        *out_available = false;
+        *out_elapsed_nanoseconds = 0;
+
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_available = backend->TryGetSubmissionTimestamp(
+            state->submission, *out_elapsed_nanoseconds);
         return ok();
     });
 }

@@ -324,9 +324,13 @@ FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBac
 FE_API FeResult fe_context_get_resource_counters(FeContextHandle context, FeBackendResourceCounters* out_counters);
 FE_API FeResult fe_context_get_shader_cache_counters(FeContextHandle context, FeBackendShaderCacheCounters* out_counters);
 FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
+FE_API FeResult fe_queue_begin_submission_timestamp(FeContextHandle context, uint32_t* out_query);
+FE_API FeResult fe_queue_submit_timestamped(FeContextHandle context, uint32_t query, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
 FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete);
 FE_API FeResult fe_fence_wait(FeFenceHandle fence, uint64_t timeout_nanoseconds, bool* out_complete);
+FE_API FeResult fe_fence_try_get_timestamp(FeFenceHandle fence, bool* out_available,
+                                           uint64_t* out_elapsed_nanoseconds);
 FE_API FeResult fe_fence_destroy(FeFenceHandle fence);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_runtime_flush_caches(void);

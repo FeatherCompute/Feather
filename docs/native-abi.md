@@ -82,13 +82,16 @@ The native queue ABI exposes completion of one EasyGPU submission rather than ma
 | Function | Contract |
 | --- | --- |
 | `fe_queue_submit` | Submits all backend commands recorded so far and returns a new `FeFenceHandle`. Empty submissions are valid. |
+| `fe_queue_begin_submission_timestamp` | Begins an aggregate GPU timestamp interval for the next submission and returns an opaque query token. A zero token means the backend cannot provide native submission timing. |
+| `fe_queue_submit_timestamped` | Ends the aggregate interval and submits the exact command stream that owns it. The returned fence retains the query storage until destruction. |
 | `fe_fence_is_complete` | Non-waiting completion query. |
 | `fe_fence_wait` | Waits up to `timeout_nanoseconds`; `UINT64_MAX` means infinite. Completion is returned through `out_complete`. |
+| `fe_fence_try_get_timestamp` | Resolves the fence-owned GPU interval without waiting. It reports unavailable for pending, unsupported, or invalid native results and never substitutes CPU or fence latency. |
 | `fe_fence_destroy` | Transfers the completion marker to backend retirement without waiting, then invalidates the public handle. A backend failure leaves the handle registered so destruction can be retried. |
 | `fe_queue_memory_barrier` | Records `BUFFER`, `TEXTURE`, `UNIFORM`, or combined dependency flags. |
 | `fe_buffer_copy` | Records a bounds-checked GPU buffer copy and updates Feather's host/device shadow state. |
 
-Fence handles are single-owner objects. Querying or waiting on a destroyed/unknown handle returns `FE_ERROR_INVALID_HANDLE`, including a query that races with successful destruction. Destroying a fence does not wait, but managed `GpuFence.Dispose` deliberately waits so its retained SafeHandle leases can be released safely. Native fence queries, waits, and destruction copy the registry entry and do not hold the global resource-registry lock while waiting for either the fence-local lock or the backend.
+Fence handles are single-owner objects. Querying, timing, or waiting on a destroyed/unknown handle returns `FE_ERROR_INVALID_HANDLE`, including a query that races with successful destruction. Destroying a fence does not wait, but managed `GpuFence.Dispose` deliberately waits so its retained SafeHandle leases can be released safely. Native fence queries, waits, and destruction copy the registry entry and do not hold the global resource-registry lock while waiting for either the fence-local lock or the backend. Timestamp query slots are submission-owned and return to the bounded backend pool only when that fence is destroyed.
 
 ## Compute Dispatch
 

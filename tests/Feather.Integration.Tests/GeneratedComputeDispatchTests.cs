@@ -157,6 +157,53 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public async Task TimestampedSubmissionResolvesFromItsOwnFenceAndReusesQueries()
+    {
+        const int elementCount = 65_536;
+        using var source = GPU.CreateBuffer<float>(Enumerable.Range(0, elementCount).Select(value => (float)value).ToArray());
+        using var destination = GPU.CreateBuffer<float>(elementCount);
+        GpuKernel.Dispatch(
+            GPU.Context,
+            new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()),
+            new GpuDispatchSize(elementCount, 1, 1),
+            wait: true);
+        var operationsBefore = GPU.Context.OperationCounters;
+        var resourcesBefore = GPU.Context.ResourceCounters;
+
+        for (var iteration = 0; iteration < 300; ++iteration)
+        {
+            var submission = GPU.Queue.SubmitTimestamped(() =>
+            {
+                GpuKernel.Dispatch(
+                    GPU.Context,
+                    new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()),
+                    new GpuDispatchSize(elementCount, 1, 1),
+                    wait: false);
+                return iteration;
+            });
+            Assert.Equal(iteration, submission.Result);
+            await using var fence = submission.Fence;
+            await fence.WaitAsync();
+
+            bool available = fence.TryGetGpuElapsedNanoseconds(out ulong elapsedNanoseconds);
+            Assert.Equal(GPU.Context.DeviceInfo.SupportsTimestampQueries, available);
+            if (available)
+            {
+                Assert.True(elapsedNanoseconds > 0);
+            }
+        }
+
+        var operationsAfter = GPU.Context.OperationCounters;
+        var resourcesAfter = GPU.Context.ResourceCounters;
+        Assert.Equal(operationsBefore.FinishCalls, operationsAfter.FinishCalls);
+        Assert.Equal(operationsBefore.DeviceWaitIdleCalls, operationsAfter.DeviceWaitIdleCalls);
+        Assert.Equal(operationsBefore.GlobalDrainCalls, operationsAfter.GlobalDrainCalls);
+        Assert.Equal(operationsBefore.BlockingSubmissionWaitCalls, operationsAfter.BlockingSubmissionWaitCalls);
+        Assert.Equal(resourcesBefore.LiveSubmissionHandles, resourcesAfter.LiveSubmissionHandles);
+        Assert.Equal(Enumerable.Range(0, elementCount).Select(value => (float)value).ToArray(), destination.ToArray());
+    }
+
+    [Fact]
     public void BatchSubmissionValidatesEveryListBeforeExecutingCommands()
     {
         using var source = GPU.CreateBuffer<float>([1, 3, 5, 7]);

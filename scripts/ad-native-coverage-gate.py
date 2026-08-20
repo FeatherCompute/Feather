@@ -46,7 +46,8 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
             (2727, 2776),
             (5673, 6153),
             (6211, 6346),
-            (13063, 13214),
+            (13102, 13176),
+            (13262, 13413),
         ),
         (
             "try_dispatch_easygpu_ad_kernel",
