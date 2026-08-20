@@ -251,6 +251,11 @@ public static class NativeMethods
         out FeBackendOperationCounters out_counters);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_context_get_resource_counters(
+        FeContextHandle context,
+        out FeBackendResourceCounters out_counters);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_get_last_error(IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

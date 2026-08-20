@@ -62,6 +62,22 @@ public readonly struct FeBackendOperationCounters
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public readonly struct FeBackendResourceCounters
+{
+    public readonly ulong TrackingSupported;
+    public readonly ulong LiveBufferHandles;
+    public readonly ulong LiveTextureHandles;
+    public readonly ulong LivePipelineHandles;
+    public readonly ulong LiveShaderHandles;
+    public readonly ulong LiveSubmissionHandles;
+    public readonly ulong CachedDescriptorSets;
+    public readonly ulong DescriptorPools;
+    public readonly ulong CachedSamplers;
+    public readonly ulong CachedSubmissionResources;
+    public readonly ulong LiveMsaaAttachments;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public readonly struct FeReadbackMapping
 {
     public readonly IntPtr Data;

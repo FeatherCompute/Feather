@@ -11466,6 +11466,37 @@ FE_API FeResult fe_context_get_operation_counters(FeContextHandle context, FeBac
     });
 }
 
+FE_API FeResult fe_context_get_resource_counters(FeContextHandle context, FeBackendResourceCounters* out_counters) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_counters == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_counters must not be null.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        const auto counters = backend->GetResourceCounters();
+        *out_counters = FeBackendResourceCounters{counters.trackingSupported ? 1u : 0u,
+                                                  counters.liveBufferHandles,
+                                                  counters.liveTextureHandles,
+                                                  counters.livePipelineHandles,
+                                                  counters.liveShaderHandles,
+                                                  counters.liveSubmissionHandles,
+                                                  counters.cachedDescriptorSets,
+                                                  counters.descriptorPools,
+                                                  counters.cachedSamplers,
+                                                  counters.cachedSubmissionResources,
+                                                  counters.liveMsaaAttachments};
+        return ok();
+    });
+}
+
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size) {
     return write_string(g_last_error, buffer, buffer_size, out_required_size);
 }

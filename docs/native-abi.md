@@ -136,6 +136,10 @@ visibility window. `fe_context_get_operation_counters` exposes finish, device-id
 blocking-download, and asynchronous-readback counts so tests can prove that cold empty resources and cancellation stay
 off blocking paths.
 
+`fe_context_get_resource_counters` separately exposes exact live native handle counts plus backend-owned descriptor,
+sampler, and submission-resource cache counts. Vulkan reports `tracking_supported = 1`; unsupported backends report false
+instead of returning zeros that could be mistaken for leak evidence. The counters intentionally do not estimate GPU bytes.
+
 ## Layout Bridge
 
 Managed `GpuBuffer<T>` computes GPU element stride through `GpuValueLayout<T>.BufferElementStride`, mirroring EasyGPU std430 layout rules:

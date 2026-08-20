@@ -50,6 +50,43 @@ public class NativeResourceRoundTripTests
     }
 
     [Fact]
+    public void ResourceCountersTrackNativeHandleAllocationAndRelease()
+    {
+        var context = GPU.Context;
+        var baseline = context.ResourceCounters;
+        if (context.BackendType != BackendType.Vulkan)
+        {
+            Assert.False(baseline.TrackingSupported);
+            return;
+        }
+
+        Assert.True(baseline.TrackingSupported);
+        var buffer = GpuBuffer<byte>.Create(context, 16, BufferAccess.ReadWrite);
+        var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(2, 2, PixelFormat.Rgba8);
+        texture.Upload([
+            new Rgba32(1, 2, 3, 255),
+            new Rgba32(4, 5, 6, 255),
+            new Rgba32(7, 8, 9, 255),
+            new Rgba32(10, 11, 12, 255),
+        ]);
+        var readback = texture.BeginReadback(buffer, 0, 0, 2, 2);
+        Assert.True(readback.Wait(TimeSpan.FromSeconds(10)));
+        var allocated = context.ResourceCounters;
+        Assert.Equal(baseline.LiveBufferHandles + 1, allocated.LiveBufferHandles);
+        Assert.Equal(baseline.LiveTextureHandles + 1, allocated.LiveTextureHandles);
+
+        using (readback.Map())
+        {
+        }
+        readback.Dispose();
+        texture.Dispose();
+        buffer.Dispose();
+        var released = context.ResourceCounters;
+        Assert.Equal(baseline.LiveBufferHandles, released.LiveBufferHandles);
+        Assert.Equal(baseline.LiveTextureHandles, released.LiveTextureHandles);
+    }
+
+    [Fact]
     public void TextureUploadAndDownloadRoundTripThroughNativeAbi()
     {
         using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(2, 2, PixelFormat.Rgba8);

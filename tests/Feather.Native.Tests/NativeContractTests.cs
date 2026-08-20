@@ -452,6 +452,9 @@ public class NativeContractTests
         Assert.Equal(8, Marshal.OffsetOf<FeReadbackMapping>(nameof(FeReadbackMapping.ByteSize)).ToInt32());
         Assert.Equal(16, Marshal.OffsetOf<FeReadbackMapping>(nameof(FeReadbackMapping.RowPitch)).ToInt32());
         Assert.Equal(48, Marshal.SizeOf<FeBackendOperationCounters>());
+        Assert.Equal(88, Marshal.SizeOf<FeBackendResourceCounters>());
+        Assert.Equal(0, Marshal.OffsetOf<FeBackendResourceCounters>(nameof(FeBackendResourceCounters.TrackingSupported)).ToInt32());
+        Assert.Equal(80, Marshal.OffsetOf<FeBackendResourceCounters>(nameof(FeBackendResourceCounters.LiveMsaaAttachments)).ToInt32());
     }
 
     [Fact]

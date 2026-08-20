@@ -132,6 +132,32 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets exact native handle/cache counts retained by the active backend. A backend that
+    /// cannot expose these counts returns a snapshot with <see cref="BackendResourceCounters.TrackingSupported"/>
+    /// set to <see langword="false"/> rather than reporting placeholder zeros as evidence.
+    /// </summary>
+    public BackendResourceCounters ResourceCounters
+    {
+        get
+        {
+            using var operation = EnterOperation();
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_resource_counters(Handle, out var counters));
+            return new BackendResourceCounters(
+                counters.TrackingSupported != 0,
+                counters.LiveBufferHandles,
+                counters.LiveTextureHandles,
+                counters.LivePipelineHandles,
+                counters.LiveShaderHandles,
+                counters.LiveSubmissionHandles,
+                counters.CachedDescriptorSets,
+                counters.DescriptorPools,
+                counters.CachedSamplers,
+                counters.CachedSubmissionResources,
+                counters.LiveMsaaAttachments);
+        }
+    }
+
     public static GpuContext GetDefault()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var handle));
@@ -425,3 +451,19 @@ public readonly record struct BackendOperationCounters(
     ulong BlockingSubmissionWaitCalls,
     ulong BlockingTextureDownloadCalls,
     ulong AsyncTextureReadbackCalls);
+
+/// <summary>
+/// Exact native handle/cache counts retained by a backend at one point in time.
+/// </summary>
+public readonly record struct BackendResourceCounters(
+    bool TrackingSupported,
+    ulong LiveBufferHandles,
+    ulong LiveTextureHandles,
+    ulong LivePipelineHandles,
+    ulong LiveShaderHandles,
+    ulong LiveSubmissionHandles,
+    ulong CachedDescriptorSets,
+    ulong DescriptorPools,
+    ulong CachedSamplers,
+    ulong CachedSubmissionResources,
+    ulong LiveMsaaAttachments);

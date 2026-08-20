@@ -42,6 +42,7 @@ try
 {
     _ = NativeLibrary.GetExport(handle, "fe_runtime_flush_caches");
     _ = NativeLibrary.GetExport(handle, "fe_runtime_shutdown");
+    _ = NativeLibrary.GetExport(handle, "fe_context_get_resource_counters");
 
     var export = NativeLibrary.GetExport(handle, "fe_ir_bridge_contract_version");
     var contractVersion = Marshal.GetDelegateForFunctionPointer<FeIrBridgeContractVersion>(export)();
