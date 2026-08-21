@@ -78,7 +78,26 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
             "internal enum LoweredAdSourceKind",
         ),),
     ),
-    ScopeEntry("src/Feather.Generators/IR/FeatherIrWriter.cs", "AD annotation section writer", ((12, 16), (621, 663), (1188, 1198)), ("Feather.Generators/IR/FeatherIrWriter.cs",)),
+    ScopeEntry(
+        "src/Feather.Generators/IR/FeatherIrWriter.cs",
+        "AD annotation section writer",
+        ((12, 16), (630, 672), (1233, 1243)),
+        ("Feather.Generators/IR/FeatherIrWriter.cs",),
+        (
+            (
+                "private const uint ElementwiseAssignmentSectionKind",
+                "private const uint LocalVariableSectionKind",
+            ),
+            (
+                "var parameters = new List<SerializedAdAnnotation>();",
+                "writer.Write(record.Binding);",
+            ),
+            (
+                "uint ArgumentCount);",
+                "uint IndexNameStringId,",
+            ),
+        ),
+    ),
     ScopeEntry(
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
         "typed IR callable and AD marker lowering paths",
@@ -301,7 +320,7 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "type-name null fallback is defensive for bound AD marker operands",
     (
         "src/Feather.Generators/IR/FeatherIrWriter.cs",
-        631,
+        640,
     ): "AD annotation binding fallback requires malformed resource metadata; generated buffer/local annotations are covered",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
