@@ -625,7 +625,7 @@ internal sealed class ProjectPassManifest
         }
 
         var schemaVersion = RequiredInt32(root, "schemaVersion");
-        if (schemaVersion != 1)
+        if (schemaVersion is < 1 or > 2)
         {
             throw new InvalidDataException($"Unsupported pass manifest schema version: {schemaVersion}.");
         }

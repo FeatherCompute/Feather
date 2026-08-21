@@ -33,3 +33,6 @@ FE0028 | Feather | Error | Top-level local is not supported in shader code.
 FE0029 | Feather | Error | Render-graph identity must be a GUID.
 FE0030 | Feather | Error | Render-graph identity must be unique.
 FE0031 | Feather | Error | Render pass must implement IRenderPass.
+FE0032 | Feather | Error | Studio-visible enum identity is missing.
+FE0033 | Feather | Error | Studio-visible enum contract is invalid.
+FE0034 | Feather | Error | Enum underlying ABI is unsupported.

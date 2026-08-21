@@ -43,11 +43,30 @@ public sealed class ProjectPassManifestCacheTests
         }
     }
 
-    private static void WriteManifest(string path, char buildIdCharacter)
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void LoadsSupportedPassManifestVersions(int schemaVersion)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"feather-manifest-version-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var manifestPath = Path.Combine(directory, "pass-manifest.json");
+            WriteManifest(manifestPath, '0', schemaVersion);
+            Assert.Single(ProjectPassManifest.Load(manifestPath).Passes);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void WriteManifest(string path, char buildIdCharacter, int schemaVersion = 1)
     {
         var document = new JsonObject
         {
-            ["schemaVersion"] = 1,
+            ["schemaVersion"] = schemaVersion,
             ["buildId"] = "sha256:" + new string(buildIdCharacter, 64),
             ["assemblyPath"] = "passes.dll",
             ["projectRoot"] = ".",

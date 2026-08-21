@@ -6646,7 +6646,7 @@ public class GeneratorAndAnalyzerTests
 
         using var manifest = JsonDocument.Parse(manifestText);
         var root = manifest.RootElement;
-        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
         Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("buildId").GetString());
         Assert.Equal("__FEATHER_ASSEMBLY_PATH__", root.GetProperty("assemblyPath").GetString());
         Assert.Equal("__FEATHER_FEIR_DIRECTORY__", root.GetProperty("feirDirectory").GetString());
@@ -6687,9 +6687,23 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal(parameterGuid, parameter.GetProperty("parameterGuid").GetString());
         Assert.Equal("Radius", parameter.GetProperty("name").GetString());
         Assert.Equal("float", parameter.GetProperty("type").GetString());
+        Assert.Equal("FLOAT", parameter.GetProperty("logicalType").GetString());
+        Assert.Equal(JsonValueKind.Null, parameter.GetProperty("typeIdentity").ValueKind);
         Assert.Equal(0.5, parameter.GetProperty("defaultValue").GetDouble());
         Assert.Equal(0.01, parameter.GetProperty("min").GetDouble());
         Assert.Equal(5.0, parameter.GetProperty("max").GetDouble());
+        var constraints = parameter.GetProperty("constraints");
+        Assert.Equal(0.01, constraints.GetProperty("min").GetDouble());
+        Assert.Equal(5.0, constraints.GetProperty("max").GetDouble());
+        Assert.Equal(JsonValueKind.Null, constraints.GetProperty("step").ValueKind);
+        Assert.Equal("Radius", parameter.GetProperty("display").GetProperty("name").GetString());
+        var runtimeAbi = parameter.GetProperty("runtimeAbi");
+        Assert.Equal("PASS_INSTANCE", runtimeAbi.GetProperty("storageClass").GetString());
+        Assert.Equal("F32", runtimeAbi.GetProperty("scalarKind").GetString());
+        Assert.Equal(4, runtimeAbi.GetProperty("size").GetInt32());
+        Assert.Equal("DYNAMIC", parameter.GetProperty("mutability").GetString());
+        Assert.Equal("INSTANCE", Assert.Single(parameter.GetProperty("bindings").EnumerateArray()).GetString());
+        Assert.Equal("PUBLIC", parameter.GetProperty("redaction").GetString());
         var stringParameter = parameters[1];
         Assert.Equal(stringParameterGuid, stringParameter.GetProperty("parameterGuid").GetString());
         Assert.Equal("string", stringParameter.GetProperty("type").GetString());
@@ -6701,6 +6715,138 @@ public class GeneratorAndAnalyzerTests
         Assert.Equal("Samples", implicitDefaultParameter.GetProperty("name").GetString());
         Assert.Equal("int", implicitDefaultParameter.GetProperty("type").GetString());
         Assert.Equal(0, implicitDefaultParameter.GetProperty("defaultValue").GetInt32());
+    }
+
+    [Fact]
+    public void GeneratorEmitsStableEnumAndFlagsParameterContracts()
+    {
+        const string modeTypeGuid = "0a8fe251-4471-4ddf-862b-2333fa8b6b5f";
+        const string lowGuid = "11b24756-564d-4dd2-a2b2-d0c69a925e45";
+        const string highGuid = "20b74e5d-ec35-48bd-a80a-e4170da6ce02";
+        const string accessTypeGuid = "34241e0e-1e66-4e25-84fa-e83fb93eaaec";
+        const string noneGuid = "491a09f4-9248-457c-932f-352c16284ed9";
+        const string readGuid = "587ea958-d006-4d5f-95a0-51e97a2992bc";
+        const string writeGuid = "6b8cbb91-aeb8-46ac-b538-233808f74b76";
+        const string modeParameterGuid = "7276b444-5a23-4781-b882-36a38c22c23d";
+        const string accessParameterGuid = "8ec9b423-5e83-4b43-98f1-773971a0aa9d";
+        var compilation = CreateCompilation(
+            $$"""
+            using System;
+            using Feather.RenderGraph;
+
+            [FeatherEnum("{{modeTypeGuid}}")]
+            public enum QualityMode : sbyte
+            {
+                [FeatherEnumMember("{{lowGuid}}", Name = "Low", Deprecated = true, ReplacementMemberGuid = "{{highGuid}}")]
+                Low = -1,
+                [FeatherEnumMember("{{highGuid}}", Name = "High", Order = 10)]
+                High = 2,
+            }
+
+            [Flags]
+            [FeatherEnum("{{accessTypeGuid}}")]
+            public enum AccessMask : uint
+            {
+                [FeatherEnumMember("{{noneGuid}}")] None = 0,
+                [FeatherEnumMember("{{readGuid}}")] Read = 1,
+                [FeatherEnumMember("{{writeGuid}}")] Write = 2,
+            }
+
+            [FeatherPass("9c320540-c6c9-41ae-97e2-eea0b7c9bd99")]
+            public sealed class EnumPass : IComputePass
+            {
+                [Parameter("{{modeParameterGuid}}", Description = "Quality", Group = "Mode", Order = 3, EditorHint = "SELECT")]
+                public QualityMode Mode { get; set; } = QualityMode.High;
+
+                [Parameter("{{accessParameterGuid}}", Bindings = ParameterBindingTargets.Instance | ParameterBindingTargets.Timeline)]
+                public AccessMask Access { get; set; } = AccessMask.Read | AccessMask.Write;
+
+                public void Execute(RenderContext context) { }
+            }
+            """);
+
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var generated = GetGeneratedTree(outputCompilation, diagnostics, "Feather.PassManifest.g.cs");
+        var jsonVariable = generated.GetRoot().DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(variable => variable.Identifier.ValueText == "Json");
+        var jsonField = Assert.IsAssignableFrom<IFieldSymbol>(
+            outputCompilation.GetSemanticModel(generated).GetDeclaredSymbol(jsonVariable));
+        using var manifest = JsonDocument.Parse(Assert.IsType<string>(jsonField.ConstantValue));
+        Assert.Equal(2, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        var parameters = Assert.Single(manifest.RootElement.GetProperty("passes").EnumerateArray())
+            .GetProperty("parameters").EnumerateArray().ToDictionary(
+                parameter => parameter.GetProperty("parameterGuid").GetString()!);
+
+        var mode = parameters[modeParameterGuid];
+        Assert.Equal("ENUM", mode.GetProperty("logicalType").GetString());
+        Assert.Equal(modeTypeGuid, mode.GetProperty("typeIdentity").GetString());
+        Assert.Equal("I8", mode.GetProperty("runtimeAbi").GetProperty("scalarKind").GetString());
+        Assert.Equal(1, mode.GetProperty("runtimeAbi").GetProperty("size").GetInt32());
+        Assert.Equal("SELECT", mode.GetProperty("display").GetProperty("editorHint").GetString());
+        var modeDefault = mode.GetProperty("defaultValue");
+        Assert.Equal("ENUM", modeDefault.GetProperty("kind").GetString());
+        Assert.Equal(highGuid, modeDefault.GetProperty("memberGuid").GetString());
+        Assert.Equal(2, modeDefault.GetProperty("rawValue").GetInt64());
+        var modeMembers = mode.GetProperty("enum").GetProperty("members").EnumerateArray().ToArray();
+        Assert.Equal(2, modeMembers.Length);
+        Assert.True(modeMembers[0].GetProperty("deprecated").GetBoolean());
+        Assert.Equal(highGuid, modeMembers[0].GetProperty("replacementMemberGuid").GetString());
+
+        var access = parameters[accessParameterGuid];
+        Assert.Equal("FLAGS", access.GetProperty("logicalType").GetString());
+        Assert.Equal("U32", access.GetProperty("enum").GetProperty("underlyingScalar").GetString());
+        Assert.Equal(3, access.GetProperty("enum").GetProperty("allowedMask").GetInt64());
+        var accessDefault = access.GetProperty("defaultValue");
+        Assert.Equal(3, accessDefault.GetProperty("rawValue").GetInt64());
+        Assert.Equal(
+            new[] { readGuid, writeGuid }.OrderBy(value => value, StringComparer.Ordinal),
+            accessDefault.GetProperty("selectedMemberGuids").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(
+            new[] { "INSTANCE", "TIMELINE" },
+            access.GetProperty("bindings").EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [Fact]
+    public void GeneratorRejectsEnumsWithoutStableIdsAndUnsupportedSixtyFourBitAbi()
+    {
+        var missing = CreateCompilation(
+            """
+            using Feather.RenderGraph;
+            public enum MissingIds { A = 1 }
+            [FeatherPass("13eb58a7-6f06-41ec-98c8-693598389c93")]
+            public sealed class MissingPass : IComputePass
+            {
+                [Parameter("2cdf3ec7-e60a-4628-8b7f-ee5bcd0ba2bb")]
+                public MissingIds Value { get; set; } = MissingIds.A;
+                public void Execute(RenderContext context) { }
+            }
+            """);
+        CSharpGeneratorDriver.Create(new FeatherGenerator())
+            .RunGeneratorsAndUpdateCompilation(missing, out _, out var missingDiagnostics);
+        Assert.Contains(missingDiagnostics, diagnostic => diagnostic.Id == "FE0032");
+
+        var wide = CreateCompilation(
+            """
+            using Feather.RenderGraph;
+            [FeatherEnum("3c1e263e-c6c6-4e9f-8cb0-e03a14c38b78")]
+            public enum Wide : ulong
+            {
+                [FeatherEnumMember("4c747a03-3864-49c8-8e32-879f764891bc")] A = 1,
+            }
+            [FeatherPass("59c6efc0-9d19-4979-9f87-eb475186862d")]
+            public sealed class WidePass : IComputePass
+            {
+                [Parameter("63c54590-f400-47fe-9098-f03803972f94")]
+                public Wide Value { get; set; } = Wide.A;
+                public void Execute(RenderContext context) { }
+            }
+            """);
+        CSharpGeneratorDriver.Create(new FeatherGenerator())
+            .RunGeneratorsAndUpdateCompilation(wide, out _, out var wideDiagnostics);
+        Assert.Contains(wideDiagnostics, diagnostic => diagnostic.Id == "FE0034");
     }
 
     [Fact]

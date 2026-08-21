@@ -162,6 +162,21 @@ internal static class FeatherDiagnostics
         "Render pass must implement IRenderPass",
         "Render pass '{0}' must implement Feather.RenderGraph.IRenderPass");
 
+    public static readonly DiagnosticDescriptor EnumIdentityMissing = Create(
+        "FE0032",
+        "Studio-visible enum identity is missing",
+        "Enum parameter '{0}' must declare [FeatherEnum] and every enum member must declare [FeatherEnumMember]");
+
+    public static readonly DiagnosticDescriptor EnumContractInvalid = Create(
+        "FE0033",
+        "Studio-visible enum contract is invalid",
+        "Enum contract '{0}' is invalid: {1}");
+
+    public static readonly DiagnosticDescriptor EnumUnderlyingUnsupported = Create(
+        "FE0034",
+        "Enum underlying ABI is unsupported",
+        "Enum parameter '{0}' uses unsupported underlying scalar '{1}'; supported scalars are I8, U8, I16, U16, I32, and U32");
+
     public static readonly DiagnosticDescriptor[] All =
     [
         ShaderTypeShape,
@@ -194,7 +209,10 @@ internal static class FeatherDiagnostics
         TopLevelLocalUnsupported,
         RenderGraphGuidInvalid,
         RenderGraphGuidDuplicate,
-        RenderPassContractInvalid
+        RenderPassContractInvalid,
+        EnumIdentityMissing,
+        EnumContractInvalid,
+        EnumUnderlyingUnsupported
     ];
 
     private static DiagnosticDescriptor Create(string id, string title, string message)

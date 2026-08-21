@@ -59,7 +59,7 @@ public class RenderGraphBuildTests
             using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
             var root = manifest.RootElement;
             var expectedAssemblyPath = $"bin/{configuration}/net10.0/BlenderRenderGraph.dll";
-            Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
             var firstBuildId = root.GetProperty("buildId").GetString();
             Assert.Matches("^sha256:[0-9a-f]{64}$", firstBuildId);
             Assert.Equal(expectedAssemblyPath, root.GetProperty("assemblyPath").GetString());

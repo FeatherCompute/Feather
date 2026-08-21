@@ -136,7 +136,19 @@ internal static class PassManifestWriter
                     valid = false;
                     continue;
                 }
-                parameters.Add(parameter with { Guid = parameterGuid });
+                PassEnumModel? enumContract = null;
+                if (parameter.Enum is not null &&
+                    !TryNormalizeEnum(context, parameter, parameter.Enum, out enumContract))
+                {
+                    valid = false;
+                    continue;
+                }
+                parameters.Add(parameter with
+                {
+                    Guid = parameterGuid,
+                    TypeIdentity = enumContract?.TypeGuid,
+                    Enum = enumContract,
+                });
             }
 
             if (valid)
@@ -150,6 +162,158 @@ internal static class PassManifestWriter
                 };
             }
         }
+    }
+
+    private static bool TryNormalizeEnum(
+        SourceProductionContext context,
+        PassParameterModel parameter,
+        PassEnumModel source,
+        out PassEnumModel? normalized)
+    {
+        normalized = null;
+        if (string.IsNullOrWhiteSpace(source.TypeGuid) ||
+            source.Members.Any(static member => string.IsNullOrWhiteSpace(member.Guid)))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumIdentityMissing,
+                parameter.Location,
+                source.TypeName));
+            return false;
+        }
+        if (source.UnderlyingScalar is "I64" or "U64" or "UNSUPPORTED")
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumUnderlyingUnsupported,
+                parameter.Location,
+                source.TypeName,
+                source.UnderlyingScalar));
+            return false;
+        }
+        if (!TryNormalizeGuid(
+                context,
+                source.TypeGuid,
+                source.TypeName,
+                source.Location,
+                out var typeGuid))
+        {
+            return false;
+        }
+
+        var memberGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { typeGuid };
+        var members = ImmutableArray.CreateBuilder<PassEnumMemberModel>();
+        foreach (var member in source.Members)
+        {
+            if (!TryNormalizeGuid(
+                    context,
+                    member.Guid,
+                    source.TypeName + "." + member.SymbolName,
+                    member.Location,
+                    out var memberGuid))
+            {
+                return false;
+            }
+            if (!memberGuids.Add(memberGuid))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    FeatherDiagnostics.EnumContractInvalid,
+                    member.Location,
+                    source.TypeName,
+                    "duplicate enum type/member GUID " + memberGuid));
+                return false;
+            }
+
+            string? replacementGuid = null;
+            if (!string.IsNullOrWhiteSpace(member.ReplacementMemberGuid))
+            {
+                if (!TryNormalizeGuid(
+                        context,
+                        member.ReplacementMemberGuid!,
+                        source.TypeName + "." + member.SymbolName + " replacement",
+                        member.Location,
+                        out replacementGuid))
+                {
+                    return false;
+                }
+            }
+            members.Add(member with
+            {
+                Guid = memberGuid,
+                ReplacementMemberGuid = replacementGuid,
+            });
+        }
+
+        var normalizedMembers = members.ToImmutable();
+        var knownMemberGuids = new HashSet<string>(
+            normalizedMembers.Select(static member => member.Guid),
+            StringComparer.OrdinalIgnoreCase);
+        var missingReplacement = normalizedMembers.FirstOrDefault(member =>
+            member.ReplacementMemberGuid is not null &&
+            !knownMemberGuids.Contains(member.ReplacementMemberGuid));
+        if (missingReplacement is not null)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumContractInvalid,
+                missingReplacement.Location,
+                source.TypeName,
+                "replacement member GUID is not declared: " + missingReplacement.ReplacementMemberGuid));
+            return false;
+        }
+        if (!source.IsFlags && normalizedMembers.GroupBy(static member => member.NumericValue)
+                .Any(static group => group.Count() > 1))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumContractInvalid,
+                source.Location,
+                source.TypeName,
+                "normal enum numeric values must be unique"));
+            return false;
+        }
+
+        long allowedMask = 0;
+        foreach (var member in normalizedMembers) allowedMask |= member.NumericValue;
+        if (!source.IsFlags &&
+            !source.AllowUnknownNumeric &&
+            normalizedMembers.All(member => member.NumericValue != source.DefaultRawValue))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumContractInvalid,
+                parameter.Location,
+                source.TypeName,
+                "default value is not a declared member"));
+            return false;
+        }
+        if (source.IsFlags &&
+            !source.AllowUnknownBits &&
+            HasUnknownBits(source.DefaultRawValue, allowedMask, source.UnderlyingScalar))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.EnumContractInvalid,
+                parameter.Location,
+                source.TypeName,
+                "default flags value contains bits outside allowedMask"));
+            return false;
+        }
+
+        normalized = source with
+        {
+            TypeGuid = typeGuid,
+            AllowedMask = allowedMask,
+            Members = normalizedMembers,
+        };
+        return true;
+    }
+
+    private static bool HasUnknownBits(long rawValue, long allowedMask, string scalarKind)
+    {
+        ulong widthMask = scalarKind switch
+        {
+            "I8" or "U8" => byte.MaxValue,
+            "I16" or "U16" => ushort.MaxValue,
+            _ => uint.MaxValue,
+        };
+        ulong raw = unchecked((ulong)rawValue) & widthMask;
+        ulong allowed = unchecked((ulong)allowedMask) & widthMask;
+        return (raw & ~allowed & widthMask) != 0;
     }
 
     private static ImmutableArray<PassSocketModel> NormalizeSockets(
@@ -236,7 +400,7 @@ internal static class PassManifestWriter
     {
         var builder = new StringBuilder();
         builder.AppendLine("{");
-        builder.AppendLine("  \"schemaVersion\": 1,");
+        builder.AppendLine("  \"schemaVersion\": 2,");
         AppendJsonString(builder, "buildId", buildId, 2, trailingComma: true);
         AppendJsonString(builder, "assemblyPath", options.AssemblyPath, 2, trailingComma: true);
         AppendJsonString(builder, "feirDirectory", options.FeirDirectory, 2, trailingComma: true);
@@ -323,9 +487,51 @@ internal static class PassManifestWriter
             AppendJsonString(builder, "parameterGuid", parameter.Guid, 10, trailingComma: true);
             AppendJsonString(builder, "name", parameter.Name, 10, trailingComma: true);
             AppendJsonString(builder, "type", parameter.Type, 10, trailingComma: true);
-            builder.Append("          \"defaultValue\": ")
-                .Append(parameter.DefaultValueJson ?? "null")
+            AppendJsonString(builder, "logicalType", parameter.LogicalType, 10, trailingComma: true);
+            builder.Append("          \"typeIdentity\": ")
+                .Append(JsonNullableString(parameter.TypeIdentity))
                 .AppendLine(",");
+            builder.Append("          \"defaultValue\": ")
+                .Append(parameter.Enum is null
+                    ? parameter.DefaultValueJson ?? "null"
+                    : EnumDefaultJson(parameter.Enum))
+                .AppendLine(",");
+            builder.AppendLine("          \"constraints\": {");
+            builder.Append("            \"min\": ").Append(JsonNumber(parameter.Min)).AppendLine(",");
+            builder.Append("            \"max\": ").Append(JsonNumber(parameter.Max)).AppendLine(",");
+            builder.Append("            \"step\": ").Append(JsonNumber(parameter.Step)).AppendLine(",");
+            builder.Append("            \"unit\": ").Append(JsonNullableString(parameter.Unit)).AppendLine();
+            builder.AppendLine("          },");
+            builder.AppendLine("          \"display\": {");
+            builder.Append("            \"name\": ").Append(JsonString(parameter.Name)).AppendLine(",");
+            builder.Append("            \"description\": ").Append(JsonNullableString(parameter.Description)).AppendLine(",");
+            builder.Append("            \"group\": ").Append(JsonNullableString(parameter.Group)).AppendLine(",");
+            builder.Append("            \"order\": ").Append(parameter.Order).AppendLine(",");
+            builder.Append("            \"editorHint\": ").Append(JsonNullableString(parameter.EditorHint)).AppendLine();
+            builder.AppendLine("          },");
+            builder.AppendLine("          \"runtimeAbi\": {");
+            AppendJsonString(builder, "storageClass", parameter.RuntimeAbi.StorageClass, 12, trailingComma: true);
+            AppendJsonString(builder, "scalarKind", parameter.RuntimeAbi.ScalarKind, 12, trailingComma: true);
+            builder.Append("            \"offset\": ").Append(parameter.RuntimeAbi.Offset).AppendLine(",");
+            builder.Append("            \"size\": ").Append(parameter.RuntimeAbi.Size).AppendLine(",");
+            builder.Append("            \"alignment\": ").Append(parameter.RuntimeAbi.Alignment).AppendLine(",");
+            AppendJsonString(builder, "packing", parameter.RuntimeAbi.Packing, 12, trailingComma: false);
+            builder.AppendLine("          },");
+            AppendJsonString(builder, "mutability", parameter.Mutability, 10, trailingComma: true);
+            builder.AppendLine("          \"bindings\": [");
+            for (var bindingIndex = 0; bindingIndex < parameter.Bindings.Length; bindingIndex++)
+            {
+                builder.Append("            ")
+                    .Append(JsonString(parameter.Bindings[bindingIndex]))
+                    .AppendLine(bindingIndex + 1 < parameter.Bindings.Length ? "," : string.Empty);
+            }
+            builder.AppendLine("          ],");
+            AppendJsonString(builder, "redaction", parameter.Redaction, 10, trailingComma: true);
+            if (parameter.Enum is not null)
+            {
+                AppendEnum(builder, parameter.Enum);
+                builder.AppendLine(",");
+            }
             builder.Append("          \"min\": ")
                 .Append(JsonNumber(parameter.Min))
                 .AppendLine(",");
@@ -336,6 +542,85 @@ internal static class PassManifestWriter
                 .AppendLine(index + 1 < parameters.Length ? "," : string.Empty);
         }
         builder.AppendLine("      ]");
+    }
+
+    private static void AppendEnum(StringBuilder builder, PassEnumModel contract)
+    {
+        builder.AppendLine("          \"enum\": {");
+        AppendJsonString(builder, "enumTypeGuid", contract.TypeGuid, 12, trailingComma: true);
+        AppendJsonString(builder, "underlyingScalar", contract.UnderlyingScalar, 12, trailingComma: true);
+        builder.Append("            \"isFlags\": ")
+            .Append(contract.IsFlags ? "true" : "false").AppendLine(",");
+        builder.Append("            \"allowUnknownNumeric\": ")
+            .Append(contract.AllowUnknownNumeric ? "true" : "false").AppendLine(",");
+        builder.Append("            \"allowUnknownBits\": ")
+            .Append(contract.AllowUnknownBits ? "true" : "false").AppendLine(",");
+        builder.Append("            \"allowedMask\": ")
+            .Append(contract.IsFlags
+                ? contract.AllowedMask.ToString(CultureInfo.InvariantCulture)
+                : "null")
+            .AppendLine(",");
+        builder.AppendLine("            \"members\": [");
+        for (var index = 0; index < contract.Members.Length; index++)
+        {
+            var member = contract.Members[index];
+            builder.AppendLine("              {");
+            AppendJsonString(builder, "enumMemberGuid", member.Guid, 16, trailingComma: true);
+            AppendJsonString(builder, "symbolName", member.SymbolName, 16, trailingComma: true);
+            builder.Append("                \"numericValue\": ").Append(member.NumericValue).AppendLine(",");
+            AppendJsonString(builder, "displayName", member.DisplayName, 16, trailingComma: true);
+            builder.Append("                \"description\": ")
+                .Append(JsonNullableString(member.Description)).AppendLine(",");
+            builder.Append("                \"order\": ").Append(member.Order).AppendLine(",");
+            builder.Append("                \"deprecated\": ")
+                .Append(member.Deprecated ? "true" : "false").AppendLine(",");
+            builder.Append("                \"replacementMemberGuid\": ")
+                .Append(JsonNullableString(member.ReplacementMemberGuid)).AppendLine();
+            builder.Append("              }").AppendLine(index + 1 < contract.Members.Length ? "," : string.Empty);
+        }
+        builder.AppendLine("            ]");
+        builder.Append("          }");
+    }
+
+    private static string EnumDefaultJson(PassEnumModel contract)
+    {
+        if (!contract.IsFlags)
+        {
+            var member = contract.Members.FirstOrDefault(item => item.NumericValue == contract.DefaultRawValue);
+            return "{\"kind\":\"ENUM\",\"enumTypeGuid\":" + JsonString(contract.TypeGuid) +
+                ",\"memberGuid\":" + JsonNullableString(member?.Guid) +
+                ",\"rawValue\":" + contract.DefaultRawValue.ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        var selected = SelectedFlagMembers(contract)
+            .Select(static member => member.Guid)
+            .OrderBy(static guid => guid, StringComparer.Ordinal)
+            .ToArray();
+        return "{\"kind\":\"FLAGS\",\"enumTypeGuid\":" + JsonString(contract.TypeGuid) +
+            ",\"selectedMemberGuids\":[" + string.Join(",", selected.Select(JsonString)) +
+            "],\"rawValue\":" + contract.DefaultRawValue.ToString(CultureInfo.InvariantCulture) + "}";
+    }
+
+    private static IEnumerable<PassEnumMemberModel> SelectedFlagMembers(PassEnumModel contract)
+    {
+        var exact = contract.Members
+            .OrderBy(static member => member.Order)
+            .ThenBy(static member => member.SymbolName, StringComparer.Ordinal)
+            .FirstOrDefault(member => member.NumericValue == contract.DefaultRawValue);
+        if (exact is not null) return [exact];
+
+        ulong widthMask = contract.UnderlyingScalar switch
+        {
+            "I8" or "U8" => byte.MaxValue,
+            "I16" or "U16" => ushort.MaxValue,
+            _ => uint.MaxValue,
+        };
+        ulong raw = unchecked((ulong)contract.DefaultRawValue) & widthMask;
+        return contract.Members.Where(member =>
+        {
+            ulong bits = unchecked((ulong)member.NumericValue) & widthMask;
+            return bits != 0 && (bits & (bits - 1)) == 0 && (raw & bits) == bits;
+        });
     }
 
     private static string RelativeSourcePath(string sourcePath, string? projectDirectory)
@@ -362,6 +647,9 @@ internal static class PassManifestWriter
 
     private static string JsonNumber(double? value)
         => value?.ToString("R", CultureInfo.InvariantCulture) ?? "null";
+
+    private static string JsonNullableString(string? value)
+        => value is null ? "null" : JsonString(value);
 
     private static void AppendJsonString(
         StringBuilder builder,

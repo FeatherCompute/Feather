@@ -12,6 +12,9 @@ internal static class PassModelFactory
     private const string InputAttributeName = "Feather.RenderGraph.InputAttribute";
     private const string OutputAttributeName = "Feather.RenderGraph.OutputAttribute";
     private const string ParameterAttributeName = "Feather.RenderGraph.ParameterAttribute";
+    private const string FeatherEnumAttributeName = "Feather.RenderGraph.FeatherEnumAttribute";
+    private const string FeatherEnumMemberAttributeName = "Feather.RenderGraph.FeatherEnumMemberAttribute";
+    private const string FlagsAttributeName = "System.FlagsAttribute";
     private const string RenderPassInterfaceName = "Feather.RenderGraph.IRenderPass";
     private const string RelativePathOption = "build_metadata.Compile.FeatherProjectRelativePath";
 
@@ -139,18 +142,94 @@ internal static class PassModelFactory
         AttributeData attribute,
         CancellationToken cancellationToken)
     {
-        var defaultValue = GetNamedArgument(attribute, "DefaultValue", out var explicitDefault)
-            ? JsonConstant(explicitDefault)
-            : GetInitializerConstant(compilation, member, cancellationToken) ?? DefaultValue(memberType);
+        var enumContract = memberType is INamedTypeSymbol { TypeKind: TypeKind.Enum } enumType
+            ? CreateEnumContract(compilation, member, enumType, attribute, cancellationToken)
+            : null;
+        var defaultValue = enumContract is null
+            ? GetNamedArgument(attribute, "DefaultValue", out var explicitDefault)
+                ? JsonConstant(explicitDefault)
+                : GetInitializerConstant(compilation, member, cancellationToken) ?? DefaultValue(memberType)
+            : null;
+        var runtimeAbi = RuntimeAbi(memberType, enumContract);
 
         return new PassParameterModel(
             GetConstructorString(attribute) ?? string.Empty,
             GetNamedString(attribute, "Name") ?? member.Name,
             ParameterType(memberType),
+            LogicalType(memberType, enumContract),
+            enumContract?.TypeGuid,
             defaultValue,
             GetNamedDouble(attribute, "Min"),
             GetNamedDouble(attribute, "Max"),
+            GetNamedDouble(attribute, "Step"),
+            GetNamedString(attribute, "Unit"),
+            GetNamedString(attribute, "Description"),
+            GetNamedString(attribute, "Group"),
+            GetNamedInt32(attribute, "Order") ?? 0,
+            GetNamedString(attribute, "EditorHint"),
+            ParameterMutability(attribute),
+            ParameterBindings(attribute),
+            ParameterRedaction(attribute),
+            runtimeAbi,
+            enumContract,
             member.Locations.FirstOrDefault() ?? Location.None);
+    }
+
+    private static PassEnumModel CreateEnumContract(
+        Compilation compilation,
+        ISymbol member,
+        INamedTypeSymbol enumType,
+        AttributeData parameterAttribute,
+        CancellationToken cancellationToken)
+    {
+        var contract = FindAttribute(enumType.GetAttributes(), FeatherEnumAttributeName);
+        bool isFlags = FindAttribute(enumType.GetAttributes(), FlagsAttributeName) is not null;
+        var members = ImmutableArray.CreateBuilder<PassEnumMemberModel>();
+        foreach (var field in enumType.GetMembers().OfType<IFieldSymbol>()
+                     .Where(static field => field.HasConstantValue)
+                     .OrderBy(static field => field.Locations.FirstOrDefault()?.SourceSpan.Start ?? int.MaxValue)
+                     .ThenBy(static field => field.Name, StringComparer.Ordinal))
+        {
+            var metadata = FindAttribute(field.GetAttributes(), FeatherEnumMemberAttributeName);
+            members.Add(new PassEnumMemberModel(
+                metadata is null ? string.Empty : GetConstructorString(metadata) ?? string.Empty,
+                field.Name,
+                EnumValue(field.ConstantValue),
+                metadata is null ? field.Name : GetNamedString(metadata, "Name") ?? field.Name,
+                metadata is null ? null : GetNamedString(metadata, "Description"),
+                metadata is null ? 0 : GetNamedInt32(metadata, "Order") ?? 0,
+                metadata is not null && GetNamedBoolean(metadata, "Deprecated"),
+                metadata is null ? null : GetNamedString(metadata, "ReplacementMemberGuid"),
+                field.Locations.FirstOrDefault() ?? Location.None));
+        }
+
+        object? defaultValue = null;
+        if (GetNamedArgument(parameterAttribute, "DefaultValue", out var explicitDefault))
+        {
+            defaultValue = explicitDefault.Value;
+        }
+        else if (!TryGetInitializerConstantValue(compilation, member, cancellationToken, out defaultValue))
+        {
+            defaultValue = 0;
+        }
+        long rawDefault = EnumValue(defaultValue);
+        long allowedMask = 0;
+        foreach (var enumMember in members)
+        {
+            allowedMask |= enumMember.NumericValue;
+        }
+
+        return new PassEnumModel(
+            contract is null ? string.Empty : GetConstructorString(contract) ?? string.Empty,
+            enumType.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+            UnderlyingScalar(enumType.EnumUnderlyingType),
+            isFlags,
+            contract is not null && GetNamedBoolean(contract, "AllowUnknownNumeric"),
+            contract is not null && GetNamedBoolean(contract, "AllowUnknownBits"),
+            rawDefault,
+            allowedMask,
+            members.ToImmutable(),
+            enumType.Locations.FirstOrDefault() ?? Location.None);
     }
 
     private static AttributeData? FindAttribute(ImmutableArray<AttributeData> attributes, string name)
@@ -179,6 +258,54 @@ internal static class PassModelFactory
 
         var result = Convert.ToDouble(value.Value, CultureInfo.InvariantCulture);
         return double.IsNaN(result) || double.IsInfinity(result) ? null : result;
+    }
+
+    private static bool GetNamedBoolean(AttributeData attribute, string name)
+        => GetNamedArgument(attribute, name, out var value) && value.Value is true;
+
+    private static string ParameterMutability(AttributeData attribute)
+        => GetNamedEnumMemberName(attribute, "Mutability") switch
+        {
+            "Specialization" => "SPECIALIZATION",
+            "ResourceShape" => "RESOURCE_SHAPE",
+            "CompileTime" => "COMPILE_TIME",
+            _ => "DYNAMIC",
+        };
+
+    private static ImmutableArray<string> ParameterBindings(AttributeData attribute)
+    {
+        long value = GetNamedArgument(attribute, "Bindings", out var bindingValue) &&
+                     bindingValue.Value is not null
+            ? Convert.ToInt64(bindingValue.Value, CultureInfo.InvariantCulture)
+            : 1L;
+        var result = ImmutableArray.CreateBuilder<string>();
+        if ((value & (1L << 0)) != 0) result.Add("INSTANCE");
+        if ((value & (1L << 1)) != 0) result.Add("GRAPH_VALUE");
+        if ((value & (1L << 2)) != 0) result.Add("RUNTIME_PROPERTY");
+        if ((value & (1L << 3)) != 0) result.Add("TIMELINE");
+        if ((value & (1L << 4)) != 0) result.Add("PUBLIC");
+        return result.ToImmutable();
+    }
+
+    private static string ParameterRedaction(AttributeData attribute)
+        => GetNamedEnumMemberName(attribute, "Redaction") switch
+        {
+            "MetadataOnly" => "METADATA_ONLY",
+            "Secret" => "SECRET",
+            _ => "PUBLIC",
+        };
+
+    private static string? GetNamedEnumMemberName(AttributeData attribute, string name)
+    {
+        if (!GetNamedArgument(attribute, name, out var value) ||
+            value.Type is not INamedTypeSymbol enumType ||
+            value.Value is null)
+        {
+            return null;
+        }
+        return enumType.GetMembers().OfType<IFieldSymbol>()
+            .FirstOrDefault(field => field.HasConstantValue && Equals(field.ConstantValue, value.Value))
+            ?.Name;
     }
 
     private static bool GetNamedArgument(
@@ -313,6 +440,107 @@ internal static class PassModelFactory
         };
     }
 
+    private static string LogicalType(ITypeSymbol type, PassEnumModel? enumContract)
+    {
+        if (enumContract is not null) return enumContract.IsFlags ? "FLAGS" : "ENUM";
+        return type.SpecialType switch
+        {
+            SpecialType.System_Boolean => "BOOL",
+            SpecialType.System_Byte or SpecialType.System_UInt16 or SpecialType.System_UInt32 or
+                SpecialType.System_UInt64 or SpecialType.System_Char => "UINT",
+            SpecialType.System_SByte or SpecialType.System_Int16 or SpecialType.System_Int32 or
+                SpecialType.System_Int64 => "INT",
+            SpecialType.System_Single or SpecialType.System_Double or SpecialType.System_Decimal => "FLOAT",
+            SpecialType.System_String => "STRING",
+            _ => type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) switch
+            {
+                "Feather.Math.float2" or "Feather.Math.float3" or "Feather.Math.float4" => "VECTOR",
+                _ => "HOST_VALUE",
+            },
+        };
+    }
+
+    private static PassParameterRuntimeAbiModel RuntimeAbi(ITypeSymbol type, PassEnumModel? enumContract)
+    {
+        if (enumContract is not null)
+        {
+            var (size, alignment) = ScalarLayout(enumContract.UnderlyingScalar);
+            return new PassParameterRuntimeAbiModel(
+                "PASS_INSTANCE", enumContract.UnderlyingScalar, 0, size, alignment,
+                "CLR_ENUM_UNDERLYING_LE");
+        }
+
+        return type.SpecialType switch
+        {
+            SpecialType.System_Boolean => Abi("BOOL32", 4, 4),
+            SpecialType.System_SByte => Abi("I8", 1, 1),
+            SpecialType.System_Byte => Abi("U8", 1, 1),
+            SpecialType.System_Int16 => Abi("I16", 2, 2),
+            SpecialType.System_UInt16 or SpecialType.System_Char => Abi("U16", 2, 2),
+            SpecialType.System_Int32 => Abi("I32", 4, 4),
+            SpecialType.System_UInt32 => Abi("U32", 4, 4),
+            SpecialType.System_Int64 => Abi("I64", 8, 8),
+            SpecialType.System_UInt64 => Abi("U64", 8, 8),
+            SpecialType.System_Single => Abi("F32", 4, 4),
+            SpecialType.System_Double => Abi("F64", 8, 8),
+            SpecialType.System_Decimal => Abi("DECIMAL128", 16, 16, "CLR_VALUE"),
+            SpecialType.System_String => Abi("UTF8", 0, 1, "UTF8_BOUNDED"),
+            _ => type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) switch
+            {
+                "Feather.Math.float2" => Abi("F32X2", 8, 8),
+                "Feather.Math.float3" => Abi("F32X3", 12, 16),
+                "Feather.Math.float4" => Abi("F32X4", 16, 16),
+                _ => Abi("OPAQUE", 0, 1, "CLR_VALUE"),
+            },
+        };
+    }
+
+    private static PassParameterRuntimeAbiModel Abi(
+        string scalarKind,
+        int size,
+        int alignment,
+        string packing = "FEATHER_SCALAR_LE")
+        => new("PASS_INSTANCE", scalarKind, 0, size, alignment, packing);
+
+    private static (int Size, int Alignment) ScalarLayout(string scalarKind)
+        => scalarKind switch
+        {
+            "I8" or "U8" => (1, 1),
+            "I16" or "U16" => (2, 2),
+            "I32" or "U32" => (4, 4),
+            "I64" or "U64" => (8, 8),
+            _ => (0, 1),
+        };
+
+    private static string UnderlyingScalar(ITypeSymbol? type)
+        => type?.SpecialType switch
+        {
+            SpecialType.System_SByte => "I8",
+            SpecialType.System_Byte => "U8",
+            SpecialType.System_Int16 => "I16",
+            SpecialType.System_UInt16 => "U16",
+            SpecialType.System_Int32 => "I32",
+            SpecialType.System_UInt32 => "U32",
+            SpecialType.System_Int64 => "I64",
+            SpecialType.System_UInt64 => "U64",
+            _ => "UNSUPPORTED",
+        };
+
+    private static long EnumValue(object? value)
+        => value switch
+        {
+            null => 0,
+            sbyte item => item,
+            byte item => item,
+            short item => item,
+            ushort item => item,
+            int item => item,
+            uint item => item,
+            long item => item,
+            ulong item => unchecked((long)item),
+            _ => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+        };
+
     private static string? GetInitializerConstant(
         Compilation compilation,
         ISymbol member,
@@ -349,6 +577,32 @@ internal static class PassModelFactory
         }
 
         return null;
+    }
+
+    private static bool TryGetInitializerConstantValue(
+        Compilation compilation,
+        ISymbol member,
+        CancellationToken cancellationToken,
+        out object? value)
+    {
+        foreach (var syntaxReference in member.DeclaringSyntaxReferences)
+        {
+            var syntax = syntaxReference.GetSyntax(cancellationToken);
+            ExpressionSyntax? expression = syntax switch
+            {
+                PropertyDeclarationSyntax property => property.Initializer?.Value,
+                VariableDeclaratorSyntax field => field.Initializer?.Value,
+                _ => null,
+            };
+            if (expression is null) continue;
+            var constant = compilation.GetSemanticModel(expression.SyntaxTree)
+                .GetConstantValue(expression, cancellationToken);
+            if (!constant.HasValue) continue;
+            value = constant.Value;
+            return true;
+        }
+        value = null;
+        return false;
     }
 
     private static string? VectorInitializer(

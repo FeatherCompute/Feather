@@ -56,6 +56,86 @@ public sealed class ParameterAttribute(string guid) : Attribute
     public double Min { get; set; } = double.NaN;
 
     public double Max { get; set; } = double.NaN;
+
+    public double Step { get; set; } = double.NaN;
+
+    public string? Unit { get; set; }
+
+    public string? Description { get; set; }
+
+    public string? Group { get; set; }
+
+    public int Order { get; set; }
+
+    public string? EditorHint { get; set; }
+
+    public ParameterMutability Mutability { get; set; } = ParameterMutability.Dynamic;
+
+    public ParameterBindingTargets Bindings { get; set; } = ParameterBindingTargets.Instance;
+
+    public ParameterRedaction Redaction { get; set; } = ParameterRedaction.Public;
+}
+
+/// <summary>
+/// Gives a Studio-visible enum a persistent nominal identity. Enum symbols and source files may
+/// be renamed without changing this value.
+/// </summary>
+[AttributeUsage(AttributeTargets.Enum, AllowMultiple = false, Inherited = false)]
+public sealed class FeatherEnumAttribute(string guid) : Attribute
+{
+    public string Guid { get; } = guid;
+
+    /// <summary>Allows an unnamed numeric value to be retained by a normal enum.</summary>
+    public bool AllowUnknownNumeric { get; set; }
+
+    /// <summary>Allows a flags value to retain bits outside the declared member mask.</summary>
+    public bool AllowUnknownBits { get; set; }
+}
+
+/// <summary>
+/// Gives one Studio-visible enum member a persistent identity independent of its symbol,
+/// declaration order, display label, and numeric representation.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field, AllowMultiple = false, Inherited = false)]
+public sealed class FeatherEnumMemberAttribute(string guid) : Attribute
+{
+    public string Guid { get; } = guid;
+
+    public string? Name { get; set; }
+
+    public string? Description { get; set; }
+
+    public int Order { get; set; }
+
+    public bool Deprecated { get; set; }
+
+    public string? ReplacementMemberGuid { get; set; }
+}
+
+public enum ParameterMutability
+{
+    Dynamic = 0,
+    Specialization = 1,
+    ResourceShape = 2,
+    CompileTime = 3,
+}
+
+[Flags]
+public enum ParameterBindingTargets
+{
+    None = 0,
+    Instance = 1 << 0,
+    GraphValue = 1 << 1,
+    RuntimeProperty = 1 << 2,
+    Timeline = 1 << 3,
+    Public = 1 << 4,
+}
+
+public enum ParameterRedaction
+{
+    Public = 0,
+    MetadataOnly = 1,
+    Secret = 2,
 }
 
 /// <summary>
