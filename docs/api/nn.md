@@ -89,9 +89,16 @@ Optimizers expose `Step()`, `ZeroGrad()`, and `Step(GradientSet)` for AD handoff
 | --- | --- |
 | `Create(kernel, parameters, optimizer, lossBuffer, count)` | Creates the step wrapper. |
 | `Run()` | Runs backward, gradient handoff, optimizer step, and loss readback. |
+| `RunWithoutLossReadback()` | Runs the same device work synchronously without materializing loss. |
+| `EnqueueWithoutLossReadback()` | Enqueues backward, gradient handoff, and optimizer work without a CPU completion wait. |
+| `ReadLoss()` | Reads and reduces the current loss without running another step. |
 | `LastDispatchPath` | Last AD dispatch route. |
 | `GradientsMaterialized` | Whether gradients were read back for fallback/debug. |
 | `LastLoss` | Last scalar loss readback. |
+
+After `EnqueueWithoutLossReadback()`, signal `GPU.Queue` and wait for its fence before consuming results.
+Built-in optimizers support this path. A custom optimizer must explicitly implement the protected asynchronous
+submission contract; Feather rejects it before submitting a partial training step otherwise.
 
 ## Checkpoints
 

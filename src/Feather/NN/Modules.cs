@@ -525,9 +525,31 @@ public abstract class Optimizer : IDisposable
     public IReadOnlyList<IParameter> Parameters { get; }
 
     /// <summary>
+    /// Gets whether this optimizer implements non-blocking device submission in
+    /// <see cref="StepCore(bool)" />.
+    /// </summary>
+    protected virtual bool SupportsAsynchronousDeviceSubmission => false;
+
+    /// <summary>
     /// Applies one optimization step using the current gradient tensors.
     /// </summary>
     public abstract void Step();
+
+    /// <summary>
+    /// Applies one optimization step with explicit completion behavior. Custom optimizers must
+    /// override this method to participate in asynchronous training-step submission.
+    /// </summary>
+    /// <param name="waitForCompletion">Whether to wait for all submitted optimizer work.</param>
+    protected virtual void StepCore(bool waitForCompletion)
+    {
+        if (!waitForCompletion)
+        {
+            throw new NotSupportedException(
+                $"Optimizer '{GetType().Name}' does not support asynchronous device submission. Override StepCore(bool) to opt in.");
+        }
+
+        Step();
+    }
 
     /// <summary>
     /// Clears all supported parameter gradient tensors.
@@ -622,8 +644,17 @@ public abstract class Optimizer : IDisposable
     /// <param name="adKernel">The AD kernel holding this step's native gradients.</param>
     public void Step<TKernel>(GpuADKernel<TKernel> adKernel)
         where TKernel : struct, IKernel1D, Feather.Interop.IGeneratedKernel<TKernel>
+        => Step(adKernel, waitForCompletion: true);
+
+    internal void Step<TKernel>(GpuADKernel<TKernel> adKernel, bool waitForCompletion)
+        where TKernel : struct, IKernel1D, Feather.Interop.IGeneratedKernel<TKernel>
     {
         ArgumentNullException.ThrowIfNull(adKernel);
+        if (!waitForCompletion)
+        {
+            EnsureAsynchronousDeviceSubmissionSupported();
+        }
+
         foreach (var parameter in FloatParameters())
         {
             var matches = adKernel.FindGradientMatches(parameter.GradientNames, parameter.Gradient.Buffer.Length);
@@ -637,10 +668,20 @@ public abstract class Optimizer : IDisposable
                 throw new ArgumentException($"Multiple native AD gradients matched parameter '{parameter.FullName}': {string.Join(", ", matches.Select(match => match.Name))}.", nameof(adKernel));
             }
 
-            adKernel.CopyGradientToBuffer(matches[0].Index, parameter.Gradient.Buffer);
+            adKernel.CopyGradientToBuffer(matches[0].Index, parameter.Gradient.Buffer, waitForCompletion);
         }
 
-        Step();
+        StepCore(waitForCompletion);
+    }
+
+    internal void EnsureAsynchronousDeviceSubmissionSupported()
+    {
+        if (!SupportsAsynchronousDeviceSubmission)
+        {
+            throw new NotSupportedException(
+                $"Optimizer '{GetType().Name}' does not support asynchronous device submission. "
+                + "Override SupportsAsynchronousDeviceSubmission and StepCore(bool) to opt in.");
+        }
     }
 
     protected IEnumerable<Parameter<float>> FloatParameters()
@@ -655,9 +696,16 @@ public abstract class Optimizer : IDisposable
     }
 
     protected static Tensor<float> GetState(Dictionary<IParameter, Tensor<float>> state, Parameter<float> parameter)
-        => GetState(state, parameter, 0f);
+        => GetState(state, parameter, 0f, waitForCompletion: true);
 
     protected static Tensor<float> GetState(Dictionary<IParameter, Tensor<float>> state, Parameter<float> parameter, float initialValue)
+        => GetState(state, parameter, initialValue, waitForCompletion: true);
+
+    protected static Tensor<float> GetState(
+        Dictionary<IParameter, Tensor<float>> state,
+        Parameter<float> parameter,
+        float initialValue,
+        bool waitForCompletion)
     {
         if (state.TryGetValue(parameter, out var tensor))
         {
@@ -668,7 +716,7 @@ public abstract class Optimizer : IDisposable
         tensor = new Tensor<float>(parameter.Value.Shape, values);
         // Optimizer moments are mathematically initialized state. A count-only GPU buffer has
         // unspecified contents, so zero must be written just as explicitly as a non-zero seed.
-        NnDeviceOps.Fill(tensor, initialValue);
+        NnDeviceOps.Fill(tensor, initialValue, waitForCompletion);
 
         state.Add(parameter, tensor);
         return tensor;
@@ -765,6 +813,23 @@ public sealed class TrainingStep<TKernel> : IDisposable
     }
 
     /// <summary>
+    /// Enqueues backward, device-side gradient handoff, and the optimizer update without a loss
+    /// readback or CPU completion wait.
+    /// </summary>
+    /// <remarks>
+    /// Work is ordered on <see cref="GPU.Queue" />. Signal that queue after one or more enqueued
+    /// steps and wait for the returned fence before consuming results. The fence retains every
+    /// native resource leased by these submissions until completion.
+    /// </remarks>
+    public void EnqueueWithoutLossReadback()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        optimizer.EnsureAsynchronousDeviceSubmissionSupported();
+        adKernel.Backward(count, waitForCompletion: false);
+        StepOptimizer(waitForCompletion: false);
+    }
+
+    /// <summary>
     /// Reads the loss buffer and returns the reduced scalar without running a step.
     /// </summary>
     /// <remarks>
@@ -797,9 +862,9 @@ public sealed class TrainingStep<TKernel> : IDisposable
         return loss;
     }
 
-    private void StepOptimizer()
+    private void StepOptimizer(bool waitForCompletion = true)
     {
-        optimizer.Step(adKernel);
+        optimizer.Step(adKernel, waitForCompletion);
         LastDispatchPath = adKernel.LastDispatchPath;
         GradientsMaterialized = adKernel.Gradients.HasMaterializedValues;
     }
@@ -841,6 +906,9 @@ public sealed class SGD(IEnumerable<IParameter> parameters, float learningRate =
 {
     private readonly Dictionary<IParameter, Tensor<float>> momentumState = new(ReferenceEqualityComparer.Instance);
 
+    /// <inheritdoc />
+    protected override bool SupportsAsynchronousDeviceSubmission => true;
+
     /// <summary>
     /// Gets the learning rate applied to every gradient.
     /// </summary>
@@ -857,18 +925,21 @@ public sealed class SGD(IEnumerable<IParameter> parameters, float learningRate =
     public float WeightDecay { get; } = weightDecay;
 
     /// <inheritdoc />
-    public override void Step()
+    public override void Step() => StepCore(waitForCompletion: true);
+
+    /// <inheritdoc />
+    protected override void StepCore(bool waitForCompletion)
     {
         foreach (var parameter in FloatParameters())
         {
             if (Momentum == 0f)
             {
-                NnDeviceOps.Sgd(parameter, LearningRate, WeightDecay);
+                NnDeviceOps.Sgd(parameter, LearningRate, WeightDecay, waitForCompletion);
                 continue;
             }
 
-            var momentumTensor = GetState(momentumState, parameter);
-            NnDeviceOps.Momentum(parameter, momentumTensor, LearningRate, Momentum, WeightDecay);
+            var momentumTensor = GetState(momentumState, parameter, 0f, waitForCompletion);
+            NnDeviceOps.Momentum(parameter, momentumTensor, LearningRate, Momentum, WeightDecay, waitForCompletion);
         }
     }
 
@@ -896,6 +967,9 @@ public sealed class Adam : Optimizer
     private readonly Dictionary<IParameter, Tensor<float>> secondMoments = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<IParameter, (float LearningRate, float WeightDecay)> parameterOptions;
     private int step;
+
+    /// <inheritdoc />
+    protected override bool SupportsAsynchronousDeviceSubmission => true;
 
     /// <summary>
     /// Initializes an Adam optimizer.
@@ -992,7 +1066,10 @@ public sealed class Adam : Optimizer
     public int StepCount => step;
 
     /// <inheritdoc />
-    public override void Step()
+    public override void Step() => StepCore(waitForCompletion: true);
+
+    /// <inheritdoc />
+    protected override void StepCore(bool waitForCompletion)
     {
         step++;
 
@@ -1001,8 +1078,8 @@ public sealed class Adam : Optimizer
             var options = parameterOptions[parameter];
             NnDeviceOps.Adam(
                 parameter,
-                GetState(firstMoments, parameter),
-                GetState(secondMoments, parameter),
+                GetState(firstMoments, parameter, 0f, waitForCompletion),
+                GetState(secondMoments, parameter, 0f, waitForCompletion),
                 options.LearningRate,
                 Beta1,
                 Beta2,
@@ -1010,7 +1087,8 @@ public sealed class Adam : Optimizer
                 step,
                 options.WeightDecay,
                 GradientClip,
-                decoupledWeightDecay: false);
+                decoupledWeightDecay: false,
+                waitForCompletion);
         }
     }
 
@@ -1080,6 +1158,9 @@ public sealed class AdamW : Optimizer
     private readonly Dictionary<IParameter, Tensor<float>> secondMoments = new(ReferenceEqualityComparer.Instance);
     private int step;
 
+    /// <inheritdoc />
+    protected override bool SupportsAsynchronousDeviceSubmission => true;
+
     public AdamW(IEnumerable<IParameter> parameters, float learningRate = 0.001f, float beta1 = 0.9f, float beta2 = 0.999f, float epsilon = 1e-8f, float weightDecay = 0.01f)
         : base(parameters)
     {
@@ -1108,15 +1189,18 @@ public sealed class AdamW : Optimizer
     public float WeightDecay { get; }
 
     /// <inheritdoc />
-    public override void Step()
+    public override void Step() => StepCore(waitForCompletion: true);
+
+    /// <inheritdoc />
+    protected override void StepCore(bool waitForCompletion)
     {
         step++;
         foreach (var parameter in FloatParameters())
         {
             NnDeviceOps.Adam(
                 parameter,
-                GetState(firstMoments, parameter),
-                GetState(secondMoments, parameter),
+                GetState(firstMoments, parameter, 0f, waitForCompletion),
+                GetState(secondMoments, parameter, 0f, waitForCompletion),
                 LearningRate,
                 Beta1,
                 Beta2,
@@ -1124,7 +1208,8 @@ public sealed class AdamW : Optimizer
                 step,
                 WeightDecay,
                 gradientClip: 0f,
-                decoupledWeightDecay: true);
+                decoupledWeightDecay: true,
+                waitForCompletion);
         }
     }
 
@@ -1150,6 +1235,9 @@ public sealed class AdamW : Optimizer
 public sealed class RMSProp : Optimizer
 {
     private readonly Dictionary<IParameter, Tensor<float>> squareAverages = new(ReferenceEqualityComparer.Instance);
+
+    /// <inheritdoc />
+    protected override bool SupportsAsynchronousDeviceSubmission => true;
 
     /// <summary>
     /// Initializes an RMSProp optimizer.
@@ -1192,11 +1280,21 @@ public sealed class RMSProp : Optimizer
     public float WeightDecay { get; }
 
     /// <inheritdoc />
-    public override void Step()
+    public override void Step() => StepCore(waitForCompletion: true);
+
+    /// <inheritdoc />
+    protected override void StepCore(bool waitForCompletion)
     {
         foreach (var parameter in FloatParameters())
         {
-            NnDeviceOps.RmsProp(parameter, GetState(squareAverages, parameter), LearningRate, Alpha, Epsilon, WeightDecay);
+            NnDeviceOps.RmsProp(
+                parameter,
+                GetState(squareAverages, parameter, 0f, waitForCompletion),
+                LearningRate,
+                Alpha,
+                Epsilon,
+                WeightDecay,
+                waitForCompletion);
         }
     }
 

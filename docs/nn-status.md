@@ -14,6 +14,8 @@ The following surfaces are backed by GPU buffers and native dispatch:
 - `Linear`, `Embedding`, `LayerNorm`, `BatchNorm1D`, and activation modules use device operations.
 - `SGD`, `RMSProp`, `Adam`, and `AdamW` keep optimizer state in GPU tensors.
 - `TrainingStep<TKernel>` runs Feather AD, reduces gradients into parameter gradient buffers, and steps the optimizer.
+- `TrainingStep<TKernel>.EnqueueWithoutLossReadback()` keeps backward, gradient reduction, and built-in optimizer
+  updates queue-ordered without a global device wait; the owning host supplies the completion fence.
 - Sample trainers for AD/Transformer/GPT paths exercise GPU-native training kernels.
 
 ## Explicit Host Boundaries

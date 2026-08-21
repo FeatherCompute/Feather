@@ -307,6 +307,7 @@ struct ADGradientState {
 struct ADKernelCache {
     std::unique_ptr<GPU::Kernel::KernelBuildContext> context;
     GPU::Backend::PipelineHandle pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+    std::unordered_map<size_t, GPU::Backend::PipelineHandle> clear_pipelines;
     uint32_t group_x = 0;
     uint32_t group_y = 0;
     uint32_t group_z = 0;
@@ -315,7 +316,6 @@ struct ADKernelCache {
     int32_t logical_z = 0;
     int adj_pool_binding = -1;
     std::vector<std::tuple<uint32_t, size_t, uint32_t>> buffer_layout;
-    std::vector<unsigned char> zero_scratch;
 };
 
 struct KernelState {
@@ -788,7 +788,16 @@ void release_ad_compiled_cache_with_backend(KernelState& kernel, GPU::Backend::B
     if (backend != nullptr && kernel.ad_cache->pipeline != GPU::Backend::INVALID_PIPELINE_HANDLE) {
         backend->DestroyPipeline(kernel.ad_cache->pipeline);
     }
+    if (backend != nullptr) {
+        for (const auto& [float_count, pipeline] : kernel.ad_cache->clear_pipelines) {
+            (void)float_count;
+            if (pipeline != GPU::Backend::INVALID_PIPELINE_HANDLE) {
+                backend->DestroyPipeline(pipeline);
+            }
+        }
+    }
     kernel.ad_cache->pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
+    kernel.ad_cache->clear_pipelines.clear();
     kernel.ad_cache->context.reset();
     kernel.ad_cache.reset();
 }
@@ -5671,6 +5680,82 @@ std::vector<std::tuple<uint32_t, size_t, uint32_t>> current_ad_buffer_layout(con
     return layout;
 }
 
+GPU::Backend::PipelineHandle get_or_create_ad_clear_pipeline(
+    ADKernelCache& cache,
+    size_t float_count,
+    GPU::Backend::Backend& backend) {
+    const auto cached = cache.clear_pipelines.find(float_count);
+    if (cached != cache.clear_pipelines.end()) {
+        return cached->second;
+    }
+    if (float_count == 0 || float_count > UINT32_MAX) {
+        throw std::runtime_error("AD gradient clear exceeds the supported GPU buffer range.");
+    }
+
+    std::ostringstream glsl;
+    glsl << "#version 450\n";
+    glsl << "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    glsl << "layout(std430, binding = 0) buffer ClearBuffer { float values[]; };\n";
+    glsl << "void main() {\n";
+    glsl << "  uint index = gl_GlobalInvocationID.x;\n";
+    glsl << "  if (index < " << float_count << "u) { values[index] = 0.0; }\n";
+    glsl << "}\n";
+
+    GPU::Backend::ShaderDesc shader_desc;
+    shader_desc.type = GPU::Backend::ShaderType::Compute;
+    shader_desc.sourceCode = glsl.str();
+    shader_desc.entryPoint = "main";
+    shader_desc.optimizationLevel = kShaderOptimizationLevel;
+    const auto shader = backend.CreateShader(shader_desc);
+    if (shader == GPU::Backend::INVALID_SHADER_HANDLE) {
+        throw std::runtime_error("EasyGPU failed to compile the AD gradient clear shader.");
+    }
+    EasyGpuShaderGuard shader_guard(backend, shader);
+
+    GPU::Backend::PipelineDesc pipeline_desc;
+    pipeline_desc.computeShader = shader;
+    pipeline_desc.workGroupSizeX = 256;
+    pipeline_desc.workGroupSizeY = 1;
+    pipeline_desc.workGroupSizeZ = 1;
+    GPU::Backend::ResourceLayoutEntry resource;
+    resource.binding = 0;
+    resource.type = GPU::Backend::BindingType::Buffer;
+    resource.readOnly = false;
+    pipeline_desc.resources.push_back(resource);
+
+    const auto pipeline = backend.CreatePipeline(pipeline_desc);
+    if (pipeline == GPU::Backend::INVALID_PIPELINE_HANDLE) {
+        throw std::runtime_error("EasyGPU failed to create the AD gradient clear pipeline.");
+    }
+    cache.clear_pipelines.emplace(float_count, pipeline);
+    return pipeline;
+}
+
+void clear_ad_buffer_on_gpu(
+    ADKernelCache& cache,
+    GPU::Backend::BufferHandle buffer,
+    size_t byte_size,
+    GPU::Backend::Backend& backend) {
+    if (buffer == GPU::Backend::INVALID_BUFFER_HANDLE || byte_size == 0) {
+        return;
+    }
+    if (byte_size % sizeof(float) != 0) {
+        throw std::runtime_error("AD gradient buffer has a non-float-aligned byte size.");
+    }
+
+    const auto float_count = byte_size / sizeof(float);
+    const auto pipeline = get_or_create_ad_clear_pipeline(cache, float_count, backend);
+    GPU::Backend::ResourceBinding binding;
+    binding.binding = 0;
+    binding.type = GPU::Backend::BindingType::Buffer;
+    binding.buffer = buffer;
+    binding.readOnly = false;
+    backend.BindPipeline(pipeline);
+    backend.BindResources(&binding, 1);
+    backend.Dispatch(static_cast<uint32_t>((float_count + 255) / 256), 1, 1);
+    backend.MemoryBarrier(GPU::Backend::BarrierType::Buffer);
+}
+
 bool try_dispatch_cached_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x, uint32_t group_y,
                                             uint32_t group_z, bool wait, GPU::Backend::Backend& backend) {
     auto cache = kernel.ad_cache;
@@ -5682,23 +5767,14 @@ bool try_dispatch_cached_easygpu_ad_kernel(KernelState& kernel, uint32_t group_x
         return false;
     }
 
-    size_t largest_zero = kernel.ad_adj_pool_size;
     for (const auto& gradient : kernel.ad_gradients) {
         if (gradient.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
             return false;
         }
-        largest_zero = std::max(largest_zero, gradient.byte_size);
-    }
-    if (cache->zero_scratch.size() < largest_zero) {
-        cache->zero_scratch.assign(largest_zero, 0);
-    }
-    for (const auto& gradient : kernel.ad_gradients) {
-        if (gradient.byte_size != 0) {
-            backend.UploadBuffer(gradient.backend_buffer, 0, gradient.byte_size, cache->zero_scratch.data());
-        }
+        clear_ad_buffer_on_gpu(*cache, gradient.backend_buffer, gradient.byte_size, backend);
     }
     if (kernel.ad_adj_pool != GPU::Backend::INVALID_BUFFER_HANDLE && kernel.ad_adj_pool_size != 0) {
-        backend.UploadBuffer(kernel.ad_adj_pool, 0, kernel.ad_adj_pool_size, cache->zero_scratch.data());
+        clear_ad_buffer_on_gpu(*cache, kernel.ad_adj_pool, kernel.ad_adj_pool_size, backend);
     }
 
     bind_easygpu_runtime_buffers(kernel, *cache->context, backend);
@@ -13414,6 +13490,13 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
 
 FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, uint32_t index, FeBufferHandle destination,
                                                        uint64_t destination_offset, uint64_t destination_size) {
+    return fe_kernel_reduce_ad_gradient_to_buffer_ex(
+        kernel, index, destination, destination_offset, destination_size, true);
+}
+
+FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer_ex(FeKernelHandle kernel, uint32_t index,
+                                                          FeBufferHandle destination, uint64_t destination_offset,
+                                                          uint64_t destination_size, bool wait) {
     return protect([&] {
         std::unique_lock<std::mutex> registry_lock(g_mutex);
         auto kernel_it = g_kernels.find(kernel);
@@ -13453,7 +13536,9 @@ FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, ui
         }
 
         registry_lock.unlock();
-        backend->Finish();
+        if (wait) {
+            backend->Finish();
+        }
         return ok();
     });
 }

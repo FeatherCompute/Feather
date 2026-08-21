@@ -71,7 +71,12 @@ because a checkpoint path is graph-node data and therefore untrusted.
 
 `TrainingStep.Run()` reads the loss buffer back every step, which stalls. `RunWithoutLossReadback()` plus
 `ReadLoss()` splits that, so a host reporting every 25 steps pays one readback instead of 25. `Run()`'s
-behavior is unchanged for existing callers.
+behavior is unchanged for existing callers. Both methods still wait for their submitted device work.
+
+Queue-owning hosts use `EnqueueWithoutLossReadback()` when the training work must share an existing completion
+fence with rendering or other compute. The method performs no loss readback and no CPU completion wait. Call
+`GPU.Queue.Signal()` after the enqueued work and wait for that fence before consuming results; the fence retains
+the native kernel and buffer leases until completion.
 
 A step whose loss was not read reports `Loss` as NaN; check `TrainingStepReport.IsReported` rather than
 comparing against zero, which is a legitimate loss.

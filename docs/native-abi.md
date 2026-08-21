@@ -227,9 +227,12 @@ Gradient query/readback entry points:
 - `fe_kernel_get_ad_gradient_info`
 - `fe_kernel_read_ad_gradient`
 - `fe_kernel_reduce_ad_gradient_to_buffer`
+- `fe_kernel_reduce_ad_gradient_to_buffer_ex` (explicit synchronous/asynchronous completion)
 - `fe_kernel_get_ad_backward_glsl`
 
-Gradient buffers never alias parameter value buffers.
+The original reduction entry point remains synchronous. The `_ex` form accepts a `wait` flag so a queue-owning
+host can submit reduction and optimizer work without a global completion wait, then establish completion with a
+queue fence. Gradient buffers never alias parameter value buffers.
 
 ## Profiler ABI
 

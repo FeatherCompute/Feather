@@ -196,11 +196,12 @@ internal static class NnDeviceOps
         return output;
     }
 
-    public static void Fill(Tensor<float> tensor, float value)
+    public static void Fill(Tensor<float> tensor, float value, bool waitForCompletion = true)
     {
         var path = Feather.GPU.DispatchAndGetPath(
             new NnFillKernel(tensor.AsReadWriteBuffer(), new Uniform<float>(value)),
-            tensor.ElementCount);
+            tensor.ElementCount,
+            waitForCompletion);
         NnDispatchTrace.Record("Fill", path);
     }
 
@@ -308,7 +309,7 @@ internal static class NnDeviceOps
         return current;
     }
 
-    public static void Sgd(Parameter<float> parameter, float learningRate, float weightDecay)
+    public static void Sgd(Parameter<float> parameter, float learningRate, float weightDecay, bool waitForCompletion = true)
     {
         var path = Feather.GPU.DispatchAndGetPath(
             new NnSgdKernel(
@@ -316,11 +317,12 @@ internal static class NnDeviceOps
                 parameter.Gradient.AsReadOnlyBuffer(),
                 new Uniform<float>(learningRate),
                 new Uniform<float>(weightDecay)),
-            parameter.ElementCount);
+            parameter.ElementCount,
+            waitForCompletion);
         NnDispatchTrace.Record("Optimizer.SGD", path);
     }
 
-    public static void Momentum(Parameter<float> parameter, Tensor<float> momentum, float learningRate, float momentumFactor, float weightDecay)
+    public static void Momentum(Parameter<float> parameter, Tensor<float> momentum, float learningRate, float momentumFactor, float weightDecay, bool waitForCompletion = true)
     {
         var path = Feather.GPU.DispatchAndGetPath(
             new NnMomentumKernel(
@@ -330,11 +332,12 @@ internal static class NnDeviceOps
                 new Uniform<float>(learningRate),
                 new Uniform<float>(momentumFactor),
                 new Uniform<float>(weightDecay)),
-            parameter.ElementCount);
+            parameter.ElementCount,
+            waitForCompletion);
         NnDispatchTrace.Record("Optimizer.Momentum", path);
     }
 
-    public static void RmsProp(Parameter<float> parameter, Tensor<float> squareAverage, float learningRate, float alpha, float epsilon, float weightDecay)
+    public static void RmsProp(Parameter<float> parameter, Tensor<float> squareAverage, float learningRate, float alpha, float epsilon, float weightDecay, bool waitForCompletion = true)
     {
         var path = Feather.GPU.DispatchAndGetPath(
             new NnRmsPropKernel(
@@ -345,11 +348,12 @@ internal static class NnDeviceOps
                 new Uniform<float>(alpha),
                 new Uniform<float>(epsilon),
                 new Uniform<float>(weightDecay)),
-            parameter.ElementCount);
+            parameter.ElementCount,
+            waitForCompletion);
         NnDispatchTrace.Record("Optimizer.RMSProp", path);
     }
 
-    public static void Adam(Parameter<float> parameter, Tensor<float> firstMoment, Tensor<float> secondMoment, float learningRate, float beta1, float beta2, float epsilon, int step, float weightDecay, float gradientClip, bool decoupledWeightDecay)
+    public static void Adam(Parameter<float> parameter, Tensor<float> firstMoment, Tensor<float> secondMoment, float learningRate, float beta1, float beta2, float epsilon, int step, float weightDecay, float gradientClip, bool decoupledWeightDecay, bool waitForCompletion = true)
     {
         var path = Feather.GPU.DispatchAndGetPath(
             new NnAdamKernel(
@@ -365,7 +369,8 @@ internal static class NnDeviceOps
                 new Uniform<float>(weightDecay),
                 new Uniform<float>(gradientClip),
                 new Uniform<int>(decoupledWeightDecay ? 1 : 0)),
-            parameter.ElementCount);
+            parameter.ElementCount,
+            waitForCompletion);
         NnDispatchTrace.Record(decoupledWeightDecay ? "Optimizer.AdamW" : "Optimizer.Adam", path);
     }
 

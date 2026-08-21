@@ -100,12 +100,14 @@ against the native bridge:
 
 ### Host Boundaries Today
 
-- **Loss readback is synchronous and per-step.** `TrainingStep.Run()` calls
+- **Loss readback is synchronous when requested.** `TrainingStep.Run()` calls
   `lossBuffer.ToArray()` on every invocation (`src/Feather/NN/Modules.cs:732`),
   as does `GptLanguageModelTrainer.UpdateDiagnosticsFromLossBuffer` (line 635 of
   `SequenceModels.cs`). `GpuBuffer<T>.Read` and `ToArray` are whole-buffer and
-  blocking (`src/Feather/Resources/GpuBuffer.cs:135,165`). There is no async or
-  ranged readback and no device-to-device buffer copy.
+  blocking (`src/Feather/Resources/GpuBuffer.cs:135,165`). `RunWithoutLossReadback()`
+  skips that readback but preserves synchronous completion; queue-owning hosts can use
+  `EnqueueWithoutLossReadback()` and an explicit `GPU.Queue` fence. There is no async or
+  ranged buffer readback.
 - **No callbacks anywhere.** No `IProgress<T>`, no `CancellationToken`, no events
   in `Feather.NN` or `Feather.AD`. Every sample owns its own `for` loop and its
   own `Console.WriteLine` cadence: every step in `samples/AdLinearRegression`,
@@ -118,12 +120,10 @@ against the native bridge:
   sample writes one, so there is no established on-disk location convention.
 - **No CLI surface.** Every NN sample is a top-level-statement console program
   with hardcoded hyperparameters. None parses arguments.
-- **`Optimizer.Step<TKernel>(GpuADKernel<TKernel>)` is `internal`**
-  (`src/Feather/NN/Modules.cs:609`). Project code outside the SDK therefore
-  cannot do device-side gradient handoff directly; it must go through
-  `TrainingStep<TKernel>` or the `[EditorBrowsable(Never)]`
-  `StepFromDebugGradients` readback path (line 549). This is a real API gap for
-  anyone writing a custom multi-kernel training driver.
+- **Device-side optimizer handoff is public.** `Optimizer.Step<TKernel>(GpuADKernel<TKernel>)`
+  supports custom multi-kernel training drivers without a managed gradient readback. The
+  non-blocking `TrainingStep` path is available to built-in optimizers; custom optimizers
+  must explicitly implement the protected asynchronous submission contract.
 - **The RenderHost knows nothing about NN.** Grepping
   `src/Feather.Blender.RenderHost` and `src/Feather.ManifestExporter` for
   `Feather.NN`, `Feather.AD`, `Checkpoint`, `TrainingStep` returns nothing.
@@ -257,7 +257,7 @@ Epochs arrive with P1 datasets.
 (`src/Feather/NN/Modules.cs:732`). At the host's reporting cadence (every N steps)
 that stall is wasted on the N−1 steps whose loss nobody reads.
 
-Two changes, both in `src/Feather/NN/Modules.cs`:
+Three additive calls in `src/Feather/NN/Modules.cs` separate readback and queue completion:
 
 ```csharp
 public sealed class TrainingStep<TKernel> : IDisposable
@@ -271,6 +271,12 @@ public sealed class TrainingStep<TKernel> : IDisposable
     public void RunWithoutLossReadback();
 
     /// <summary>
+    /// Enqueues backward, gradient handoff, and the optimizer step without a loss
+    /// readback or CPU completion wait. The host supplies a GPU.Queue fence.
+    /// </summary>
+    public void EnqueueWithoutLossReadback();
+
+    /// <summary>
     /// Reads the loss buffer and returns the reduced scalar without running a step.
     /// Use after RunWithoutLossReadback on reporting steps.
     /// </summary>
@@ -278,8 +284,8 @@ public sealed class TrainingStep<TKernel> : IDisposable
 }
 ```
 
-`Run()` keeps its exact current behavior and stays the default. This is additive
-and testable in isolation.
+`Run()` keeps its exact current behavior and stays the default. The enqueue path is
+validated against backend synchronization counters and queue-fence completion.
 
 Also make device-side handoff public so a project can drive a custom AD kernel
 without `TrainingStep`:

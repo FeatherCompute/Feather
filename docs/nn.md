@@ -163,6 +163,20 @@ float lossValue = step.Run();
 - Runs the optimizer update.
 - Exposes `LastDispatchPath`, `GradientsMaterialized`, and `LastLoss`.
 
+`Run()` and `RunWithoutLossReadback()` preserve synchronous completion semantics. A render loop or other
+queue-owning host can avoid a per-step global wait by enqueueing device-only work and completing it with the
+same fence as the rest of its frame:
+
+```csharp
+step.EnqueueWithoutLossReadback();
+using var fence = GPU.Queue.Signal();
+fence.Wait();
+```
+
+Several steps may be enqueued before one signal. Do not consume results until the fence completes. Built-in
+`SGD`, `RMSProp`, `Adam`, and `AdamW` optimizers support this path; custom optimizers must explicitly implement
+the protected asynchronous submission contract.
+
 Use `parameter.AddGradientAlias("kernelResourceName")` when the AD kernel's resource name differs from the parameter name.
 
 ## Checkpoints

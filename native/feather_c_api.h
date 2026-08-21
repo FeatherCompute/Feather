@@ -425,6 +425,9 @@ FE_API FeResult fe_kernel_read_ad_gradient(FeKernelHandle kernel, uint32_t index
 FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, uint32_t index,
                                                        FeBufferHandle destination, uint64_t destination_offset,
                                                        uint64_t destination_size);
+FE_API FeResult fe_kernel_reduce_ad_gradient_to_buffer_ex(FeKernelHandle kernel, uint32_t index,
+                                                          FeBufferHandle destination, uint64_t destination_offset,
+                                                          uint64_t destination_size, bool wait);
 FE_API FeResult fe_kernel_get_ad_backward_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                                size_t* out_required_size);
 

@@ -81,6 +81,127 @@ public class NNTrainingIntegrationTests
     }
 
     [Fact]
+    public void TrainingStepCanEnqueueDeviceOnlyWorkWithoutGlobalSynchronization()
+    {
+        using var model = new Linear(1, 1);
+        model.Weight.Value.Buffer.Upload([0f]);
+        model.Bias.Value.Buffer.Upload([0f]);
+
+        using var x = GPU.CreateBuffer<float>([-2f, -1f, 0f, 1f, 2f]);
+        using var y = GPU.CreateBuffer<float>([-3f, -1f, 1f, 3f, 5f]);
+        using var loss = GPU.CreateBuffer<float>(x.Length);
+        var optimizer = new SGD(model.Parameters, learningRate: 0.08f);
+        using var step = TrainingStep<NNLinearRegressionMeanLossKernel>.Create(
+            new NNLinearRegressionMeanLossKernel(
+                model.Weight.Value.AsReadWriteBuffer(),
+                model.Bias.Value.AsReadWriteBuffer(),
+                x.AsReadOnly(),
+                y.AsReadOnly(),
+                loss.AsReadWrite(),
+                new Uniform<float>(1f / x.Length)),
+            model.Parameters,
+            optimizer,
+            loss,
+            x.Length);
+
+        var operationsBefore = GPU.Context.OperationCounters;
+        for (var i = 0; i < 81; i++)
+        {
+            step.EnqueueWithoutLossReadback();
+        }
+
+        using (var fence = GPU.Queue.Signal())
+        {
+            fence.Wait();
+        }
+
+        var operationsAfter = GPU.Context.OperationCounters;
+        Assert.Equal(operationsBefore.FinishCalls, operationsAfter.FinishCalls);
+        Assert.Equal(operationsBefore.DeviceWaitIdleCalls, operationsAfter.DeviceWaitIdleCalls);
+        Assert.Equal(operationsBefore.GlobalDrainCalls, operationsAfter.GlobalDrainCalls);
+        Assert.Equal(operationsBefore.BlockingTextureDownloadCalls, operationsAfter.BlockingTextureDownloadCalls);
+        Assert.Equal(operationsBefore.AsyncTextureReadbackCalls, operationsAfter.AsyncTextureReadbackCalls);
+
+        var weight = model.Weight.Value.Buffer.ToArray()[0];
+        var bias = model.Bias.Value.Buffer.ToArray()[0];
+        Assert.InRange(weight, 1.85f, 2.15f);
+        Assert.InRange(bias, 0.85f, 1.15f);
+        Assert.Equal(DispatchPath.TypedEasyGpu, step.LastDispatchPath);
+        Assert.False(step.GradientsMaterialized);
+        Assert.True(float.IsNaN(step.LastLoss));
+    }
+
+    [Fact]
+    public void AsynchronousTrainingInitializesAdamStateWithoutGlobalSynchronization()
+    {
+        using var model = new Linear(1, 1);
+        model.Weight.Value.Buffer.Upload([0f]);
+        model.Bias.Value.Buffer.Upload([0f]);
+
+        using var x = GPU.CreateBuffer<float>([-1f, 0f, 1f]);
+        using var y = GPU.CreateBuffer<float>([-1f, 1f, 3f]);
+        using var loss = GPU.CreateBuffer<float>(x.Length);
+        using var optimizer = new Adam(model.Parameters, learningRate: 0.05f);
+        using var step = TrainingStep<NNLinearRegressionMeanLossKernel>.Create(
+            new NNLinearRegressionMeanLossKernel(
+                model.Weight.Value.AsReadWriteBuffer(),
+                model.Bias.Value.AsReadWriteBuffer(),
+                x.AsReadOnly(),
+                y.AsReadOnly(),
+                loss.AsReadWrite(),
+                new Uniform<float>(1f / x.Length)),
+            model.Parameters,
+            optimizer,
+            loss,
+            x.Length);
+
+        var operationsBefore = GPU.Context.OperationCounters;
+        step.EnqueueWithoutLossReadback();
+        using (var fence = GPU.Queue.Signal())
+        {
+            fence.Wait();
+        }
+
+        var operationsAfter = GPU.Context.OperationCounters;
+        Assert.Equal(operationsBefore.FinishCalls, operationsAfter.FinishCalls);
+        Assert.Equal(operationsBefore.DeviceWaitIdleCalls, operationsAfter.DeviceWaitIdleCalls);
+        Assert.Equal(operationsBefore.GlobalDrainCalls, operationsAfter.GlobalDrainCalls);
+        Assert.Equal(1, optimizer.StepCount);
+        Assert.NotEqual(0f, model.Weight.Value.Buffer.ToArray()[0]);
+        Assert.NotEqual(0f, model.Bias.Value.Buffer.ToArray()[0]);
+    }
+
+    [Fact]
+    public void AsynchronousTrainingRejectsUnsupportedOptimizerBeforeDispatch()
+    {
+        using var parameter = FloatParameter("weight", "weight", [0f]);
+        using var input = GPU.CreateBuffer<float>([1f]);
+        using var target = GPU.CreateBuffer<float>([2f]);
+        using var loss = GPU.CreateBuffer<float>(1);
+        using var optimizer = new SynchronousOnlyOptimizer([parameter]);
+        using var step = TrainingStep<NNLinearRegressionMeanLossKernel>.Create(
+            new NNLinearRegressionMeanLossKernel(
+                parameter.Value.AsReadWriteBuffer(),
+                parameter.Value.AsReadWriteBuffer(),
+                input.AsReadOnly(),
+                target.AsReadOnly(),
+                loss.AsReadWrite(),
+                new Uniform<float>(1f)),
+            [parameter],
+            optimizer,
+            loss,
+            1);
+
+        var operationsBefore = GPU.Context.OperationCounters;
+        var error = Assert.Throws<NotSupportedException>(() => step.EnqueueWithoutLossReadback());
+        var operationsAfter = GPU.Context.OperationCounters;
+
+        Assert.Contains(nameof(SynchronousOnlyOptimizer), error.Message, StringComparison.Ordinal);
+        Assert.Equal(operationsBefore, operationsAfter);
+        Assert.Equal(DispatchPath.None, step.LastDispatchPath);
+    }
+
+    [Fact]
     public void NNTrainingTinyReluMlpWithGpuADAndAdamDecreasesLoss()
     {
         using var hiddenWeight = FloatParameter("hiddenWeight", "hiddenWeight", [1f, -1f]);
@@ -1013,6 +1134,17 @@ public class NNTrainingIntegrationTests
             workspace.Dispose();
             tokens.Dispose();
             disposed = true;
+        }
+    }
+
+    private sealed class SynchronousOnlyOptimizer(IEnumerable<IParameter> parameters) : Optimizer(parameters)
+    {
+        public override void Step()
+        {
+        }
+
+        public override void ZeroGrad()
+        {
         }
     }
 }

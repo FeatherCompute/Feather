@@ -118,6 +118,10 @@ float loss = trainingStep.Run();
 
 `TrainingStep` runs backward, copies gradients into parameter gradient buffers, calls the optimizer, and reports the last loss. This is what `samples/AdLinearRegression` uses.
 
+`TrainingStep.EnqueueWithoutLossReadback()` is the non-blocking device-only variant for a host that already owns
+queue completion. Signal `GPU.Queue` after enqueueing and wait for the returned fence before inspecting the loss,
+parameters, or other dependent results. Existing `Run()` and `RunWithoutLossReadback()` remain synchronous.
+
 ## Gradient Names
 
 Gradient names come from the generated AD metadata. For simple resource parameters, names often match the resource name or an alias added to the `Parameter<T>`:

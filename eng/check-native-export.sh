@@ -44,6 +44,7 @@ try
     _ = NativeLibrary.GetExport(handle, "fe_runtime_shutdown");
     _ = NativeLibrary.GetExport(handle, "fe_context_get_resource_counters");
     _ = NativeLibrary.GetExport(handle, "fe_context_get_shader_cache_counters");
+    _ = NativeLibrary.GetExport(handle, "fe_kernel_reduce_ad_gradient_to_buffer_ex");
 
     var export = NativeLibrary.GetExport(handle, "fe_ir_bridge_contract_version");
     var contractVersion = Marshal.GetDelegateForFunctionPointer<FeIrBridgeContractVersion>(export)();

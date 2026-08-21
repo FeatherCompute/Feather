@@ -98,6 +98,9 @@ public sealed class GpuADKernel<TKernel> : IDisposable
     /// </summary>
     /// <param name="count">The number of logical elements to include.</param>
     public void Backward(int count)
+        => Backward(count, waitForCompletion: true);
+
+    internal void Backward(int count, bool waitForCompletion)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
@@ -105,7 +108,7 @@ public sealed class GpuADKernel<TKernel> : IDisposable
         HasBackwardRun = false;
         Gradients.Clear();
 
-        GpuKernel.Dispatch(GPU.Context, gpuKernel, Kernel, new GpuDispatchSize(count, 1, 1), wait: true);
+        GpuKernel.Dispatch(GPU.Context, gpuKernel, Kernel, new GpuDispatchSize(count, 1, 1), waitForCompletion);
 
         LastBackwardCount = count;
         HasBackwardRun = true;
@@ -170,6 +173,9 @@ public sealed class GpuADKernel<TKernel> : IDisposable
     }
 
     internal void CopyGradientToBuffer(uint gradientIndex, GpuBuffer<float> destination)
+        => CopyGradientToBuffer(gradientIndex, destination, waitForCompletion: true);
+
+    internal void CopyGradientToBuffer(uint gradientIndex, GpuBuffer<float> destination, bool waitForCompletion)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(destination);
@@ -178,12 +184,44 @@ public sealed class GpuADKernel<TKernel> : IDisposable
             throw new InvalidOperationException("Backward must run successfully before gradients can be copied.");
         }
 
-        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_reduce_ad_gradient_to_buffer(
-            gpuKernel.Handle,
-            gradientIndex,
-            destination.Handle,
-            0,
-            (ulong)destination.SizeInBytes));
+        var context = GPU.Context;
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            List<IDisposable>? leases = [];
+            try
+            {
+                leases.Add(new NativeHandleLease(gpuKernel.Handle));
+                leases.Add(new NativeHandleLease(destination.Handle));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_reduce_ad_gradient_to_buffer_ex(
+                    gpuKernel.Handle,
+                    gradientIndex,
+                    destination.Handle,
+                    0,
+                    (ulong)destination.SizeInBytes,
+                    waitForCompletion));
+
+                if (waitForCompletion)
+                {
+                    context.CompleteSubmittedWork();
+                }
+                else
+                {
+                    context.TrackSubmission(leases);
+                    leases = null;
+                }
+            }
+            finally
+            {
+                if (leases is not null)
+                {
+                    foreach (var lease in leases)
+                    {
+                        lease.Dispose();
+                    }
+                }
+            }
+        }
     }
 
     /// <inheritdoc />

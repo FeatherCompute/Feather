@@ -501,6 +501,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_reduce_ad_gradient_to_buffer(FeKernelHandle kernel, uint index, FeBufferHandle destination, ulong destinationOffset, ulong destinationSize);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_reduce_ad_gradient_to_buffer_ex(FeKernelHandle kernel, uint index, FeBufferHandle destination, ulong destinationOffset, ulong destinationSize, [MarshalAs(UnmanagedType.I1)] bool wait);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_ad_backward_glsl(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
