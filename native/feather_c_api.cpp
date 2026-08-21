@@ -6348,7 +6348,7 @@ bool try_build_easygpu_optimized_kernel_source(const KernelState& kernel, std::s
     shader_desc.sourceCode = context->GetCompleteCode();
     shader_desc.entryPoint = "main";
     shader_desc.optimizationLevel = context->GetOptimizationLevel();
-    *source = backend->GetOptimizedGLSL(shader_desc);
+    *source = backend->GetOptimizedGLSL(shader_desc, false);
     return !source->empty();
 }
 
@@ -6374,7 +6374,7 @@ bool try_build_easygpu_optimized_kernel_ir(const KernelState& kernel, std::strin
     shader_desc.sourceCode = context->GetCompleteCode();
     shader_desc.entryPoint = "main";
     shader_desc.optimizationLevel = context->GetOptimizationLevel();
-    *source = backend->GetOptimizedIR(shader_desc);
+    *source = backend->GetOptimizedIR(shader_desc, false);
     return !source->empty();
 }
 
@@ -6419,8 +6419,8 @@ FeResult inspect_graphics_shader(FeGraphicsPipelineHandle pipeline_handle, bool 
     descriptor.entryPoint = "main";
     descriptor.optimizationLevel = kShaderOptimizationLevel;
     const std::string inspected = kind == GraphicsShaderInspectionKind::OptimizedSource
-                                      ? backend->GetOptimizedGLSL(descriptor)
-                                      : backend->GetOptimizedIR(descriptor);
+                                      ? backend->GetOptimizedGLSL(descriptor, false)
+                                      : backend->GetOptimizedIR(descriptor, false);
     if (inspected.empty()) {
         return fail(FE_ERROR_UNSUPPORTED,
                     "Graphics shader inspection is unavailable on the active EasyGPU backend.");

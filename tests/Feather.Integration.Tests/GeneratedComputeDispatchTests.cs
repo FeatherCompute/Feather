@@ -737,11 +737,13 @@ public class GeneratedComputeDispatchTests
         using var output = GPU.CreateBuffer<float>(4);
         GPU.Dispatch(new CopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
 
+        var countersBeforeInspection = GPU.Context.ShaderCacheCounters;
         var shader = Assert.Single(
             ShaderInspection.GetLoadedShaders(typeof(CopyKernel).Assembly),
             candidate => candidate.SourceType == typeof(CopyKernel)
                 && candidate.Stage == ShaderStage.Compute
                 && !candidate.AutoDiff);
+        Assert.Equal(countersBeforeInspection, GPU.Context.ShaderCacheCounters);
 
         Assert.Contains("#version", shader.BackendInputGLSL, StringComparison.Ordinal);
         Assert.Contains("main", shader.BackendInputGLSL, StringComparison.Ordinal);

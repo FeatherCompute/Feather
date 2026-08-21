@@ -63,7 +63,9 @@ public class GeneratedGraphicsPipelineTests
         Assert.Contains("#version", pipeline.GetVertexGLSL(), StringComparison.Ordinal);
         Assert.Contains("#version", pipeline.GetFragmentGLSL(), StringComparison.Ordinal);
 
+        var countersBeforeInspection = GPU.Context.ShaderCacheCounters;
         var loaded = ShaderInspection.GetLoadedShaders(typeof(GeneratedVertexShader).Assembly);
+        Assert.Equal(countersBeforeInspection, GPU.Context.ShaderCacheCounters);
         var vertex = Assert.Single(
             loaded,
             shader => shader.SourceType == typeof(GeneratedVertexShader) && shader.Stage == ShaderStage.Vertex);
