@@ -564,6 +564,16 @@ public readonly struct FeProfilerQueryResult
     public readonly double TotalTimeMs;
 }
 
+/// <summary>
+/// Native hardware interval placed on its submission-relative GPU timeline.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeTimestampIntervalResult
+{
+    public readonly ulong StartOffsetNanoseconds;
+    public readonly ulong DurationNanoseconds;
+}
+
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
 public unsafe struct FeADGradientInfo
 {

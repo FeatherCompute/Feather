@@ -186,7 +186,9 @@ public class NativeContractTests
                     using (fence)
                     {
                         ulong[] elapsed = new ulong[intervals.Length];
+                        var timeline = new FeTimestampIntervalResult[intervals.Length];
                         var elapsedHandle = GCHandle.Alloc(elapsed, GCHandleType.Pinned);
+                        var timelineHandle = GCHandle.Alloc(timeline, GCHandleType.Pinned);
                         try
                         {
                             NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_intervals(
@@ -209,14 +211,33 @@ public class NativeContractTests
                                 out var resolvedCount));
                             Assert.True(available);
                             Assert.Equal((UIntPtr)intervals.Length, resolvedCount);
+                            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_interval_results(
+                                fence,
+                                out var timelineAvailable,
+                                timelineHandle.AddrOfPinnedObject(),
+                                (UIntPtr)timeline.Length,
+                                out var timelineCount));
+                            Assert.True(timelineAvailable);
+                            Assert.Equal((UIntPtr)intervals.Length, timelineCount);
                         }
                         finally
                         {
+                            timelineHandle.Free();
                             elapsedHandle.Free();
                         }
                         Assert.All(elapsed, value => Assert.True(value > 0));
                         Assert.True(elapsed[0] >= elapsed[1]);
                         Assert.True(elapsed[1] >= elapsed[2]);
+                        Assert.Equal(0ul, timeline[0].StartOffsetNanoseconds);
+                        Assert.Equal(elapsed, timeline.Select(result => result.DurationNanoseconds));
+                        Assert.True(timeline[1].StartOffsetNanoseconds >= timeline[0].StartOffsetNanoseconds);
+                        Assert.True(timeline[2].StartOffsetNanoseconds >= timeline[1].StartOffsetNanoseconds);
+                        Assert.True(
+                            timeline[1].StartOffsetNanoseconds + timeline[1].DurationNanoseconds <=
+                            timeline[0].DurationNanoseconds);
+                        Assert.True(
+                            timeline[2].StartOffsetNanoseconds + timeline[2].DurationNanoseconds <=
+                            timeline[1].StartOffsetNanoseconds + timeline[1].DurationNanoseconds);
                     }
                 }
             }
@@ -807,5 +828,19 @@ public class NativeContractTests
         Assert.Equal(16, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.AdapterName)).ToInt32());
         Assert.Equal(272, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.DriverVersion)).ToInt32());
         Assert.Equal(400, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.BackendVersion)).ToInt32());
+    }
+
+    [Fact]
+    public void TimestampIntervalResultHasStableSequentialLayout()
+    {
+        Assert.Equal(16, Marshal.SizeOf<FeTimestampIntervalResult>());
+        Assert.Equal(
+            0,
+            Marshal.OffsetOf<FeTimestampIntervalResult>(
+                nameof(FeTimestampIntervalResult.StartOffsetNanoseconds)).ToInt32());
+        Assert.Equal(
+            8,
+            Marshal.OffsetOf<FeTimestampIntervalResult>(
+                nameof(FeTimestampIntervalResult.DurationNanoseconds)).ToInt32());
     }
 }

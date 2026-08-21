@@ -860,6 +860,13 @@ public sealed class GpuQueue
 public readonly record struct GpuTimestampedSubmission<T>(T Result, GpuFence Fence);
 
 /// <summary>
+/// One resolved hardware timestamp interval on a submission-relative GPU timeline.
+/// </summary>
+public readonly record struct GpuTimestampIntervalResult(
+    ulong StartOffsetNanoseconds,
+    ulong DurationNanoseconds);
+
+/// <summary>
 /// Represents completion of one queue submission.
 /// </summary>
 public sealed class GpuFence : IDisposable, IAsyncDisposable
@@ -1006,6 +1013,62 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
                 MarkCompleted();
             }
             return available;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to resolve every hardware timestamp interval on one submission-relative GPU
+    /// timeline without waiting. Results use the recorder descriptor's <c>ResultIndex</c>
+    /// ordering and the first interval begins at offset zero.
+    /// </summary>
+    public unsafe bool TryGetGpuTimestampIntervalResults(
+        Span<GpuTimestampIntervalResult> results,
+        out int intervalCount)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposeState == 2, this);
+        }
+        intervalCount = timestampIntervalCount;
+        if (timestampIntervalCount == 0)
+        {
+            return false;
+        }
+        if (results.Length < timestampIntervalCount)
+        {
+            throw new ArgumentException(
+                "The destination span is smaller than the fence's timestamp interval count.",
+                nameof(results));
+        }
+
+        Span<FeTimestampIntervalResult> nativeResults =
+            stackalloc FeTimestampIntervalResult[timestampIntervalCount];
+        fixed (FeTimestampIntervalResult* resultPointer = nativeResults)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_interval_results(
+                handle,
+                out var available,
+                (IntPtr)resultPointer,
+                (UIntPtr)nativeResults.Length,
+                out var nativeIntervalCount));
+            intervalCount = checked((int)nativeIntervalCount);
+            if (intervalCount != timestampIntervalCount)
+            {
+                throw new InvalidOperationException(
+                    "Native timestamp interval count does not match the owning managed fence.");
+            }
+            if (!available)
+            {
+                return false;
+            }
+            for (var index = 0; index < intervalCount; index++)
+            {
+                results[index] = new GpuTimestampIntervalResult(
+                    nativeResults[index].StartOffsetNanoseconds,
+                    nativeResults[index].DurationNanoseconds);
+            }
+            MarkCompleted();
+            return true;
         }
     }
 

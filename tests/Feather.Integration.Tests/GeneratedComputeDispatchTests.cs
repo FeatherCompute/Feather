@@ -282,14 +282,28 @@ public class GeneratedComputeDispatchTests
 
         var elapsed = new ulong[fence.TimestampIntervalCount];
         var available = fence.TryGetGpuTimestampIntervals(elapsed, out var intervalCount);
+        var timeline = new GpuTimestampIntervalResult[fence.TimestampIntervalCount];
+        var timelineAvailable = fence.TryGetGpuTimestampIntervalResults(timeline, out var timelineCount);
         Assert.Equal(GPU.Context.DeviceInfo.SupportsTimestampQueries, available);
+        Assert.Equal(available, timelineAvailable);
         Assert.Equal(fence.TimestampIntervalCount, intervalCount);
+        Assert.Equal(intervalCount, timelineCount);
         if (available)
         {
             Assert.Equal(3, intervalCount);
             Assert.All(elapsed, value => Assert.True(value > 0));
             Assert.True(elapsed[0] >= elapsed[1]);
             Assert.True(elapsed[1] >= elapsed[2]);
+            Assert.Equal(0ul, timeline[0].StartOffsetNanoseconds);
+            Assert.Equal(elapsed, timeline.Select(result => result.DurationNanoseconds));
+            Assert.True(timeline[1].StartOffsetNanoseconds >= timeline[0].StartOffsetNanoseconds);
+            Assert.True(timeline[2].StartOffsetNanoseconds >= timeline[1].StartOffsetNanoseconds);
+            Assert.True(
+                timeline[1].StartOffsetNanoseconds + timeline[1].DurationNanoseconds <=
+                timeline[0].DurationNanoseconds);
+            Assert.True(
+                timeline[2].StartOffsetNanoseconds + timeline[2].DurationNanoseconds <=
+                timeline[1].StartOffsetNanoseconds + timeline[1].DurationNanoseconds);
             Assert.Equal([0, 1, 2], submission.Intervals.Select(interval => interval.ResultIndex));
             Assert.All(submission.Intervals, interval => Assert.Null(interval.UnavailableReason));
         }

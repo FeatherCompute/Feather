@@ -268,6 +268,14 @@ public static class NativeMethods
         UIntPtr capacity,
         out UIntPtr out_interval_count);
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_try_get_timestamp_interval_results(
+        FeFenceHandle fence,
+        [MarshalAs(UnmanagedType.I1)] out bool out_available,
+        IntPtr out_results,
+        UIntPtr capacity,
+        out UIntPtr out_interval_count);
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_fence_destroy")]
     public static extern FeResult fe_fence_destroy_raw(IntPtr fence);
 

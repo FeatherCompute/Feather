@@ -299,6 +299,11 @@ typedef struct FeProfilerQueryResult {
     double total_time_ms;
 } FeProfilerQueryResult;
 
+typedef struct FeTimestampIntervalResult {
+    uint64_t start_offset_nanoseconds;
+    uint64_t duration_nanoseconds;
+} FeTimestampIntervalResult;
+
 typedef struct FeADGradientInfo {
     char name[128];
     char resource_name[128];
@@ -338,6 +343,9 @@ FE_API FeResult fe_fence_try_get_timestamp(FeFenceHandle fence, bool* out_availa
 FE_API FeResult fe_fence_try_get_timestamp_intervals(FeFenceHandle fence, bool* out_available,
                                                      uint64_t* out_elapsed_nanoseconds, size_t capacity,
                                                      size_t* out_interval_count);
+FE_API FeResult fe_fence_try_get_timestamp_interval_results(
+    FeFenceHandle fence, bool* out_available, FeTimestampIntervalResult* out_results,
+    size_t capacity, size_t* out_interval_count);
 FE_API FeResult fe_fence_destroy(FeFenceHandle fence);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_runtime_flush_caches(void);

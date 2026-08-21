@@ -14181,6 +14181,65 @@ FE_API FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHa
     });
 }
 
+FE_API FeResult fe_fence_try_get_timestamp_interval_results(
+    FeFenceHandle fence, bool* out_available, FeTimestampIntervalResult* out_results,
+    size_t capacity, size_t* out_interval_count) {
+    return protect([&] {
+        if (out_available == nullptr || out_interval_count == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Timestamp availability and interval-count outputs are required.");
+        }
+        *out_available = false;
+        *out_interval_count = 0;
+
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        *out_interval_count = state->timestamp_interval_count;
+        if (state->timestamp_interval_count == 0) {
+            return ok();
+        }
+        if (out_results == nullptr || capacity < state->timestamp_interval_count) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Timestamp interval result capacity is smaller than the submission interval count.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        std::vector<GPU::Backend::SubmissionTimestampInterval> intervals;
+        *out_available = backend->TryGetSubmissionTimestampIntervals(state->submission, intervals);
+        if (!*out_available) {
+            return ok();
+        }
+        if (intervals.size() != state->timestamp_interval_count) {
+            *out_available = false;
+            return fail(FE_ERROR_UNKNOWN,
+                        "Backend timestamp interval count does not match the owning submission.");
+        }
+        std::transform(intervals.begin(), intervals.end(), out_results, [](const auto& interval) {
+            return FeTimestampIntervalResult{
+                interval.startOffsetNanoseconds,
+                interval.durationNanoseconds,
+            };
+        });
+        return ok();
+    });
+}
+
 FE_API FeResult fe_profiler_set_enabled(bool enabled) {
     return protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
