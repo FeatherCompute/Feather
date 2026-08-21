@@ -483,6 +483,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_get_optimized_ir(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, out FeDispatchPath out_path);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -544,6 +547,24 @@ public static class NativeMethods
         FeBufferHandle index_buffer,
         uint index_count,
         [MarshalAs(UnmanagedType.I1)] bool wait);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_vertex_glsl(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_fragment_glsl(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_optimized_vertex_glsl(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_optimized_fragment_glsl(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_optimized_vertex_ir(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_optimized_fragment_ir(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHandle pipeline, out FeDispatchPath out_path);

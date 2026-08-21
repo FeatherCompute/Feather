@@ -43,6 +43,57 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public void LoadedGraphicsShaderInspectionUsesThePipelineThatCompletedTypedLowering()
+    {
+        using var vertices = GPU.CreateBuffer<float4>([new float4(0, 0, 0, 1), new float4(1, 0, 0, 1), new float4(0, 1, 0, 1)]);
+        using var target = GPU.CreateTexture2D<Rgba32, Rgba32>(8, 8, PixelFormat.Rgba8, TextureAccess.RenderTarget);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>();
+
+        Assert.DoesNotContain(
+            ShaderInspection.GetLoadedShaders(typeof(GeneratedVertexShader).Assembly),
+            shader => shader.SourceType == typeof(GeneratedVertexShader) && shader.Stage == ShaderStage.Vertex);
+
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedFragmentShader(sampler),
+            target,
+            vertexCount: 3);
+
+        Assert.Contains("#version", pipeline.GetVertexGLSL(), StringComparison.Ordinal);
+        Assert.Contains("#version", pipeline.GetFragmentGLSL(), StringComparison.Ordinal);
+
+        var loaded = ShaderInspection.GetLoadedShaders(typeof(GeneratedVertexShader).Assembly);
+        var vertex = Assert.Single(
+            loaded,
+            shader => shader.SourceType == typeof(GeneratedVertexShader) && shader.Stage == ShaderStage.Vertex);
+        var fragment = Assert.Single(
+            loaded,
+            shader => shader.SourceType == typeof(GeneratedFragmentShader) && shader.Stage == ShaderStage.Fragment);
+
+        Assert.Equal(pipeline.GetVertexGLSL(), vertex.BackendInputGLSL);
+        Assert.Equal(pipeline.GetFragmentGLSL(), fragment.BackendInputGLSL);
+        if (GPU.Context.BackendType == BackendType.Vulkan)
+        {
+            if (vertex.OptimizedBackendGLSL.Length > 0)
+            {
+                Assert.Contains("#version", vertex.OptimizedBackendGLSL, StringComparison.Ordinal);
+            }
+            if (fragment.OptimizedBackendGLSL.Length > 0)
+            {
+                Assert.Contains("#version", fragment.OptimizedBackendGLSL, StringComparison.Ordinal);
+            }
+            Assert.Contains("OpEntryPoint Vertex", vertex.OptimizedTargetIR, StringComparison.Ordinal);
+            Assert.Contains("OpEntryPoint Fragment", fragment.OptimizedTargetIR, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Empty(vertex.OptimizedTargetIR);
+            Assert.Empty(fragment.OptimizedTargetIR);
+        }
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineDrawSupportsInstancing()
     {
         using var vertices = GPU.CreateBuffer<float4>(

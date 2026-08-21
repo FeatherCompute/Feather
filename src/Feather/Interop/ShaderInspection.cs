@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace Feather.Interop;
 
 public static class ShaderInspection
@@ -36,6 +38,27 @@ public static class ShaderInspection
     }
 
     /// <summary>
+    /// Builds a generated kernel through the active backend and returns the optimized target IR.
+    /// </summary>
+    /// <typeparam name="TKernel">The generated compute kernel type.</typeparam>
+    /// <returns>Backend-specific optimized target IR, such as SPIR-V assembly on Vulkan.</returns>
+    public static string GetOptimizedIR<TKernel>()
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        using var kernel = GpuKernel.Create<TKernel>(GPU.Context);
+        return kernel.GetOptimizedIR();
+    }
+
+    /// <summary>
+    /// Inspects shaders that are currently loaded by the default GPU context for one assembly.
+    /// This method does not discover types or create pipelines merely to produce inspection output.
+    /// </summary>
+    /// <param name="assembly">The generated pass assembly whose loaded shaders should be returned.</param>
+    /// <returns>An immutable snapshot of exact backend inputs and available optimized outputs.</returns>
+    public static IReadOnlyList<LoadedShaderSource> GetLoadedShaders(Assembly assembly)
+        => GPU.Context.GetLoadedShaders(assembly);
+
+    /// <summary>
     /// Returns the generated resource table for a compute kernel.
     /// </summary>
     /// <typeparam name="TKernel">The generated compute kernel type.</typeparam>
@@ -64,3 +87,30 @@ public static class ShaderInspection
 }
 
 public readonly record struct GraphicsShaderSource(string IR, string VertexIR, string FragmentIR, string VertexGLSL, string FragmentGLSL);
+
+/// <summary>
+/// Identifies a generated shader stage loaded by Feather.
+/// </summary>
+public enum ShaderStage
+{
+    Compute,
+    Vertex,
+    Fragment
+}
+
+/// <summary>
+/// Exact shader material captured from a live Feather kernel or graphics pipeline.
+/// Optimized fields are empty when the active backend cannot expose that representation.
+/// </summary>
+public sealed record LoadedShaderSource(
+    Type SourceType,
+    ShaderStage Stage,
+    bool AutoDiff,
+    string BackendInputGLSL,
+    string OptimizedBackendGLSL,
+    string OptimizedTargetIR);
+
+internal interface ILoadedGraphicsShaderInspection
+{
+    IReadOnlyList<LoadedShaderSource> InspectLoadedShaders();
+}

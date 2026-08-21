@@ -116,6 +116,23 @@ Dispatch records one of:
 
 Managed code exposes this through `DispatchPath`.
 
+## Live Shader Inspection
+
+Shader inspection reads the same generated shader inputs and optimization settings used by live Feather handles:
+
+| Function | Result |
+| --- | --- |
+| `fe_kernel_get_glsl` | Exact GLSL lowered from the kernel handle's FEIR. |
+| `fe_kernel_get_optimized_glsl` | Backend inspection GLSL reconstructed after the configured optimizer. |
+| `fe_kernel_get_optimized_ir` | Optimized target IR; Vulkan returns readable SPIR-V assembly. |
+| `fe_graphics_pipeline_get_vertex_glsl` / `fe_graphics_pipeline_get_fragment_glsl` | Exact per-stage GLSL retained after that pipeline completes typed lowering. |
+| `fe_graphics_pipeline_get_optimized_*_glsl` | Per-stage backend inspection GLSL using the live pipeline's optimization recipe. |
+| `fe_graphics_pipeline_get_optimized_*_ir` | Per-stage optimized target IR; Vulkan returns readable SPIR-V assembly. |
+
+All string getters use the ABI's normal two-call required-size contract. A graphics pipeline that has not completed a typed draw returns `FE_ERROR_UNSUPPORTED`, because no backend shader exists yet. A backend without a stable readable optimized representation also returns `FE_ERROR_UNSUPPORTED`; callers must not relabel source GLSL as target IR.
+
+Managed `ShaderInspection.GetLoadedShaders(Assembly)` snapshots only cached compute kernels and weakly registered live graphics pipelines owned by that assembly. It does not scan types or create unused shaders to manufacture inspection output. Disposed graphics pipelines are removed from the registry, and the weak registry does not pin a collectible user assembly.
+
 ## Resource ABI
 
 Buffers carry:

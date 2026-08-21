@@ -1,3 +1,4 @@
+using Feather.Interop;
 using Feather.Native;
 using Feather.Resources;
 using System.Reflection;
@@ -8,6 +9,7 @@ public sealed class GpuContext : IDisposable
 {
     private readonly object gate = new();
     private readonly Dictionary<(Type KernelType, bool AutoDiff), GpuKernel> kernels = [];
+    private readonly List<WeakReference<ILoadedGraphicsShaderInspection>> graphicsPipelines = [];
     private readonly List<IDisposable> pendingSubmissions = [];
     private readonly List<WeakReference<ReadbackOperation>> readbackOperations = [];
     private int activeOperations;
@@ -305,6 +307,81 @@ public sealed class GpuContext : IDisposable
         return released.Count;
     }
 
+    internal IReadOnlyList<LoadedShaderSource> GetLoadedShaders(Assembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        using var operation = EnterOperation();
+
+        (GpuKernel Kernel, bool AutoDiff)[] computeShaders;
+        ILoadedGraphicsShaderInspection[] graphicsShaders;
+        lock (gate)
+        {
+            computeShaders = kernels
+                .Where(entry => ReferenceEquals(entry.Key.KernelType.Assembly, assembly))
+                .Select(static entry => (entry.Value, entry.Key.AutoDiff))
+                .ToArray();
+            PruneGraphicsPipelinesLocked(remove: null);
+            graphicsShaders = graphicsPipelines
+                .Select(static weak => weak.TryGetTarget(out var pipeline) ? pipeline : null)
+                .OfType<ILoadedGraphicsShaderInspection>()
+                .ToArray();
+        }
+
+        var loaded = new List<LoadedShaderSource>(computeShaders.Length + graphicsShaders.Length * 2);
+        foreach (var (kernel, autoDiff) in computeShaders)
+        {
+            try
+            {
+                loaded.Add(kernel.InspectLoadedShader(autoDiff));
+            }
+            catch (ObjectDisposedException)
+            {
+                // The cache can retire concurrently with a point-in-time inspection snapshot.
+            }
+        }
+
+        foreach (var pipeline in graphicsShaders)
+        {
+            try
+            {
+                loaded.AddRange(pipeline.InspectLoadedShaders().Where(shader => ReferenceEquals(shader.SourceType.Assembly, assembly)));
+            }
+            catch (ObjectDisposedException)
+            {
+                // A weakly registered pipeline can be disposed after the registry snapshot.
+            }
+            catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
+            {
+                // A pipeline has no backend shader until its first typed draw completes.
+            }
+        }
+
+        return loaded
+            .OrderBy(static shader => shader.SourceType.FullName, StringComparer.Ordinal)
+            .ThenBy(static shader => shader.Stage)
+            .ThenBy(static shader => shader.AutoDiff)
+            .ToArray();
+    }
+
+    internal void RegisterGraphicsPipeline(ILoadedGraphicsShaderInspection pipeline)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed || disposing, this);
+            PruneGraphicsPipelinesLocked(pipeline);
+            graphicsPipelines.Add(new WeakReference<ILoadedGraphicsShaderInspection>(pipeline));
+        }
+    }
+
+    internal void UnregisterGraphicsPipeline(ILoadedGraphicsShaderInspection pipeline)
+    {
+        lock (gate)
+        {
+            PruneGraphicsPipelinesLocked(pipeline);
+        }
+    }
+
     internal void TrackSubmission(IEnumerable<IDisposable> leases)
     {
         lock (gate)
@@ -401,6 +478,17 @@ public sealed class GpuContext : IDisposable
             if (!readbackOperations[index].TryGetTarget(out var operation) || ReferenceEquals(operation, remove))
             {
                 readbackOperations.RemoveAt(index);
+            }
+        }
+    }
+
+    private void PruneGraphicsPipelinesLocked(ILoadedGraphicsShaderInspection? remove)
+    {
+        for (var index = graphicsPipelines.Count - 1; index >= 0; index--)
+        {
+            if (!graphicsPipelines[index].TryGetTarget(out var pipeline) || ReferenceEquals(pipeline, remove))
+            {
+                graphicsPipelines.RemoveAt(index);
             }
         }
     }

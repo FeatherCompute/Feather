@@ -5,7 +5,7 @@ using Feather.Resources;
 
 namespace Feather.Graphics;
 
-public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings> : IDisposable
+public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings> : IDisposable, ILoadedGraphicsShaderInspection
     where TVertexShader : struct, IVertexShader<TVaryings>, IGeneratedGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>
     where TFragmentShader : struct, IGeneratedGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>
     where TVaryings : unmanaged
@@ -43,6 +43,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
 
     internal static GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings> Create(GpuContext context, GraphicsPipelineDesc desc)
     {
+        using var operation = context.EnterOperation();
         var normalized = NormalizeDesc(desc);
         var ir = TVertexShader.IR;
         var vertexIr = TVertexShader.VertexIR;
@@ -108,7 +109,17 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     normalized.Raster.DepthClamp ? 1u : 0u,
                     normalized.DebugName ?? typeof(TVertexShader).Name + "+" + typeof(TFragmentShader).Name);
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_create_from_ir(context.Handle, in createDesc, out var handle));
-                return new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(context, handle, normalized);
+                var pipeline = new GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVaryings>(context, handle, normalized);
+                try
+                {
+                    context.RegisterGraphicsPipeline(pipeline);
+                    return pipeline;
+                }
+                catch
+                {
+                    pipeline.Dispose();
+                    throw;
+                }
             }
         }
     }
@@ -526,15 +537,94 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         }
     }
 
+    public string GetVertexGLSL()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_vertex_glsl(Handle, buffer, length, out required));
+
+    public string GetFragmentGLSL()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_fragment_glsl(Handle, buffer, length, out required));
+
+    public string GetOptimizedVertexGLSL()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_optimized_vertex_glsl(Handle, buffer, length, out required));
+
+    public string GetOptimizedFragmentGLSL()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_optimized_fragment_glsl(Handle, buffer, length, out required));
+
+    public string GetOptimizedVertexIR()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_optimized_vertex_ir(Handle, buffer, length, out required));
+
+    public string GetOptimizedFragmentIR()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required));
+
+    IReadOnlyList<LoadedShaderSource> ILoadedGraphicsShaderInspection.InspectLoadedShaders()
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return
+            [
+                new LoadedShaderSource(
+                    typeof(TVertexShader),
+                    ShaderStage.Vertex,
+                    false,
+                    GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_glsl(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_glsl(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_ir(Handle, buffer, length, out required))),
+                new LoadedShaderSource(
+                    typeof(TFragmentShader),
+                    ShaderStage.Fragment,
+                    false,
+                    GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_glsl(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_glsl(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required)))
+            ];
+        }
+    }
+
+    private string GetInspectionString(NativeStringCall.Getter getter)
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return GetNativeString(getter);
+        }
+    }
+
+    private static string GetNativeString(NativeStringCall.Getter getter)
+        => NativeStringCall.GetString(getter);
+
+    private static string GetOptionalNativeString(NativeStringCall.Getter getter)
+    {
+        try
+        {
+            return GetNativeString(getter);
+        }
+        catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
+        {
+            return string.Empty;
+        }
+    }
+
     public void Dispose()
     {
-        if (disposed)
+        lock (dispatchGate)
         {
-            return;
-        }
+            if (disposed)
+            {
+                return;
+            }
 
-        Handle.Dispose();
-        disposed = true;
+            context.UnregisterGraphicsPipeline(this);
+            Handle.Dispose();
+            disposed = true;
+        }
     }
 
     private void ThrowIfDisposed()

@@ -233,6 +233,48 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    /// <summary>
+    /// Builds this generated kernel through the active backend and returns its optimized target IR.
+    /// </summary>
+    /// <returns>Backend-specific optimized target IR, such as SPIR-V assembly on Vulkan.</returns>
+    public string GetOptimizedIR()
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_ir(Handle, buffer, length, out required));
+        }
+    }
+
+    internal LoadedShaderSource InspectLoadedShader(bool autoDiff)
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return new LoadedShaderSource(
+                kernelType,
+                ShaderStage.Compute,
+                autoDiff,
+                NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required)),
+                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required)),
+                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_ir(Handle, buffer, length, out required)));
+        }
+    }
+
+    private static string GetOptionalString(NativeStringCall.Getter getter)
+    {
+        try
+        {
+            return NativeStringCall.GetString(getter);
+        }
+        catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
+        {
+            return string.Empty;
+        }
+    }
+
     public void Dispose()
     {
         lock (dispatchGate)

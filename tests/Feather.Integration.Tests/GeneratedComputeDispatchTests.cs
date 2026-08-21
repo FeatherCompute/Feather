@@ -731,6 +731,36 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void LoadedShaderInspectionUsesCachedKernelAndReportsRealOptimizedIr()
+    {
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4]);
+        using var output = GPU.CreateBuffer<float>(4);
+        GPU.Dispatch(new CopyKernel(input.AsReadOnly(), output.AsReadWrite()), 4);
+
+        var shader = Assert.Single(
+            ShaderInspection.GetLoadedShaders(typeof(CopyKernel).Assembly),
+            candidate => candidate.SourceType == typeof(CopyKernel)
+                && candidate.Stage == ShaderStage.Compute
+                && !candidate.AutoDiff);
+
+        Assert.Contains("#version", shader.BackendInputGLSL, StringComparison.Ordinal);
+        Assert.Contains("main", shader.BackendInputGLSL, StringComparison.Ordinal);
+        if (GPU.Context.BackendType == BackendType.Vulkan)
+        {
+            if (shader.OptimizedBackendGLSL.Length > 0)
+            {
+                Assert.Contains("#version", shader.OptimizedBackendGLSL, StringComparison.Ordinal);
+            }
+            Assert.Contains("OpEntryPoint GLCompute", shader.OptimizedTargetIR, StringComparison.Ordinal);
+            Assert.Contains("OpFunction", shader.OptimizedTargetIR, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Empty(shader.OptimizedTargetIR);
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsPushConstantExpressionFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try

@@ -55,6 +55,7 @@ extern "C" void __llvm_profile_set_filename(const char* filename);
 namespace {
 
 void trace_graphics_step(const char* step);
+FeResult write_string(const std::string& value, char* buffer, size_t buffer_size, size_t* out_required_size);
 
 #if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
 void write_coverage_profile_snapshot() {
@@ -6349,6 +6350,82 @@ bool try_build_easygpu_optimized_kernel_source(const KernelState& kernel, std::s
     shader_desc.optimizationLevel = context->GetOptimizationLevel();
     *source = backend->GetOptimizedGLSL(shader_desc);
     return !source->empty();
+}
+
+bool try_build_easygpu_optimized_kernel_ir(const KernelState& kernel, std::string* source) {
+    if (source == nullptr) {
+        return false;
+    }
+
+    auto context = try_build_easygpu_kernel_context(kernel);
+    if (context == nullptr) {
+        return false;
+    }
+
+    GPU::Runtime::AutoInitContext();
+    GPU::Runtime::ContextGuard guard(GPU::Runtime::Context::GetInstance());
+    auto* backend = GPU::Runtime::Context::GetBackend();
+    if (backend == nullptr) {
+        throw std::runtime_error("EasyGPU backend is not available.");
+    }
+
+    GPU::Backend::ShaderDesc shader_desc;
+    shader_desc.type = GPU::Backend::ShaderType::Compute;
+    shader_desc.sourceCode = context->GetCompleteCode();
+    shader_desc.entryPoint = "main";
+    shader_desc.optimizationLevel = context->GetOptimizationLevel();
+    *source = backend->GetOptimizedIR(shader_desc);
+    return !source->empty();
+}
+
+enum class GraphicsShaderInspectionKind {
+    Source,
+    OptimizedSource,
+    OptimizedIr,
+};
+
+FeResult inspect_graphics_shader(FeGraphicsPipelineHandle pipeline_handle, bool vertex,
+                                 GraphicsShaderInspectionKind kind, char* buffer, size_t buffer_size,
+                                 size_t* out_required_size) {
+    std::string source;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_pipelines.find(pipeline_handle);
+        if (it == g_pipelines.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
+        }
+        if (!it->second.graphics_lowered) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Graphics shader inspection requires a pipeline that completed typed lowering.");
+        }
+        source = vertex ? it->second.vertex_shader_source : it->second.fragment_shader_source;
+    }
+
+    if (kind == GraphicsShaderInspectionKind::Source) {
+        return write_string(source, buffer, buffer_size, out_required_size);
+    }
+
+    std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+    GPU::Runtime::AutoInitContext();
+    GPU::Runtime::ContextGuard guard(GPU::Runtime::Context::GetInstance());
+    auto* backend = GPU::Runtime::Context::GetBackend();
+    if (backend == nullptr) {
+        return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is not available.");
+    }
+
+    GPU::Backend::ShaderDesc descriptor;
+    descriptor.type = vertex ? GPU::Backend::ShaderType::Vertex : GPU::Backend::ShaderType::Fragment;
+    descriptor.sourceCode = source;
+    descriptor.entryPoint = "main";
+    descriptor.optimizationLevel = kShaderOptimizationLevel;
+    const std::string inspected = kind == GraphicsShaderInspectionKind::OptimizedSource
+                                      ? backend->GetOptimizedGLSL(descriptor)
+                                      : backend->GetOptimizedIR(descriptor);
+    if (inspected.empty()) {
+        return fail(FE_ERROR_UNSUPPORTED,
+                    "Graphics shader inspection is unavailable on the active EasyGPU backend.");
+    }
+    return write_string(inspected, buffer, buffer_size, out_required_size);
 }
 
 bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferState& destination, uint64_t destination_offset,
@@ -13362,6 +13439,31 @@ FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer
     });
 }
 
+FE_API FeResult fe_kernel_get_optimized_ir(FeKernelHandle kernel, char* buffer, size_t buffer_size,
+                                           size_t* out_required_size) {
+    return protect([&] {
+        KernelState state;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            const auto it = g_kernels.find(kernel);
+            if (it == g_kernels.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+            }
+
+            state = it->second;
+        }
+
+        std::string source;
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        if (!try_build_easygpu_optimized_kernel_ir(state, &source)) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Kernel IR is not supported by EasyGPU optimized IR inspection on this backend.");
+        }
+
+        return write_string(source, buffer, buffer_size, out_required_size);
+    });
+}
+
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path) {
     return protect([&] {
         if (out_path == nullptr) {
@@ -13875,6 +13977,54 @@ FE_API FeResult fe_graphics_pipeline_draw_indexed(FeGraphicsPipelineHandle pipel
     desc.clear_depth_value = 1.0f;
     desc.depth_load_op = static_cast<uint32_t>(GraphicsDepthLoadOp::Clear);
     return fe_graphics_pipeline_draw_ex(pipeline, &desc);
+}
+
+FE_API FeResult fe_graphics_pipeline_get_vertex_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                     size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, true, GraphicsShaderInspectionKind::Source, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_fragment_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                       size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, false, GraphicsShaderInspectionKind::Source, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_optimized_vertex_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                               size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, true, GraphicsShaderInspectionKind::OptimizedSource, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_optimized_fragment_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                                 size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, false, GraphicsShaderInspectionKind::OptimizedSource, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_optimized_vertex_ir(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                             size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, true, GraphicsShaderInspectionKind::OptimizedIr, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_optimized_fragment_ir(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                               size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, false, GraphicsShaderInspectionKind::OptimizedIr, buffer, buffer_size, out_required_size);
+    });
 }
 
 FE_API FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHandle pipeline, uint32_t* out_path) {

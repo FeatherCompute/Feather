@@ -416,6 +416,8 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
 FE_API FeResult fe_kernel_get_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_kernel_get_optimized_glsl(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                              size_t* out_required_size);
+FE_API FeResult fe_kernel_get_optimized_ir(FeKernelHandle kernel, char* buffer, size_t buffer_size,
+                                           size_t* out_required_size);
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path);
 FE_API FeResult fe_kernel_get_compile_count(FeKernelHandle kernel, uint64_t* out_count);
 FE_API FeResult fe_kernel_get_ad_gradient_count(FeKernelHandle kernel, uint32_t* out_count);
@@ -451,6 +453,18 @@ FE_API FeResult fe_graphics_pipeline_draw_ex(FeGraphicsPipelineHandle pipeline, 
 FE_API FeResult fe_graphics_pipeline_draw_indexed(FeGraphicsPipelineHandle pipeline, FeTextureHandle color_target,
                                                   FeTextureHandle depth_target, FeBufferHandle index_buffer,
                                                   uint32_t index_count, bool wait);
+FE_API FeResult fe_graphics_pipeline_get_vertex_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                     size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_fragment_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                       size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_optimized_vertex_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                               size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_optimized_fragment_glsl(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                                 size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_optimized_vertex_ir(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                             size_t buffer_size, size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_optimized_fragment_ir(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                               size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHandle pipeline, uint32_t* out_path);
 
 FE_API FeResult fe_profiler_set_enabled(bool enabled);
