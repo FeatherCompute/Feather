@@ -99,6 +99,135 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void NativeProfiledSubmissionResolvesNestedTimestampIntervals()
+    {
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));
+        using (context)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_initialize(context));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_device_info(context, out var device));
+            if (device.SupportsTimestampQueries == 0)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_begin_timestamp_interval(context, out var unavailable));
+                Assert.Equal(0u, unavailable);
+                return;
+            }
+
+            var desc = new FeBufferDesc(16, mode: 2, elementStride: 4);
+            var sourceData = new[] { 3, 5, 8, 13 };
+            var sourcePointer = Marshal.AllocHGlobal(16);
+            try
+            {
+                Marshal.Copy(sourceData, 0, sourcePointer, sourceData.Length);
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context, in desc, sourcePointer, out var source));
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_create(context, in desc, IntPtr.Zero, out var destination));
+                using (source)
+                using (destination)
+                {
+                    // Materialize the buffers and initial upload before opening timestamp scopes;
+                    // a cold blocking upload must never split one profiled submission.
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_copy(source, 0, destination, 0, 16));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(context, out var warmupFence));
+                    using (warmupFence)
+                    {
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_wait(
+                            warmupFence,
+                            ulong.MaxValue,
+                            out var warmupCompleted));
+                        Assert.True(warmupCompleted);
+                    }
+
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_begin_timestamp_interval(context, out var graph));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_begin_timestamp_interval(context, out var pass));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_begin_timestamp_interval(context, out var command));
+                    Assert.NotEqual(0u, graph);
+                    Assert.NotEqual(0u, pass);
+                    Assert.NotEqual(0u, command);
+                    for (var copy = 0; copy < 64; copy++)
+                    {
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_copy(source, 0, destination, 0, 16));
+                    }
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_end_timestamp_interval(context, command));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_end_timestamp_interval(context, pass));
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_end_timestamp_interval(context, graph));
+
+                    uint[] invalidIntervals = [graph, pass, pass];
+                    var invalidHandle = GCHandle.Alloc(invalidIntervals, GCHandleType.Pinned);
+                    try
+                    {
+                        Assert.Equal(
+                            FeResult.ErrorInvalidArgument,
+                            NativeMethods.fe_queue_submit_profiled(
+                                context,
+                                invalidHandle.AddrOfPinnedObject(),
+                                (UIntPtr)invalidIntervals.Length,
+                                out _));
+                    }
+                    finally
+                    {
+                        invalidHandle.Free();
+                    }
+
+                    uint[] intervals = [graph, pass, command];
+                    FeFenceHandle fence;
+                    var intervalHandle = GCHandle.Alloc(intervals, GCHandleType.Pinned);
+                    try
+                    {
+                        NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit_profiled(
+                            context,
+                            intervalHandle.AddrOfPinnedObject(),
+                            (UIntPtr)intervals.Length,
+                            out fence));
+                    }
+                    finally
+                    {
+                        intervalHandle.Free();
+                    }
+                    using (fence)
+                    {
+                        ulong[] elapsed = new ulong[intervals.Length];
+                        var elapsedHandle = GCHandle.Alloc(elapsed, GCHandleType.Pinned);
+                        try
+                        {
+                            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_intervals(
+                                fence,
+                                out _,
+                                elapsedHandle.AddrOfPinnedObject(),
+                                (UIntPtr)elapsed.Length,
+                                out var pendingCount));
+                            Assert.Equal((UIntPtr)intervals.Length, pendingCount);
+                            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_wait(
+                                fence,
+                                ulong.MaxValue,
+                                out var completed));
+                            Assert.True(completed);
+                            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_intervals(
+                                fence,
+                                out var available,
+                                elapsedHandle.AddrOfPinnedObject(),
+                                (UIntPtr)elapsed.Length,
+                                out var resolvedCount));
+                            Assert.True(available);
+                            Assert.Equal((UIntPtr)intervals.Length, resolvedCount);
+                        }
+                        finally
+                        {
+                            elapsedHandle.Free();
+                        }
+                        Assert.All(elapsed, value => Assert.True(value > 0));
+                        Assert.True(elapsed[0] >= elapsed[1]);
+                        Assert.True(elapsed[1] >= elapsed[2]);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(sourcePointer);
+            }
+        }
+    }
+
+    [Fact]
     public async Task NativeFenceWaitAndDestroyCanRaceSafely()
     {
         NativeMethods.ThrowIfFailed(NativeMethods.fe_context_get_default(out var context));

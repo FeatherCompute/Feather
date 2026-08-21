@@ -229,6 +229,23 @@ public static class NativeMethods
         out FeFenceHandle out_fence);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_begin_timestamp_interval(
+        FeContextHandle context,
+        out uint out_interval);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_end_timestamp_interval(
+        FeContextHandle context,
+        uint interval);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_queue_submit_profiled(
+        FeContextHandle context,
+        IntPtr intervals,
+        UIntPtr interval_count,
+        out FeFenceHandle out_fence);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_queue_memory_barrier(FeContextHandle context, uint barrier_flags);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -242,6 +259,14 @@ public static class NativeMethods
         FeFenceHandle fence,
         [MarshalAs(UnmanagedType.I1)] out bool out_available,
         out ulong out_elapsed_nanoseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_fence_try_get_timestamp_intervals(
+        FeFenceHandle fence,
+        [MarshalAs(UnmanagedType.I1)] out bool out_available,
+        IntPtr out_elapsed_nanoseconds,
+        UIntPtr capacity,
+        out UIntPtr out_interval_count);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "fe_fence_destroy")]
     public static extern FeResult fe_fence_destroy_raw(IntPtr fence);

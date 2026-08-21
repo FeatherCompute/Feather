@@ -204,6 +204,111 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public async Task ProfiledSubmissionCorrelatesGraphPassAndDispatchHardwareIntervals()
+    {
+        const int elementCount = 65_536;
+        using var source = GPU.CreateBuffer<float>(Enumerable.Range(0, elementCount).Select(value => (float)value).ToArray());
+        using var destination = GPU.CreateBuffer<float>(elementCount);
+        GPU.Context.Compile<CopyKernel>();
+        // Resource materialization and the initial upload are cold-start work, not part of a
+        // steady-state pass timestamp. Warm them before asserting that the measured submission
+        // adds no blocking queue wait of its own.
+        GpuKernel.Dispatch(
+            GPU.Context,
+            new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()),
+            new GpuDispatchSize(elementCount, 1, 1),
+            wait: true);
+        var operationsBefore = GPU.Context.OperationCounters;
+
+        var submission = GPU.Queue.SubmitProfiled(
+            new GpuProfilingOptions(
+                IncludeCommandIntervals: true,
+                GraphCorrelationId: "frame:profiled",
+                GraphLabel: "Profiled frame"),
+            recorder =>
+            {
+                using (recorder.BeginPass("pass:copy", "Copy pass"))
+                {
+                    // A synchronous immediate call is folded into the owning profiled submission;
+                    // it must not inject Finish/WaitIdle between the timestamp markers.
+                    GpuKernel.Dispatch(
+                        GPU.Context,
+                        new CopyKernel(source.AsReadOnly(), destination.AsReadWrite()),
+                        new GpuDispatchSize(elementCount, 1, 1),
+                        wait: true);
+                }
+                return 42;
+            });
+
+        Assert.Equal(42, submission.Result);
+        Assert.Equal(
+            operationsBefore.BlockingSubmissionWaitCalls,
+            GPU.Context.OperationCounters.BlockingSubmissionWaitCalls);
+        Assert.Equal(GpuQueue.DefaultQueueId, submission.QueueId);
+        Assert.Collection(
+            submission.Intervals,
+            graph =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Graph, graph.Kind);
+                Assert.Equal("frame:profiled", graph.CorrelationId);
+                Assert.Null(graph.ParentIndex);
+            },
+            pass =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Pass, pass.Kind);
+                Assert.Equal("pass:copy", pass.CorrelationId);
+                Assert.Equal(0, pass.ParentIndex);
+            },
+            dispatch =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Dispatch, dispatch.Kind);
+                Assert.Equal("command:0", dispatch.CorrelationId);
+                Assert.Equal(1, dispatch.ParentIndex);
+                Assert.Equal(0, dispatch.CommandOrdinal);
+            });
+
+        await using var fence = submission.Fence;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await fence.WaitAsync(cancellation.Token));
+        Assert.Equal(
+            operationsBefore.BlockingSubmissionWaitCalls,
+            GPU.Context.OperationCounters.BlockingSubmissionWaitCalls);
+        await fence.WaitAsync();
+        Assert.Equal(
+            operationsBefore.BlockingSubmissionWaitCalls,
+            GPU.Context.OperationCounters.BlockingSubmissionWaitCalls);
+
+        var elapsed = new ulong[fence.TimestampIntervalCount];
+        var available = fence.TryGetGpuTimestampIntervals(elapsed, out var intervalCount);
+        Assert.Equal(GPU.Context.DeviceInfo.SupportsTimestampQueries, available);
+        Assert.Equal(fence.TimestampIntervalCount, intervalCount);
+        if (available)
+        {
+            Assert.Equal(3, intervalCount);
+            Assert.All(elapsed, value => Assert.True(value > 0));
+            Assert.True(elapsed[0] >= elapsed[1]);
+            Assert.True(elapsed[1] >= elapsed[2]);
+            Assert.Equal([0, 1, 2], submission.Intervals.Select(interval => interval.ResultIndex));
+            Assert.All(submission.Intervals, interval => Assert.Null(interval.UnavailableReason));
+        }
+        else
+        {
+            Assert.Equal(0, intervalCount);
+            Assert.All(submission.Intervals, interval =>
+                Assert.Equal(GpuTimestampUnavailableReason.TimestampQueriesUnsupported, interval.UnavailableReason));
+        }
+
+        var operationsAfter = GPU.Context.OperationCounters;
+        Assert.Equal(operationsBefore.FinishCalls, operationsAfter.FinishCalls);
+        Assert.Equal(operationsBefore.DeviceWaitIdleCalls, operationsAfter.DeviceWaitIdleCalls);
+        Assert.Equal(operationsBefore.GlobalDrainCalls, operationsAfter.GlobalDrainCalls);
+        Assert.Equal(operationsBefore.BlockingSubmissionWaitCalls, operationsAfter.BlockingSubmissionWaitCalls);
+        Assert.Equal(Enumerable.Range(0, elementCount).Select(value => (float)value).ToArray(), destination.ToArray());
+    }
+
+    [Fact]
     public void BatchSubmissionValidatesEveryListBeforeExecutingCommands()
     {
         using var source = GPU.CreateBuffer<float>([1, 3, 5, 7]);

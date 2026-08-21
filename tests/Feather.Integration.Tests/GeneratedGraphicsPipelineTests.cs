@@ -385,6 +385,97 @@ public class GeneratedGraphicsPipelineTests
     }
 
     [Fact]
+    public async Task ProfiledSubmissionCorrelatesGraphPassAndDrawHardwareIntervals()
+    {
+        using var vertices = GPU.CreateBuffer<float4>(
+        [
+            new float4(-1, -1, 0, 1),
+            new float4(1, -1, 0, 1),
+            new float4(0, 1, 0, 1)
+        ]);
+        using var target = GPU.CreateTexture2D<Rgba32, Rgba32>(8, 8, PixelFormat.Rgba8, TextureAccess.RenderTarget);
+        using var sampler = GPU.CreateSampler(SamplerDesc.NearestClamp);
+        using var pipeline = GPU.CreateGraphicsPipeline<GeneratedVertexShader, GeneratedFragmentShader, float4>(
+            new GraphicsPipelineDesc { DebugName = "TimestampedGraphicsDraw" });
+        target.Upload([.. Enumerable.Repeat(new Rgba32(10, 20, 30, 40), 64)]);
+
+        // Keep cold resource/pipeline materialization outside the profiled steady-state interval.
+        pipeline.Draw(
+            new GeneratedVertexShader(vertices.AsReadOnly()),
+            new GeneratedFragmentShader(sampler),
+            target,
+            vertexCount: 3,
+            wait: true);
+        var operationsBefore = GPU.Context.OperationCounters;
+
+        var submission = GPU.Queue.SubmitProfiled(
+            new GpuProfilingOptions(
+                IncludeCommandIntervals: true,
+                GraphCorrelationId: "frame:graphics",
+                GraphLabel: "Graphics frame"),
+            recorder =>
+            {
+                using (recorder.BeginPass("pass:raster", "Raster pass"))
+                {
+                    pipeline.Draw(
+                        new GeneratedVertexShader(vertices.AsReadOnly()),
+                        new GeneratedFragmentShader(sampler),
+                        target,
+                        vertexCount: 3,
+                        wait: true);
+                }
+                return "drawn";
+            });
+
+        Assert.Equal("drawn", submission.Result);
+        Assert.Equal(
+            operationsBefore.BlockingSubmissionWaitCalls,
+            GPU.Context.OperationCounters.BlockingSubmissionWaitCalls);
+        Assert.Collection(
+            submission.Intervals,
+            graph =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Graph, graph.Kind);
+                Assert.Equal("frame:graphics", graph.CorrelationId);
+                Assert.Null(graph.ParentIndex);
+            },
+            pass =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Pass, pass.Kind);
+                Assert.Equal("pass:raster", pass.CorrelationId);
+                Assert.Equal(0, pass.ParentIndex);
+            },
+            draw =>
+            {
+                Assert.Equal(GpuTimestampIntervalKind.Draw, draw.Kind);
+                Assert.Equal("command:0", draw.CorrelationId);
+                Assert.Equal(1, draw.ParentIndex);
+                Assert.Equal(0, draw.CommandOrdinal);
+            });
+
+        await using var fence = submission.Fence;
+        await fence.WaitAsync();
+        Assert.Equal(
+            operationsBefore.BlockingSubmissionWaitCalls,
+            GPU.Context.OperationCounters.BlockingSubmissionWaitCalls);
+
+        var elapsed = new ulong[fence.TimestampIntervalCount];
+        var available = fence.TryGetGpuTimestampIntervals(elapsed, out var intervalCount);
+        Assert.Equal(GPU.Context.DeviceInfo.SupportsTimestampQueries, available);
+        if (available)
+        {
+            Assert.Equal(3, intervalCount);
+            Assert.All(elapsed, value => Assert.True(value > 0));
+            Assert.True(elapsed[0] >= elapsed[1]);
+            Assert.True(elapsed[1] >= elapsed[2]);
+        }
+
+        var readback = new Rgba32[64];
+        target.Read(readback);
+        Assert.Contains(readback, pixel => pixel != new Rgba32(10, 20, 30, 40));
+    }
+
+    [Fact]
     public void GeneratedGraphicsPipelineDrawsToRgba32FloatTargetThroughEasyGpu()
     {
         using var vertices = GPU.CreateBuffer<float4>(

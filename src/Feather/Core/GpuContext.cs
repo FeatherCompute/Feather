@@ -12,6 +12,7 @@ public sealed class GpuContext : IDisposable
     private readonly List<WeakReference<ILoadedGraphicsShaderInspection>> graphicsPipelines = [];
     private readonly List<IDisposable> pendingSubmissions = [];
     private readonly List<WeakReference<ReadbackOperation>> readbackOperations = [];
+    private GpuTimestampRecorder? activeTimestampRecorder;
     private int activeOperations;
     private bool disposing;
     private bool disposed;
@@ -23,6 +24,26 @@ public sealed class GpuContext : IDisposable
 
     internal FeContextHandle Handle { get; }
     internal object QueueGate { get; } = new();
+
+    internal GpuTimestampRecorder? ActiveTimestampRecorder
+    {
+        get
+        {
+            if (!Monitor.IsEntered(QueueGate))
+            {
+                throw new InvalidOperationException("GPU timestamp recorder access requires the queue lock.");
+            }
+            return activeTimestampRecorder;
+        }
+        set
+        {
+            if (!Monitor.IsEntered(QueueGate))
+            {
+                throw new InvalidOperationException("GPU timestamp recorder access requires the queue lock.");
+            }
+            activeTimestampRecorder = value;
+        }
+    }
 
     internal bool IsDisposed
     {

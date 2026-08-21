@@ -326,11 +326,18 @@ FE_API FeResult fe_context_get_shader_cache_counters(FeContextHandle context, Fe
 FE_API FeResult fe_queue_submit(FeContextHandle context, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_begin_submission_timestamp(FeContextHandle context, uint32_t* out_query);
 FE_API FeResult fe_queue_submit_timestamped(FeContextHandle context, uint32_t query, FeFenceHandle* out_fence);
+FE_API FeResult fe_queue_begin_timestamp_interval(FeContextHandle context, uint32_t* out_interval);
+FE_API FeResult fe_queue_end_timestamp_interval(FeContextHandle context, uint32_t interval);
+FE_API FeResult fe_queue_submit_profiled(FeContextHandle context, const uint32_t* intervals,
+                                         size_t interval_count, FeFenceHandle* out_fence);
 FE_API FeResult fe_queue_memory_barrier(FeContextHandle context, uint32_t barrier_flags);
 FE_API FeResult fe_fence_is_complete(FeFenceHandle fence, bool* out_complete);
 FE_API FeResult fe_fence_wait(FeFenceHandle fence, uint64_t timeout_nanoseconds, bool* out_complete);
 FE_API FeResult fe_fence_try_get_timestamp(FeFenceHandle fence, bool* out_available,
                                            uint64_t* out_elapsed_nanoseconds);
+FE_API FeResult fe_fence_try_get_timestamp_intervals(FeFenceHandle fence, bool* out_available,
+                                                     uint64_t* out_elapsed_nanoseconds, size_t capacity,
+                                                     size_t* out_interval_count);
 FE_API FeResult fe_fence_destroy(FeFenceHandle fence);
 FE_API FeResult fe_get_last_error(char* buffer, size_t buffer_size, size_t* out_required_size);
 FE_API FeResult fe_runtime_flush_caches(void);

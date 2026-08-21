@@ -91,6 +91,7 @@ constexpr GPU::Backend::ShaderOptimizationLevel kShaderOptimizationLevel = FEATH
 constexpr bool kEnableFusedMultiplyAdd = kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Ultra ||
                                          kShaderOptimizationLevel == GPU::Backend::ShaderOptimizationLevel::Extreme;
 constexpr FeContextHandle kDefaultContext = 1;
+constexpr size_t kMaxTimestampIntervals = 256;
 constexpr uint8_t kIrOpcodeIf = 4;
 constexpr uint8_t kIrOpcodeBeginBlock = 13;
 constexpr uint8_t kIrOpcodeElse = 14;
@@ -245,6 +246,7 @@ struct SamplerState {
 
 struct FenceState {
     GPU::Backend::SubmissionHandle submission = GPU::Backend::INVALID_SUBMISSION_HANDLE;
+    size_t timestamp_interval_count = 0;
     std::mutex mutex;
     bool released = false;
 };
@@ -11381,6 +11383,87 @@ FE_API FeResult fe_queue_submit_timestamped(FeContextHandle context, uint32_t qu
 
         auto state = std::make_shared<FenceState>();
         state->submission = backend->SubmitTimestamped(query);
+        state->timestamp_interval_count = 1;
+
+        const auto handle = next_handle();
+        g_fences.emplace(handle, std::move(state));
+        *out_fence = handle;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_begin_timestamp_interval(FeContextHandle context, uint32_t* out_interval) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_interval == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_interval must not be null.");
+        }
+        *out_interval = 0;
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        *out_interval = backend->BeginTimestampInterval();
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_end_timestamp_interval(FeContextHandle context, uint32_t interval) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (interval == 0) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "A non-zero timestamp interval is required.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        backend->EndTimestampInterval(interval);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_queue_submit_profiled(FeContextHandle context, const uint32_t* intervals,
+                                         size_t interval_count, FeFenceHandle* out_fence) {
+    return protect([&] {
+        if (context != kDefaultContext) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
+        }
+        if (out_fence == nullptr || intervals == nullptr || interval_count == 0 ||
+            interval_count > kMaxTimestampIntervals) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "One to 256 timestamp intervals and an out_fence are required.");
+        }
+        *out_fence = 0;
+
+        std::vector<uint32_t> owned_intervals(intervals, intervals + interval_count);
+        std::unordered_set<uint32_t> unique_intervals;
+        unique_intervals.reserve(owned_intervals.size());
+        for (const auto interval : owned_intervals) {
+            if (interval == 0 || !unique_intervals.insert(interval).second) {
+                return fail(FE_ERROR_INVALID_ARGUMENT,
+                            "Profiled timestamp intervals must be unique and non-zero.");
+            }
+        }
+
+        std::lock_guard<std::mutex> registry_lock(g_mutex);
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+
+        auto state = std::make_shared<FenceState>();
+        state->submission = backend->SubmitProfiled(owned_intervals);
+        state->timestamp_interval_count = interval_count;
 
         const auto handle = next_handle();
         g_fences.emplace(handle, std::move(state));
@@ -11503,6 +11586,60 @@ FE_API FeResult fe_fence_try_get_timestamp(FeFenceHandle fence, bool* out_availa
         }
         *out_available = backend->TryGetSubmissionTimestamp(
             state->submission, *out_elapsed_nanoseconds);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_fence_try_get_timestamp_intervals(FeFenceHandle fence, bool* out_available,
+                                                     uint64_t* out_elapsed_nanoseconds, size_t capacity,
+                                                     size_t* out_interval_count) {
+    return protect([&] {
+        if (out_available == nullptr || out_interval_count == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Timestamp availability and interval-count outputs are required.");
+        }
+        *out_available = false;
+        *out_interval_count = 0;
+
+        std::shared_ptr<FenceState> state;
+        {
+            std::lock_guard<std::mutex> registry_lock(g_mutex);
+            const auto it = g_fences.find(fence);
+            if (it == g_fences.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid fence handle.");
+            }
+            state = it->second;
+        }
+
+        std::lock_guard<std::mutex> fence_lock(state->mutex);
+        if (state->released) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Fence handle has been destroyed.");
+        }
+        *out_interval_count = state->timestamp_interval_count;
+        if (state->timestamp_interval_count == 0) {
+            return ok();
+        }
+        if (out_elapsed_nanoseconds == nullptr || capacity < state->timestamp_interval_count) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Timestamp interval output capacity is smaller than the submission interval count.");
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        std::vector<uint64_t> elapsed_nanoseconds;
+        *out_available = backend->TryGetSubmissionTimestamps(state->submission, elapsed_nanoseconds);
+        if (!*out_available) {
+            return ok();
+        }
+        if (elapsed_nanoseconds.size() != state->timestamp_interval_count) {
+            *out_available = false;
+            return fail(FE_ERROR_UNKNOWN,
+                        "Backend timestamp interval count does not match the owning submission.");
+        }
+        std::copy(elapsed_nanoseconds.begin(), elapsed_nanoseconds.end(), out_elapsed_nanoseconds);
         return ok();
     });
 }

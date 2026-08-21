@@ -269,6 +269,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         using var operation = context.EnterOperation();
         lock (context.QueueGate)
         {
+            var effectiveWait = wait && context.ActiveTimestampRecorder is null;
             var leases = ExecuteDraw(
                 vertexShader,
                 fragmentShader,
@@ -278,8 +279,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                 FeBufferHandle.Null,
                 indexed: false,
                 drawDesc,
-                wait);
-            CompleteImmediateDraw(leases, wait);
+                effectiveWait);
+            CompleteImmediateDraw(leases, effectiveWait);
         }
     }
 
@@ -376,6 +377,7 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         using var operation = context.EnterOperation();
         lock (context.QueueGate)
         {
+            var effectiveWait = wait && context.ActiveTimestampRecorder is null;
             var leases = ExecuteDraw(
                 vertexShader,
                 fragmentShader,
@@ -385,8 +387,8 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                 indexBuffer,
                 indexed: true,
                 drawDesc,
-                wait);
-            CompleteImmediateDraw(leases, wait);
+                effectiveWait);
+            CompleteImmediateDraw(leases, effectiveWait);
         }
     }
 
@@ -533,7 +535,15 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                 drawDesc.FirstIndex,
                 drawDesc.VertexOffset,
                 drawDesc.FirstInstance);
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_draw_ex(Handle, in nativeDraw));
+            var recorder = context.ActiveTimestampRecorder;
+            using (recorder?.IncludeCommandIntervals == true
+                ? recorder.BeginCommand(
+                    GpuTimestampIntervalKind.Draw,
+                    Desc.DebugName ?? typeof(TVertexShader).Name + "+" + typeof(TFragmentShader).Name)
+                : null)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_graphics_pipeline_draw_ex(Handle, in nativeDraw));
+            }
         }
     }
 

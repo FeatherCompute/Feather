@@ -126,8 +126,9 @@ public sealed class GpuKernel : IDisposable
         using var operation = context.EnterOperation();
         lock (context.QueueGate)
         {
-            var leases = DispatchCore(context, gpuKernel, kernel, size, wait);
-            if (wait)
+            var effectiveWait = wait && context.ActiveTimestampRecorder is null;
+            var leases = DispatchCore(context, gpuKernel, kernel, size, effectiveWait);
+            if (effectiveWait)
             {
                 DisposeLeases(leases);
                 context.CompleteSubmittedWork();
@@ -173,15 +174,21 @@ public sealed class GpuKernel : IDisposable
             using var command = new GpuKernelCommand(gpuKernel.Handle);
             TKernel.Bind(in kernel, command);
             var groups = ComputeGroups(size, gpuKernel.Descriptor.ThreadGroupSize);
-            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_dispatch(
-                gpuKernel.Handle,
-                (uint)groups.X,
-                (uint)groups.Y,
-                (uint)groups.Z,
-                (uint)size.X,
-                (uint)size.Y,
-                (uint)size.Z,
-                wait));
+            var recorder = context.ActiveTimestampRecorder;
+            using (recorder?.IncludeCommandIntervals == true
+                ? recorder.BeginCommand(GpuTimestampIntervalKind.Dispatch, gpuKernel.Descriptor.DebugName)
+                : null)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_dispatch(
+                    gpuKernel.Handle,
+                    (uint)groups.X,
+                    (uint)groups.Y,
+                    (uint)groups.Z,
+                    (uint)size.X,
+                    (uint)size.Y,
+                    (uint)size.Z,
+                    wait));
+            }
             DispatchSubmittedForTesting?.Invoke();
             return command.DetachLeases();
         }

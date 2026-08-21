@@ -533,6 +533,8 @@ public sealed class GpuCommandList : IDisposable
 /// </summary>
 public sealed class GpuQueue
 {
+    public const string DefaultQueueId = "default";
+
     private readonly GpuContext context;
 
     internal GpuQueue(GpuContext context)
@@ -572,6 +574,122 @@ public sealed class GpuQueue
             snapshots[i] = Snapshot(commandList, nameof(commandLists));
         }
         return SubmitSnapshots(snapshots);
+    }
+
+    /// <summary>
+    /// Records a graph interval plus explicit pass scopes and optional automatic draw/dispatch
+    /// scopes, then submits every successful hardware interval behind one owning fence.
+    /// </summary>
+    public GpuProfiledSubmission<T> SubmitProfiled<T>(
+        GpuProfilingOptions options,
+        Func<GpuTimestampRecorder, T> record)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(record);
+        using var operation = context.EnterOperation();
+        lock (context.QueueGate)
+        {
+            if (context.ActiveTimestampRecorder is not null)
+            {
+                throw new InvalidOperationException("Profiled queue submissions cannot be nested.");
+            }
+
+            var leases = new List<IDisposable>();
+            FeFenceHandle? nativeFence = null;
+            GpuFence? managedFence = null;
+            var failureSubmissionReaping = false;
+            GpuTimestampRecorder? recorder = null;
+            try
+            {
+                recorder = new GpuTimestampRecorder(
+                    context,
+                    options,
+                    context.DeviceInfo.SupportsTimestampQueries);
+                context.ActiveTimestampRecorder = recorder;
+
+                T result = default!;
+                ExceptionDispatchInfo? recordingFailure = null;
+                try
+                {
+                    result = record(recorder);
+                }
+                catch (Exception exception)
+                {
+                    recordingFailure = ExceptionDispatchInfo.Capture(exception);
+                }
+                finally
+                {
+                    context.ActiveTimestampRecorder = null;
+                }
+
+                var (descriptors, nativeIntervals) = recorder.Seal();
+                if (nativeIntervals.Length == 0)
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit(
+                        context.Handle,
+                        out var submittedFence));
+                    nativeFence = submittedFence;
+                }
+                else
+                {
+                    unsafe
+                    {
+                        fixed (uint* intervalPointer = nativeIntervals)
+                        {
+                            NativeMethods.ThrowIfFailed(NativeMethods.fe_queue_submit_profiled(
+                                context.Handle,
+                                (IntPtr)intervalPointer,
+                                (UIntPtr)nativeIntervals.Length,
+                                out var submittedFence));
+                            nativeFence = submittedFence;
+                        }
+                    }
+                }
+
+                context.TransferSubmittedWorkTo(leases);
+                managedFence = new GpuFence(
+                    nativeFence ?? throw new InvalidOperationException("Native profiled submission returned no fence."),
+                    leases,
+                    nativeIntervals.Length);
+                nativeFence = null;
+                if (recordingFailure is not null)
+                {
+                    ReapFailedTimestampedSubmission(managedFence);
+                    managedFence = null;
+                    failureSubmissionReaping = true;
+                    recordingFailure.Throw();
+                }
+
+                return new GpuProfiledSubmission<T>(
+                    result,
+                    managedFence ?? throw new InvalidOperationException("Profiled submission returned no fence."),
+                    DefaultQueueId,
+                    descriptors);
+            }
+            catch when (failureSubmissionReaping)
+            {
+                throw;
+            }
+            catch
+            {
+                if (recorder is not null && ReferenceEquals(context.ActiveTimestampRecorder, recorder))
+                {
+                    context.ActiveTimestampRecorder = null;
+                }
+                try
+                {
+                    NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(context.Handle));
+                    context.CompleteSubmittedWork();
+                }
+                finally
+                {
+                    managedFence?.Dispose();
+                    nativeFence?.Dispose();
+                    DisposeLeases(leases);
+                }
+                throw;
+            }
+        }
     }
 
     /// <summary>
@@ -625,7 +743,8 @@ public sealed class GpuQueue
                 context.TransferSubmittedWorkTo(leases);
                 managedFence = new GpuFence(
                     nativeFence ?? throw new InvalidOperationException("Native timestamped submission returned no fence."),
-                    leases);
+                    leases,
+                    timestampQuery == 0 ? 0 : 1);
                 nativeFence = null;
                 if (recordingFailure is not null)
                 {
@@ -747,16 +866,19 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
 {
     private readonly object gate = new();
     private readonly FeFenceHandle handle;
+    private readonly int timestampIntervalCount;
     private List<IDisposable>? leases;
     private Task? asyncCompletionTask;
     private DisposeAttempt? disposeAttempt;
     private int completionState;
     private int disposeState;
 
-    internal GpuFence(FeFenceHandle handle, List<IDisposable> leases)
+    internal GpuFence(FeFenceHandle handle, List<IDisposable> leases, int timestampIntervalCount = 0)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(timestampIntervalCount);
         this.handle = handle;
         this.leases = leases;
+        this.timestampIntervalCount = timestampIntervalCount;
     }
 
     ~GpuFence()
@@ -779,6 +901,9 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
             }
         }
     }
+
+    /// <summary>Gets the number of hardware timestamp results owned by this fence.</summary>
+    public int TimestampIntervalCount => timestampIntervalCount;
 
     public bool IsCompleted
     {
@@ -838,6 +963,50 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
             MarkCompleted();
         }
         return available;
+    }
+
+    /// <summary>
+    /// Attempts to resolve every hardware timestamp interval owned by this submission without
+    /// waiting. Values use the recorder descriptor's <c>ResultIndex</c> ordering.
+    /// </summary>
+    public unsafe bool TryGetGpuTimestampIntervals(Span<ulong> elapsedNanoseconds, out int intervalCount)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposeState == 2, this);
+        }
+        intervalCount = timestampIntervalCount;
+        if (timestampIntervalCount == 0)
+        {
+            return false;
+        }
+        if (elapsedNanoseconds.Length < timestampIntervalCount)
+        {
+            throw new ArgumentException(
+                "The destination span is smaller than the fence's timestamp interval count.",
+                nameof(elapsedNanoseconds));
+        }
+
+        fixed (ulong* elapsedPointer = elapsedNanoseconds)
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_fence_try_get_timestamp_intervals(
+                handle,
+                out var available,
+                (IntPtr)elapsedPointer,
+                (UIntPtr)elapsedNanoseconds.Length,
+                out var nativeIntervalCount));
+            intervalCount = checked((int)nativeIntervalCount);
+            if (intervalCount != timestampIntervalCount)
+            {
+                throw new InvalidOperationException(
+                    "Native timestamp interval count does not match the owning managed fence.");
+            }
+            if (available)
+            {
+                MarkCompleted();
+            }
+            return available;
+        }
     }
 
     public void Wait() => _ = Wait(Timeout.InfiniteTimeSpan);
