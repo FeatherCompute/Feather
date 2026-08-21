@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Feather.Generators;
 using Feather.Generators.Model;
@@ -73,6 +74,70 @@ public class GeneratorAndAnalyzerTests
         Assert.Contains(module.Instructions, instruction => instruction.Opcode == FeatherIrInstructionOpcode.ResourceAccess
             && instruction.OperandKind == FeatherIrOperandKind.Symbol
             && instruction.Operand == "RESOURCE1|a|i");
+    }
+
+    [Fact]
+    public void GeneratorEmitsVersionedFeirSourceMapWithExactUtf16Spans()
+    {
+        const string sourceText = """
+            using Feather;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct AddKernel(ReadOnlyBuffer<float> a, ReadWriteBuffer<float> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    output[i] = a[i];
+                }
+            }
+            """;
+        var compilation = CreateCompilation(sourceText, sourcePath: "Shaders/AddKernel.cs");
+        var driver = CSharpGeneratorDriver.Create(new FeatherGenerator());
+
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        string generated = outputCompilation.SyntaxTrees.Single(tree =>
+            tree.FilePath.EndsWith("AddKernel.Feather.g.cs", StringComparison.Ordinal)).ToString();
+        byte[] feir = ExtractGeneratedIrBytes(generated);
+        using JsonDocument sourceMap = ExtractSourceMap(generated, "__feather_source_map");
+        JsonElement root = sourceMap.RootElement;
+
+        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal("Feather.FeirSourceMap", root.GetProperty("kind").GetString());
+        Assert.Equal("Shaders/AddKernel.cs", root.GetProperty("sourcePath").GetString());
+        Assert.Equal("Scratch.AddKernel", root.GetProperty("sourceType").GetString());
+        Assert.Equal("T:Scratch.AddKernel", root.GetProperty("sourceTypeIdentity").GetString());
+        Assert.Equal("M:Scratch.AddKernel.Execute", root.GetProperty("entryPoint").GetProperty("symbolIdentity").GetString());
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(feir)).ToLowerInvariant(),
+            root.GetProperty("feirSha256").GetString());
+
+        JsonElement[] instructions = root.GetProperty("instructions").EnumerateArray().ToArray();
+        Assert.NotEmpty(instructions);
+        Assert.Equal(Enumerable.Range(0, instructions.Length).Select(index => (uint)index),
+            instructions.Select(instruction => instruction.GetProperty("instructionIndex").GetUInt32()));
+        Assert.All(instructions, instruction =>
+        {
+            JsonElement span = instruction.GetProperty("span");
+            int start = span.GetProperty("start").GetInt32();
+            int length = span.GetProperty("length").GetInt32();
+            Assert.InRange(start, 0, sourceText.Length - 1);
+            Assert.InRange(length, 1, sourceText.Length - start);
+            Assert.False(string.IsNullOrWhiteSpace(sourceText.Substring(start, length)));
+        });
+        Assert.Contains(instructions, instruction =>
+        {
+            JsonElement span = instruction.GetProperty("span");
+            return sourceText.Substring(
+                    span.GetProperty("start").GetInt32(),
+                    span.GetProperty("length").GetInt32()) == "output[i] = a[i]";
+        });
     }
 
     [Fact]
@@ -311,6 +376,8 @@ public class GeneratorAndAnalyzerTests
         Assert.Contains("GraphicsPipelineDescriptor", source);
         Assert.Contains("private static readonly byte[] __feather_vertex_ir__TestVS_TestFS", source);
         Assert.Contains("private static readonly byte[] __feather_fragment_ir__TestVS_TestFS", source);
+        Assert.Contains("private const string __feather_vertex_source_map__TestVS_TestFS", source);
+        Assert.Contains("private const string __feather_fragment_source_map__TestVS_TestFS", source);
         Assert.Contains("private static readonly global::Feather.Interop.GraphicsPipelineDescriptor __feather_graphics_descriptor__TestVS_TestFS", source);
         Assert.DoesNotContain(".VertexIR => new byte[]", source);
         Assert.DoesNotContain(".FragmentIR => new byte[]", source);
@@ -322,6 +389,13 @@ public class GeneratorAndAnalyzerTests
         Assert.Contains("private readonly global::Feather.Resources.IGpuSamplerBinding", source);
         Assert.DoesNotContain("global::Feather.Native.FeBufferHandle", source);
         Assert.DoesNotContain("global::Feather.Native.FeSamplerHandle", source);
+
+        using var vertexMap = ExtractSourceMap(source, "__feather_vertex_source_map__TestVS_TestFS");
+        using var fragmentMap = ExtractSourceMap(source, "__feather_fragment_source_map__TestVS_TestFS");
+        Assert.Equal("VERTEX", vertexMap.RootElement.GetProperty("stage").GetString());
+        Assert.Equal("Scratch.TestVS", vertexMap.RootElement.GetProperty("sourceType").GetString());
+        Assert.Equal("FRAGMENT", fragmentMap.RootElement.GetProperty("stage").GetString());
+        Assert.Equal("Scratch.TestFS", fragmentMap.RootElement.GetProperty("sourceType").GetString());
     }
 
     [Fact]
@@ -6868,6 +6942,16 @@ public class GeneratorAndAnalyzerTests
         return irInitializer.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(value => Convert.ToByte(value[2..], 16))
             .ToArray();
+    }
+
+    private static JsonDocument ExtractSourceMap(string source, string fieldName)
+    {
+        var root = CSharpSyntaxTree.ParseText(source).GetCompilationUnitRoot();
+        var variable = root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(item => item.Identifier.ValueText == fieldName);
+        var literal = Assert.IsType<LiteralExpressionSyntax>(variable.Initializer?.Value);
+        byte[] bytes = Convert.FromBase64String(literal.Token.ValueText);
+        return JsonDocument.Parse(bytes);
     }
 
     private static byte[] ExtractTypedIrBytes(string source)

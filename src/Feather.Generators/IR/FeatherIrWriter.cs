@@ -35,6 +35,9 @@ internal static class FeatherIrWriter
     ];
 
     public static byte[] WriteModule(ShaderModel model)
+        => EmitModule(model).Module;
+
+    public static FeatherIrEmission EmitModule(ShaderModel model)
     {
         var strings = new StringTable();
         var kernelName = strings.Add(model.Name);
@@ -110,7 +113,13 @@ internal static class FeatherIrWriter
         }
 
         writer.Write(stringBytes);
-        return stream.ToArray();
+        var module = stream.ToArray();
+        return new FeatherIrEmission(
+            module,
+            instructions.Select(static (instruction, index) => new FeatherIrInstructionOrigin(
+                checked((uint)index),
+                instruction.SyntaxStart,
+                instruction.SyntaxLength)).ToArray());
     }
 
     public static string ToCSharpByteArray(byte[] bytes)
@@ -978,7 +987,13 @@ internal static class FeatherIrWriter
     }
 
     private static SerializedInstruction CreateInstruction(IrInstructionOpcode opcode, IrOperandKind operandKind, SyntaxNodeOrToken operand, StringTable strings)
-        => new((byte)opcode, (byte)operandKind, 0, strings.Add(NormalizeSource(operand)), operand.SpanStart);
+        => new(
+            (byte)opcode,
+            (byte)operandKind,
+            0,
+            strings.Add(NormalizeSource(operand)),
+            operand.SpanStart,
+            operand.Span.Length);
 
     private static SerializedInstruction CreateAssignmentInstruction(
         AssignmentExpressionSyntax assignment,
@@ -994,7 +1009,13 @@ internal static class FeatherIrWriter
             ? FormatElementwiseAssignmentPayload(lowered.ElementwiseAssignment)
             : NormalizeSource(assignment);
         var operandKind = hasLoweredAssignment ? IrOperandKind.ElementwiseAssignment : IrOperandKind.Source;
-        return new SerializedInstruction((byte)IrInstructionOpcode.Assignment, (byte)operandKind, 0, strings.Add(payload), assignment.SpanStart);
+        return new SerializedInstruction(
+            (byte)IrInstructionOpcode.Assignment,
+            (byte)operandKind,
+            0,
+            strings.Add(payload),
+            assignment.SpanStart,
+            assignment.Span.Length);
     }
 
     private static SerializedInstruction CreateInvocationInstruction(
@@ -1004,7 +1025,13 @@ internal static class FeatherIrWriter
     {
         if (TryGetLoweredInstruction(loweredInstructions, invocation.SpanStart, LoweredShaderInstructionKind.KnownSymbolInvocation, out var lowered))
         {
-            return new SerializedInstruction((byte)IrInstructionOpcode.Invocation, (byte)IrOperandKind.Symbol, 0, strings.Add(lowered.Payload), invocation.SpanStart);
+            return new SerializedInstruction(
+                (byte)IrInstructionOpcode.Invocation,
+                (byte)IrOperandKind.Symbol,
+                0,
+                strings.Add(lowered.Payload),
+                invocation.SpanStart,
+                invocation.Span.Length);
         }
 
         return CreateInstruction(IrInstructionOpcode.Invocation, IrOperandKind.Source, invocation.Expression, strings);
@@ -1017,7 +1044,13 @@ internal static class FeatherIrWriter
     {
         if (TryGetLoweredInstruction(loweredInstructions, elementAccess.SpanStart, LoweredShaderInstructionKind.ResourceAccess, out var lowered))
         {
-            return new SerializedInstruction((byte)IrInstructionOpcode.ResourceAccess, (byte)IrOperandKind.Symbol, 0, strings.Add(lowered.Payload), elementAccess.SpanStart);
+            return new SerializedInstruction(
+                (byte)IrInstructionOpcode.ResourceAccess,
+                (byte)IrOperandKind.Symbol,
+                0,
+                strings.Add(lowered.Payload),
+                elementAccess.SpanStart,
+                elementAccess.Span.Length);
         }
 
         return CreateInstruction(IrInstructionOpcode.ResourceAccess, IrOperandKind.Source, elementAccess.Expression, strings);
@@ -1056,7 +1089,13 @@ internal static class FeatherIrWriter
         {
             // Intrinsic opcodes are keyed by Roslyn symbols. This keeps lowering stable across aliases,
             // using-static imports, and other source spellings that refer to the same shader marker method.
-            instruction = new SerializedInstruction((byte)opcode, (byte)IrOperandKind.Symbol, 0, strings.Add(lowered.Payload), invocation.SpanStart);
+            instruction = new SerializedInstruction(
+                (byte)opcode,
+                (byte)IrOperandKind.Symbol,
+                0,
+                strings.Add(lowered.Payload),
+                invocation.SpanStart,
+                invocation.Span.Length);
             return true;
         }
 
@@ -1151,7 +1190,13 @@ internal static class FeatherIrWriter
 
     private readonly record struct SerializedResource(uint Binding, byte Kind, byte Access, uint NameStringId, uint ElementTypeStringId);
 
-    private readonly record struct SerializedInstruction(byte Opcode, byte OperandKind, ushort Reserved, uint OperandStringId, int SyntaxStart);
+    private readonly record struct SerializedInstruction(
+        byte Opcode,
+        byte OperandKind,
+        ushort Reserved,
+        uint OperandStringId,
+        int SyntaxStart,
+        int SyntaxLength);
 
     private readonly record struct SerializedElementwiseAssignment(
         uint InstructionIndex,
