@@ -1371,22 +1371,46 @@ public class GeneratedComputeDispatchTests
         try
         {
             GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
-            using var left = GPU.CreateBuffer<float3>([
+            var leftValues = new[]
+            {
                 new float3(-2.0f, 0.25f, 4.0f),
                 new float3(0.2f, -4.0f, 0.8f)
-            ]);
-            using var right = GPU.CreateBuffer<float3>([
+            };
+            var rightValues = new[]
+            {
                 new float3(0.0f, 2.0f, 0.5f),
                 new float3(1.0f, 0.0f, 0.3f)
-            ]);
+            };
+            var expected = leftValues.Zip(rightValues, static (leftValue, rightValue) =>
+            {
+                var x = leftValue * 0.25f;
+                var trigonometric = ShaderMath.Sin(x) + ShaderMath.Cos(x) + ShaderMath.Tan(x);
+                var hyperbolic = ShaderMath.Sinh(x) + ShaderMath.Cosh(x) + ShaderMath.Tanh(x);
+                var exponential = ShaderMath.Log(ShaderMath.Exp(ShaderMath.Abs(x) + new float3(0.5f)));
+                var roots = ShaderMath.Sqrt(ShaderMath.Abs(rightValue) + new float3(1.0f));
+                var powers = ShaderMath.Pow(roots, new float3(2.0f));
+                var inverseRoots = ShaderMath.Min(ShaderMath.InverseSqrt(powers), 1.0f);
+                var smooth = ShaderMath.Smoothstep(
+                    0.0f,
+                    1.0f,
+                    ShaderMath.Min(ShaderMath.Abs(trigonometric + hyperbolic + exponential), 1.0f));
+                return ShaderMath.Mix(smooth, inverseRoots, new float3(0.25f, 0.5f, 0.75f));
+            }).ToArray();
+
+            using var left = GPU.CreateBuffer<float3>(leftValues);
+            using var right = GPU.CreateBuffer<float3>(rightValues);
             using var output = GPU.CreateBuffer<float3>(2);
 
             GPU.Dispatch(new VectorMathIntrinsicOverloadKernel(left.AsReadOnly(), right.AsReadOnly(), output.AsReadWrite()), 2);
 
-            Assert.Equal([
-                new float3(0.0f, 1.125f, 0.5f),
-                new float3(0.6f, 0.0f, 0.3f)
-            ], output.ToArray());
+            var actual = output.ToArray();
+            for (var index = 0; index < expected.Length; index++)
+            {
+                AssertNear(
+                    [expected[index].X, expected[index].Y, expected[index].Z],
+                    [actual[index].X, actual[index].Y, actual[index].Z],
+                    5e-5f);
+            }
         }
         finally
         {
@@ -4956,10 +4980,18 @@ public readonly partial struct VectorMathIntrinsicOverloadKernel(ReadOnlyBuffer<
     public void Execute()
     {
         int i = ThreadIds.X;
-        float3 a = ShaderMath.Abs(left[i]);
-        float3 b = ShaderMath.Min(a, right[i]);
-        float3 c = ShaderMath.Clamp(b, 0.0f, 1.0f);
-        output[i] = ShaderMath.Mix(c, right[i], 0.5f);
+        float3 x = left[i] * 0.25f;
+        float3 trigonometric = ShaderMath.Sin(x) + ShaderMath.Cos(x) + ShaderMath.Tan(x);
+        float3 hyperbolic = ShaderMath.Sinh(x) + ShaderMath.Cosh(x) + ShaderMath.Tanh(x);
+        float3 exponential = ShaderMath.Log(ShaderMath.Exp(ShaderMath.Abs(x) + new float3(0.5f)));
+        float3 roots = ShaderMath.Sqrt(ShaderMath.Abs(right[i]) + new float3(1.0f));
+        float3 powers = ShaderMath.Pow(roots, new float3(2.0f));
+        float3 inverseRoots = ShaderMath.Min(ShaderMath.InverseSqrt(powers), 1.0f);
+        float3 smooth = ShaderMath.Smoothstep(
+            0.0f,
+            1.0f,
+            ShaderMath.Min(ShaderMath.Abs(trigonometric + hyperbolic + exponential), 1.0f));
+        output[i] = ShaderMath.Mix(smooth, inverseRoots, new float3(0.25f, 0.5f, 0.75f));
     }
 }
 

@@ -522,8 +522,8 @@ internal static class ShaderElementwiseExpressionLowerer
 
         return method.Name switch
         {
-            "Sin" or "Cos" or "Tan" or "Exp" or "Log" or "Sqrt" or "InverseSqrt"
-                => ShaderSemanticFacts.HasFloatSignature(method, 1),
+            "Sin" or "Cos" or "Tan" or "Sinh" or "Cosh" or "Tanh" or
+            "Exp" or "Log" or "Sqrt" or "InverseSqrt" or
             "Abs" or "Floor" or "Ceil" or "Round" or "Fract" or "Saturate"
                 => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorUnarySignature(method),
             "Length" => method.Parameters.Length == 1 && method.ReturnType.SpecialType == SpecialType.System_Single
@@ -531,11 +531,11 @@ internal static class ShaderElementwiseExpressionLowerer
             "Normalize" => method.Parameters.Length == 1
                 && ShaderSemanticFacts.IsFeatherVectorType(method.ReturnType)
                 && ShaderSemanticFacts.IsFeatherVectorType(method.Parameters[0].Type),
-            "Pow" => ShaderSemanticFacts.HasFloatSignature(method, 2),
+            "Pow" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),
             "Min" or "Max" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),
             "Clamp" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorClampSignature(method),
             "Lerp" or "Mix" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorLerpSignature(method),
-            "Smoothstep" => ShaderSemanticFacts.HasFloatSignature(method, 3),
+            "Smoothstep" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorSmoothstepSignature(method),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(method),
             "Cross" => ShaderSemanticFacts.HasFloat3CrossSignature(method),
             "Reflect" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),

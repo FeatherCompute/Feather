@@ -2935,6 +2935,15 @@ private:
         if (symbol == "global::Feather.Math.ShaderMath.Tan" || symbol == "global::Feather.Math.Hlsl.Tan") {
             return "tan";
         }
+        if (symbol == "global::Feather.Math.ShaderMath.Sinh" || symbol == "global::Feather.Math.Hlsl.Sinh") {
+            return "sinh";
+        }
+        if (symbol == "global::Feather.Math.ShaderMath.Cosh" || symbol == "global::Feather.Math.Hlsl.Cosh") {
+            return "cosh";
+        }
+        if (symbol == "global::Feather.Math.ShaderMath.Tanh" || symbol == "global::Feather.Math.Hlsl.Tanh") {
+            return "tanh";
+        }
         if (symbol == "global::Feather.Math.ShaderMath.Exp" || symbol == "global::Feather.Math.Hlsl.Exp") {
             return "exp";
         }

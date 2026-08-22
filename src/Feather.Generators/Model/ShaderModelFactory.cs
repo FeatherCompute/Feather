@@ -1094,8 +1094,8 @@ internal static class ShaderModelFactory
     private static bool IsSupportedElementwiseMathIntrinsic(IMethodSymbol symbol)
         => symbol.Name switch
         {
-            "Sin" or "Cos" or "Tan" or "Exp" or "Log" or "Sqrt" or "InverseSqrt"
-                => ShaderSemanticFacts.HasFloatSignature(symbol, 1),
+            "Sin" or "Cos" or "Tan" or "Sinh" or "Cosh" or "Tanh" or
+            "Exp" or "Log" or "Sqrt" or "InverseSqrt" or
             "Abs" or "Floor" or "Ceil" or "Round" or "Fract" or "Saturate"
                 => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorUnarySignature(symbol),
             "Length" => symbol.Parameters.Length == 1 && symbol.ReturnType.SpecialType == SpecialType.System_Single
@@ -1103,11 +1103,11 @@ internal static class ShaderModelFactory
             "Normalize" => symbol.Parameters.Length == 1
                 && ShaderSemanticFacts.IsFeatherVectorType(symbol.ReturnType)
                 && ShaderSemanticFacts.IsFeatherVectorType(symbol.Parameters[0].Type),
-            "Pow" => ShaderSemanticFacts.HasFloatSignature(symbol, 2),
+            "Pow" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),
             "Min" or "Max" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),
             "Clamp" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorClampSignature(symbol),
             "Lerp" or "Mix" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorLerpSignature(symbol),
-            "Smoothstep" => ShaderSemanticFacts.HasFloatSignature(symbol, 3),
+            "Smoothstep" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorSmoothstepSignature(symbol),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(symbol),
             "Cross" => ShaderSemanticFacts.HasFloat3CrossSignature(symbol),
             "Reflect" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),

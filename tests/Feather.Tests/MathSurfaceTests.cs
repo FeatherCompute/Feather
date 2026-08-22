@@ -151,6 +151,110 @@ public class MathSurfaceTests
         Assert.Equal(new float2(1, 2), ShaderMath.Clamp(new float2(-1, 3), new float2(1, 1), new float2(2, 2)));
     }
 
+    [Fact]
+    public void ShaderMathExposesComponentwiseOverloadsForEveryFloatVectorWidth()
+    {
+        var vectorTypes = new[] { typeof(float2), typeof(float3), typeof(float4) };
+        var unaryFunctions = new[]
+        {
+            nameof(ShaderMath.Sin),
+            nameof(ShaderMath.Cos),
+            nameof(ShaderMath.Tan),
+            nameof(ShaderMath.Sinh),
+            nameof(ShaderMath.Cosh),
+            nameof(ShaderMath.Tanh),
+            nameof(ShaderMath.Exp),
+            nameof(ShaderMath.Log),
+            nameof(ShaderMath.Sqrt),
+            nameof(ShaderMath.InverseSqrt),
+            nameof(ShaderMath.Abs),
+            nameof(ShaderMath.Floor),
+            nameof(ShaderMath.Ceil),
+            nameof(ShaderMath.Round),
+            nameof(ShaderMath.Fract),
+            nameof(ShaderMath.Saturate)
+        };
+        var hlslUnaryAliases = new[]
+        {
+            nameof(Hlsl.Sin),
+            nameof(Hlsl.Cos),
+            nameof(Hlsl.Tan),
+            nameof(Hlsl.Exp),
+            nameof(Hlsl.Log),
+            nameof(Hlsl.Sqrt),
+            nameof(Hlsl.Abs),
+            nameof(Hlsl.Floor),
+            nameof(Hlsl.Ceil),
+            nameof(Hlsl.Fract)
+        };
+
+        foreach (var vectorType in vectorTypes)
+        {
+            foreach (var function in unaryFunctions)
+            {
+                AssertVectorOverload(typeof(ShaderMath), function, vectorType, vectorType);
+            }
+
+            foreach (var function in hlslUnaryAliases)
+            {
+                AssertVectorOverload(typeof(Hlsl), function, vectorType, vectorType);
+            }
+
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Pow), vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Min), vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Max), vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Clamp), vectorType, vectorType, typeof(float), typeof(float));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Clamp), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Lerp), vectorType, vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Lerp), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Mix), vectorType, vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Mix), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Smoothstep), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Smoothstep), vectorType, typeof(float), typeof(float), vectorType);
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Pow), vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Clamp), vectorType, vectorType, typeof(float), typeof(float));
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Clamp), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Lerp), vectorType, vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Lerp), vectorType, vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Mix), vectorType, vectorType, vectorType, typeof(float));
+            AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Mix), vectorType, vectorType, vectorType, vectorType);
+        }
+
+        AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Reflect), typeof(float4), typeof(float4), typeof(float4));
+    }
+
+    [Fact]
+    public void ShaderMathVectorIntrinsicsEvaluateComponentwise()
+    {
+        var x = new float3(0.25f, 0.5f, 1.0f);
+
+        Assert.Equal(new float3(MathF.Sin(x.X), MathF.Sin(x.Y), MathF.Sin(x.Z)), ShaderMath.Sin(x));
+        Assert.Equal(new float3(MathF.Cos(x.X), MathF.Cos(x.Y), MathF.Cos(x.Z)), ShaderMath.Cos(x));
+        Assert.Equal(new float3(MathF.Tan(x.X), MathF.Tan(x.Y), MathF.Tan(x.Z)), ShaderMath.Tan(x));
+        Assert.Equal(new float3(MathF.Sinh(x.X), MathF.Sinh(x.Y), MathF.Sinh(x.Z)), ShaderMath.Sinh(x));
+        Assert.Equal(new float3(MathF.Cosh(x.X), MathF.Cosh(x.Y), MathF.Cosh(x.Z)), ShaderMath.Cosh(x));
+        Assert.Equal(new float3(MathF.Tanh(x.X), MathF.Tanh(x.Y), MathF.Tanh(x.Z)), ShaderMath.Tanh(x));
+        Assert.Equal(new float3(MathF.Exp(x.X), MathF.Exp(x.Y), MathF.Exp(x.Z)), ShaderMath.Exp(x));
+        Assert.Equal(new float3(MathF.Log(x.X), MathF.Log(x.Y), MathF.Log(x.Z)), ShaderMath.Log(x));
+        Assert.Equal(new float3(0.5f, 1.0f, 3.0f), ShaderMath.Sqrt(new float3(0.25f, 1.0f, 9.0f)));
+        Assert.Equal(new float3(2.0f, 1.0f, 1.0f / 3.0f), ShaderMath.InverseSqrt(new float3(0.25f, 1.0f, 9.0f)));
+        Assert.Equal(new float3(4.0f, 9.0f, 8.0f), ShaderMath.Pow(new float3(2.0f, 3.0f, 2.0f), new float3(2.0f, 2.0f, 3.0f)));
+        Assert.Equal(new float3(0.25f, 0.5f, 0.75f), ShaderMath.Mix(float3.Zero, float3.One, new float3(0.25f, 0.5f, 0.75f)));
+        Assert.Equal(new float3(0.0f, 0.5f, 1.0f), ShaderMath.Smoothstep(0.0f, 1.0f, new float3(0.0f, 0.5f, 1.0f)));
+        Assert.Equal(new float3(0.0f, 0.5f, 1.0f), ShaderMath.Smoothstep(float3.Zero, new float3(2.0f), new float3(0.0f, 1.0f, 2.0f)));
+        Assert.Equal(new float3(0.25f, 0.5f, 0.5f), ShaderMath.Min(x, 0.5f));
+        Assert.Equal(new float3(0.5f, 0.5f, 1.0f), ShaderMath.Max(x, 0.5f));
+        Assert.Equal(new float4(1.0f, -1.0f, 0.0f, 0.0f), ShaderMath.Reflect(new float4(1.0f, 1.0f, 0.0f, 0.0f), new float4(0.0f, 1.0f, 0.0f, 0.0f)));
+        Assert.Equal(ShaderMath.Cos(x), Hlsl.Cos(x));
+    }
+
+    private static void AssertVectorOverload(Type declaringType, string name, Type returnType, params Type[] parameterTypes)
+    {
+        var method = declaringType.GetMethod(name, BindingFlags.Public | BindingFlags.Static, parameterTypes);
+        Assert.NotNull(method);
+        Assert.Equal(returnType, method!.ReturnType);
+    }
+
     private static void AssertMatrixNear(float2x2 expected, float2x2 actual)
     {
         AssertNear(expected.M00, actual.M00);

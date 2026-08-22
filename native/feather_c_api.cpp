@@ -2874,6 +2874,15 @@ std::string easygpu_intrinsic_name(const std::string& symbol) {
     if (symbol == "global::Feather.Math.ShaderMath.Tan" || symbol == "global::Feather.Math.Hlsl.Tan") {
         return "tan";
     }
+    if (symbol == "global::Feather.Math.ShaderMath.Sinh" || symbol == "global::Feather.Math.Hlsl.Sinh") {
+        return "sinh";
+    }
+    if (symbol == "global::Feather.Math.ShaderMath.Cosh" || symbol == "global::Feather.Math.Hlsl.Cosh") {
+        return "cosh";
+    }
+    if (symbol == "global::Feather.Math.ShaderMath.Tanh" || symbol == "global::Feather.Math.Hlsl.Tanh") {
+        return "tanh";
+    }
     if (symbol == "global::Feather.Math.ShaderMath.Exp" || symbol == "global::Feather.Math.Hlsl.Exp") {
         return "exp";
     }
@@ -3167,6 +3176,15 @@ double apply_intrinsic_operation(const std::string& symbol, const std::vector<do
         }
         if (symbol == "global::Feather.Math.ShaderMath.Tan" || symbol == "global::Feather.Math.Hlsl.Tan") {
             return std::tan(x);
+        }
+        if (symbol == "global::Feather.Math.ShaderMath.Sinh" || symbol == "global::Feather.Math.Hlsl.Sinh") {
+            return std::sinh(x);
+        }
+        if (symbol == "global::Feather.Math.ShaderMath.Cosh" || symbol == "global::Feather.Math.Hlsl.Cosh") {
+            return std::cosh(x);
+        }
+        if (symbol == "global::Feather.Math.ShaderMath.Tanh" || symbol == "global::Feather.Math.Hlsl.Tanh") {
+            return std::tanh(x);
         }
         if (symbol == "global::Feather.Math.ShaderMath.Exp" || symbol == "global::Feather.Math.Hlsl.Exp") {
             return std::exp(x);

@@ -3839,10 +3839,29 @@ public class GeneratorAndAnalyzerTests
                 public void Execute()
                 {
                     int i = ThreadIds.X;
-                    float3 a = ShaderMath.Abs(left[i]);
-                    float3 b = ShaderMath.Min(a, right[i]);
-                    float3 c = ShaderMath.Clamp(b, 0.0f, 1.0f);
-                    output[i] = ShaderMath.Mix(c, right[i], 0.5f);
+                    output[i] = ShaderMath.Sin(left[i]);
+                    output[i] = ShaderMath.Cos(left[i]);
+                    output[i] = ShaderMath.Tan(left[i]);
+                    output[i] = ShaderMath.Sinh(left[i]);
+                    output[i] = ShaderMath.Cosh(left[i]);
+                    output[i] = ShaderMath.Tanh(left[i]);
+                    output[i] = ShaderMath.Exp(left[i]);
+                    output[i] = ShaderMath.Log(ShaderMath.Abs(left[i]) + new float3(1.0f));
+                    output[i] = ShaderMath.Sqrt(ShaderMath.Abs(left[i]));
+                    output[i] = ShaderMath.InverseSqrt(ShaderMath.Abs(left[i]) + new float3(1.0f));
+                    output[i] = ShaderMath.Pow(ShaderMath.Abs(left[i]) + new float3(1.0f), new float3(2.0f));
+                    output[i] = ShaderMath.Min(left[i], 1.0f);
+                    output[i] = ShaderMath.Smoothstep(0.0f, 1.0f, left[i]);
+                    output[i] = ShaderMath.Mix(left[i], right[i], new float3(0.25f, 0.5f, 0.75f));
+                    float3 x = left[i] * 0.25f;
+                    float3 trigonometric = ShaderMath.Sin(x) + ShaderMath.Cos(x) + ShaderMath.Tan(x);
+                    float3 hyperbolic = ShaderMath.Sinh(x) + ShaderMath.Cosh(x) + ShaderMath.Tanh(x);
+                    float3 exponential = ShaderMath.Log(ShaderMath.Exp(ShaderMath.Abs(x) + new float3(0.5f)));
+                    float3 roots = ShaderMath.Sqrt(ShaderMath.Abs(right[i]) + new float3(1.0f));
+                    float3 powers = ShaderMath.Pow(roots, new float3(2.0f));
+                    float3 inverseRoots = ShaderMath.Min(ShaderMath.InverseSqrt(powers), 1.0f);
+                    float3 smooth = ShaderMath.Smoothstep(0.0f, 1.0f, ShaderMath.Min(ShaderMath.Abs(trigonometric + hyperbolic + exponential), 1.0f));
+                    output[i] = ShaderMath.Mix(smooth, inverseRoots, new float3(0.25f, 0.5f, 0.75f));
                 }
             }
             """);
@@ -3896,13 +3915,13 @@ public class GeneratorAndAnalyzerTests
                 public void Execute()
                 {
                     int i = ThreadIds.X;
-                    output[i] = new float3(ShaderMath.Tanh(left[i].X));
+                    output[i] = ShaderMath.Ddx(left[i]);
                 }
             }
             """);
 
         var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "FE0026");
-        Assert.Contains("global::Feather.Math.ShaderMath.Tanh", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("global::Feather.Math.ShaderMath.Ddx", diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5027,10 +5046,15 @@ public class GeneratorAndAnalyzerTests
                 public void Execute()
                 {
                     int i = ThreadIds.X;
-                    float3 a = ShaderMath.Abs(left[i]);
-                    float3 b = ShaderMath.Min(a, right[i]);
-                    float3 c = ShaderMath.Clamp(b, 0.0f, 1.0f);
-                    output[i] = ShaderMath.Mix(c, right[i], 0.5f);
+                    float3 x = left[i] * 0.25f;
+                    float3 trigonometric = ShaderMath.Sin(x) + ShaderMath.Cos(x) + ShaderMath.Tan(x);
+                    float3 hyperbolic = ShaderMath.Sinh(x) + ShaderMath.Cosh(x) + ShaderMath.Tanh(x);
+                    float3 exponential = ShaderMath.Log(ShaderMath.Exp(ShaderMath.Abs(x) + new float3(0.5f)));
+                    float3 roots = ShaderMath.Sqrt(ShaderMath.Abs(right[i]) + new float3(1.0f));
+                    float3 powers = ShaderMath.Pow(roots, new float3(2.0f));
+                    float3 inverseRoots = ShaderMath.Min(ShaderMath.InverseSqrt(powers), 1.0f);
+                    float3 smooth = ShaderMath.Smoothstep(0.0f, 1.0f, ShaderMath.Min(ShaderMath.Abs(trigonometric + hyperbolic + exponential), 1.0f));
+                    output[i] = ShaderMath.Mix(smooth, inverseRoots, new float3(0.25f, 0.5f, 0.75f));
                 }
             }
             """);
@@ -5041,9 +5065,20 @@ public class GeneratorAndAnalyzerTests
             .Select(expression => section.Strings[(int)expression.NameId])
             .ToArray();
 
+        Assert.Contains("global::Feather.Math.ShaderMath.Sin", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Cos", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Tan", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Sinh", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Cosh", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Tanh", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Exp", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Log", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Sqrt", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Pow", intrinsicNames);
         Assert.Contains("global::Feather.Math.ShaderMath.Abs", intrinsicNames);
         Assert.Contains("global::Feather.Math.ShaderMath.Min", intrinsicNames);
-        Assert.Contains("global::Feather.Math.ShaderMath.Clamp", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.InverseSqrt", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Smoothstep", intrinsicNames);
         Assert.Contains("global::Feather.Math.ShaderMath.Mix", intrinsicNames);
         Assert.All(section.Expressions.Where(expression => expression.Kind == 13), expression =>
         {

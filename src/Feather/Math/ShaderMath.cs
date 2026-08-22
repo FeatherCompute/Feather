@@ -41,6 +41,17 @@ public static class ShaderMath
             incident.Z - scale * normal.Z);
     }
 
+    /// <inheritdoc cref="Reflect(float2, float2)"/>
+    public static float4 Reflect(float4 incident, float4 normal)
+    {
+        var scale = 2.0f * Dot(incident, normal);
+        return new float4(
+            incident.X - scale * normal.X,
+            incident.Y - scale * normal.Y,
+            incident.Z - scale * normal.Z,
+            incident.W - scale * normal.W);
+    }
+
     public static float3 Cross(float3 a, float3 b)
         => new(
             (a.Y * b.Z) - (a.Z * b.Y),
@@ -109,55 +120,154 @@ public static class ShaderMath
     /// </summary>
     public static float Sin(float x) => MathF.Sin(x);
 
+    /// <summary>Computes the sine of each component.</summary>
+    public static float2 Sin(float2 x) => new(Sin(x.X), Sin(x.Y));
+
+    /// <summary>Computes the sine of each component.</summary>
+    public static float3 Sin(float3 x) => new(Sin(x.X), Sin(x.Y), Sin(x.Z));
+
+    /// <summary>Computes the sine of each component.</summary>
+    public static float4 Sin(float4 x) => new(Sin(x.X), Sin(x.Y), Sin(x.Z), Sin(x.W));
+
     /// <summary>
     /// Computes the cosine of a scalar.
     /// </summary>
     public static float Cos(float x) => MathF.Cos(x);
+
+    /// <summary>Computes the cosine of each component.</summary>
+    public static float2 Cos(float2 x) => new(Cos(x.X), Cos(x.Y));
+
+    /// <summary>Computes the cosine of each component.</summary>
+    public static float3 Cos(float3 x) => new(Cos(x.X), Cos(x.Y), Cos(x.Z));
+
+    /// <summary>Computes the cosine of each component.</summary>
+    public static float4 Cos(float4 x) => new(Cos(x.X), Cos(x.Y), Cos(x.Z), Cos(x.W));
 
     /// <summary>
     /// Computes the tangent of a scalar.
     /// </summary>
     public static float Tan(float x) => MathF.Tan(x);
 
+    /// <summary>Computes the tangent of each component.</summary>
+    public static float2 Tan(float2 x) => new(Tan(x.X), Tan(x.Y));
+
+    /// <summary>Computes the tangent of each component.</summary>
+    public static float3 Tan(float3 x) => new(Tan(x.X), Tan(x.Y), Tan(x.Z));
+
+    /// <summary>Computes the tangent of each component.</summary>
+    public static float4 Tan(float4 x) => new(Tan(x.X), Tan(x.Y), Tan(x.Z), Tan(x.W));
+
     /// <summary>
     /// Computes the hyperbolic sine of a scalar.
     /// </summary>
     public static float Sinh(float x) => MathF.Sinh(x);
+
+    /// <summary>Computes the hyperbolic sine of each component.</summary>
+    public static float2 Sinh(float2 x) => new(Sinh(x.X), Sinh(x.Y));
+
+    /// <summary>Computes the hyperbolic sine of each component.</summary>
+    public static float3 Sinh(float3 x) => new(Sinh(x.X), Sinh(x.Y), Sinh(x.Z));
+
+    /// <summary>Computes the hyperbolic sine of each component.</summary>
+    public static float4 Sinh(float4 x) => new(Sinh(x.X), Sinh(x.Y), Sinh(x.Z), Sinh(x.W));
 
     /// <summary>
     /// Computes the hyperbolic cosine of a scalar.
     /// </summary>
     public static float Cosh(float x) => MathF.Cosh(x);
 
+    /// <summary>Computes the hyperbolic cosine of each component.</summary>
+    public static float2 Cosh(float2 x) => new(Cosh(x.X), Cosh(x.Y));
+
+    /// <summary>Computes the hyperbolic cosine of each component.</summary>
+    public static float3 Cosh(float3 x) => new(Cosh(x.X), Cosh(x.Y), Cosh(x.Z));
+
+    /// <summary>Computes the hyperbolic cosine of each component.</summary>
+    public static float4 Cosh(float4 x) => new(Cosh(x.X), Cosh(x.Y), Cosh(x.Z), Cosh(x.W));
+
     /// <summary>
     /// Computes the hyperbolic tangent of a scalar.
     /// </summary>
     public static float Tanh(float x) => MathF.Tanh(x);
+
+    /// <summary>Computes the hyperbolic tangent of each component.</summary>
+    public static float2 Tanh(float2 x) => new(Tanh(x.X), Tanh(x.Y));
+
+    /// <summary>Computes the hyperbolic tangent of each component.</summary>
+    public static float3 Tanh(float3 x) => new(Tanh(x.X), Tanh(x.Y), Tanh(x.Z));
+
+    /// <summary>Computes the hyperbolic tangent of each component.</summary>
+    public static float4 Tanh(float4 x) => new(Tanh(x.X), Tanh(x.Y), Tanh(x.Z), Tanh(x.W));
 
     /// <summary>
     /// Computes the base-e exponential of a scalar.
     /// </summary>
     public static float Exp(float x) => MathF.Exp(x);
 
+    /// <summary>Computes the base-e exponential of each component.</summary>
+    public static float2 Exp(float2 x) => new(Exp(x.X), Exp(x.Y));
+
+    /// <summary>Computes the base-e exponential of each component.</summary>
+    public static float3 Exp(float3 x) => new(Exp(x.X), Exp(x.Y), Exp(x.Z));
+
+    /// <summary>Computes the base-e exponential of each component.</summary>
+    public static float4 Exp(float4 x) => new(Exp(x.X), Exp(x.Y), Exp(x.Z), Exp(x.W));
+
     /// <summary>
     /// Computes the natural logarithm of a scalar.
     /// </summary>
     public static float Log(float x) => MathF.Log(x);
+
+    /// <summary>Computes the natural logarithm of each component.</summary>
+    public static float2 Log(float2 x) => new(Log(x.X), Log(x.Y));
+
+    /// <summary>Computes the natural logarithm of each component.</summary>
+    public static float3 Log(float3 x) => new(Log(x.X), Log(x.Y), Log(x.Z));
+
+    /// <summary>Computes the natural logarithm of each component.</summary>
+    public static float4 Log(float4 x) => new(Log(x.X), Log(x.Y), Log(x.Z), Log(x.W));
 
     /// <summary>
     /// Raises a scalar to a power.
     /// </summary>
     public static float Pow(float x, float y) => MathF.Pow(x, y);
 
+    /// <summary>Raises each component of <paramref name="x"/> to the corresponding power.</summary>
+    public static float2 Pow(float2 x, float2 y) => new(Pow(x.X, y.X), Pow(x.Y, y.Y));
+
+    /// <summary>Raises each component of <paramref name="x"/> to the corresponding power.</summary>
+    public static float3 Pow(float3 x, float3 y) => new(Pow(x.X, y.X), Pow(x.Y, y.Y), Pow(x.Z, y.Z));
+
+    /// <summary>Raises each component of <paramref name="x"/> to the corresponding power.</summary>
+    public static float4 Pow(float4 x, float4 y) => new(Pow(x.X, y.X), Pow(x.Y, y.Y), Pow(x.Z, y.Z), Pow(x.W, y.W));
+
     /// <summary>
     /// Computes the square root of a scalar.
     /// </summary>
     public static float Sqrt(float x) => MathF.Sqrt(x);
 
+    /// <summary>Computes the square root of each component.</summary>
+    public static float2 Sqrt(float2 x) => new(Sqrt(x.X), Sqrt(x.Y));
+
+    /// <summary>Computes the square root of each component.</summary>
+    public static float3 Sqrt(float3 x) => new(Sqrt(x.X), Sqrt(x.Y), Sqrt(x.Z));
+
+    /// <summary>Computes the square root of each component.</summary>
+    public static float4 Sqrt(float4 x) => new(Sqrt(x.X), Sqrt(x.Y), Sqrt(x.Z), Sqrt(x.W));
+
     /// <summary>
     /// Computes the reciprocal square root of a scalar.
     /// </summary>
     public static float InverseSqrt(float x) => 1.0f / MathF.Sqrt(x);
+
+    /// <summary>Computes the reciprocal square root of each component.</summary>
+    public static float2 InverseSqrt(float2 x) => new(InverseSqrt(x.X), InverseSqrt(x.Y));
+
+    /// <summary>Computes the reciprocal square root of each component.</summary>
+    public static float3 InverseSqrt(float3 x) => new(InverseSqrt(x.X), InverseSqrt(x.Y), InverseSqrt(x.Z));
+
+    /// <summary>Computes the reciprocal square root of each component.</summary>
+    public static float4 InverseSqrt(float4 x) => new(InverseSqrt(x.X), InverseSqrt(x.Y), InverseSqrt(x.Z), InverseSqrt(x.W));
 
     /// <summary>
     /// Computes the absolute value of a scalar.
@@ -322,6 +432,15 @@ public static class ShaderMath
     /// </summary>
     public static float4 Min(float4 x, float4 y) => new(Min(x.X, y.X), Min(x.Y, y.Y), Min(x.Z, y.Z), Min(x.W, y.W));
 
+    /// <summary>Returns the lesser of each vector component and a scalar.</summary>
+    public static float2 Min(float2 x, float y) => new(Min(x.X, y), Min(x.Y, y));
+
+    /// <summary>Returns the lesser of each vector component and a scalar.</summary>
+    public static float3 Min(float3 x, float y) => new(Min(x.X, y), Min(x.Y, y), Min(x.Z, y));
+
+    /// <summary>Returns the lesser of each vector component and a scalar.</summary>
+    public static float4 Min(float4 x, float y) => new(Min(x.X, y), Min(x.Y, y), Min(x.Z, y), Min(x.W, y));
+
     /// <summary>
     /// Returns the greater of two scalar values.
     /// </summary>
@@ -344,6 +463,15 @@ public static class ShaderMath
     /// Returns the greater value for each component.
     /// </summary>
     public static float4 Max(float4 x, float4 y) => new(Max(x.X, y.X), Max(x.Y, y.Y), Max(x.Z, y.Z), Max(x.W, y.W));
+
+    /// <summary>Returns the greater of each vector component and a scalar.</summary>
+    public static float2 Max(float2 x, float y) => new(Max(x.X, y), Max(x.Y, y));
+
+    /// <summary>Returns the greater of each vector component and a scalar.</summary>
+    public static float3 Max(float3 x, float y) => new(Max(x.X, y), Max(x.Y, y), Max(x.Z, y));
+
+    /// <summary>Returns the greater of each vector component and a scalar.</summary>
+    public static float4 Max(float4 x, float y) => new(Max(x.X, y), Max(x.Y, y), Max(x.Z, y), Max(x.W, y));
 
     /// <summary>
     /// Clamps a scalar to a closed interval.
@@ -423,6 +551,15 @@ public static class ShaderMath
     /// </summary>
     public static float4 Lerp(float4 a, float4 b, float t) => a + ((b - a) * t);
 
+    /// <summary>Linearly interpolates each component with its corresponding factor.</summary>
+    public static float2 Lerp(float2 a, float2 b, float2 t) => a + ((b - a) * t);
+
+    /// <summary>Linearly interpolates each component with its corresponding factor.</summary>
+    public static float3 Lerp(float3 a, float3 b, float3 t) => a + ((b - a) * t);
+
+    /// <summary>Linearly interpolates each component with its corresponding factor.</summary>
+    public static float4 Lerp(float4 a, float4 b, float4 t) => a + ((b - a) * t);
+
     /// <summary>
     /// GLSL-style alias for <see cref="Lerp(float, float, float)"/>.
     /// </summary>
@@ -443,6 +580,15 @@ public static class ShaderMath
     /// </summary>
     public static float4 Mix(float4 a, float4 b, float t) => Lerp(a, b, t);
 
+    /// <summary>GLSL-style alias for component-wise vector linear interpolation.</summary>
+    public static float2 Mix(float2 a, float2 b, float2 t) => Lerp(a, b, t);
+
+    /// <summary>GLSL-style alias for component-wise vector linear interpolation.</summary>
+    public static float3 Mix(float3 a, float3 b, float3 t) => Lerp(a, b, t);
+
+    /// <summary>GLSL-style alias for component-wise vector linear interpolation.</summary>
+    public static float4 Mix(float4 a, float4 b, float4 t) => Lerp(a, b, t);
+
     /// <summary>
     /// Performs smooth Hermite interpolation.
     /// </summary>
@@ -451,6 +597,43 @@ public static class ShaderMath
         var t = Saturate((x - edge0) / (edge1 - edge0));
         return t * t * (3 - (2 * t));
     }
+
+    /// <summary>Performs smooth Hermite interpolation component-wise.</summary>
+    public static float2 Smoothstep(float2 edge0, float2 edge1, float2 x)
+        => new(
+            Smoothstep(edge0.X, edge1.X, x.X),
+            Smoothstep(edge0.Y, edge1.Y, x.Y));
+
+    /// <summary>Performs smooth Hermite interpolation component-wise.</summary>
+    public static float3 Smoothstep(float3 edge0, float3 edge1, float3 x)
+        => new(
+            Smoothstep(edge0.X, edge1.X, x.X),
+            Smoothstep(edge0.Y, edge1.Y, x.Y),
+            Smoothstep(edge0.Z, edge1.Z, x.Z));
+
+    /// <summary>Performs smooth Hermite interpolation component-wise.</summary>
+    public static float4 Smoothstep(float4 edge0, float4 edge1, float4 x)
+        => new(
+            Smoothstep(edge0.X, edge1.X, x.X),
+            Smoothstep(edge0.Y, edge1.Y, x.Y),
+            Smoothstep(edge0.Z, edge1.Z, x.Z),
+            Smoothstep(edge0.W, edge1.W, x.W));
+
+    /// <summary>Performs smooth Hermite interpolation on each component using scalar edges.</summary>
+    public static float2 Smoothstep(float edge0, float edge1, float2 x)
+        => new(Smoothstep(edge0, edge1, x.X), Smoothstep(edge0, edge1, x.Y));
+
+    /// <summary>Performs smooth Hermite interpolation on each component using scalar edges.</summary>
+    public static float3 Smoothstep(float edge0, float edge1, float3 x)
+        => new(Smoothstep(edge0, edge1, x.X), Smoothstep(edge0, edge1, x.Y), Smoothstep(edge0, edge1, x.Z));
+
+    /// <summary>Performs smooth Hermite interpolation on each component using scalar edges.</summary>
+    public static float4 Smoothstep(float edge0, float edge1, float4 x)
+        => new(
+            Smoothstep(edge0, edge1, x.X),
+            Smoothstep(edge0, edge1, x.Y),
+            Smoothstep(edge0, edge1, x.Z),
+            Smoothstep(edge0, edge1, x.W));
 
     /// <summary>
     /// Multiplies a matrix by a vector.
@@ -581,44 +764,197 @@ public static class Hlsl
     /// <inheritdoc cref="ShaderMath.Sin(float)"/>
     public static float Sin(float x) => ShaderMath.Sin(x);
 
+    /// <inheritdoc cref="ShaderMath.Sin(float2)"/>
+    public static float2 Sin(float2 x) => ShaderMath.Sin(x);
+
+    /// <inheritdoc cref="ShaderMath.Sin(float3)"/>
+    public static float3 Sin(float3 x) => ShaderMath.Sin(x);
+
+    /// <inheritdoc cref="ShaderMath.Sin(float4)"/>
+    public static float4 Sin(float4 x) => ShaderMath.Sin(x);
+
     /// <inheritdoc cref="ShaderMath.Cos(float)"/>
     public static float Cos(float x) => ShaderMath.Cos(x);
+
+    /// <inheritdoc cref="ShaderMath.Cos(float2)"/>
+    public static float2 Cos(float2 x) => ShaderMath.Cos(x);
+
+    /// <inheritdoc cref="ShaderMath.Cos(float3)"/>
+    public static float3 Cos(float3 x) => ShaderMath.Cos(x);
+
+    /// <inheritdoc cref="ShaderMath.Cos(float4)"/>
+    public static float4 Cos(float4 x) => ShaderMath.Cos(x);
 
     /// <inheritdoc cref="ShaderMath.Tan(float)"/>
     public static float Tan(float x) => ShaderMath.Tan(x);
 
+    /// <inheritdoc cref="ShaderMath.Tan(float2)"/>
+    public static float2 Tan(float2 x) => ShaderMath.Tan(x);
+
+    /// <inheritdoc cref="ShaderMath.Tan(float3)"/>
+    public static float3 Tan(float3 x) => ShaderMath.Tan(x);
+
+    /// <inheritdoc cref="ShaderMath.Tan(float4)"/>
+    public static float4 Tan(float4 x) => ShaderMath.Tan(x);
+
     /// <inheritdoc cref="ShaderMath.Exp(float)"/>
     public static float Exp(float x) => ShaderMath.Exp(x);
+
+    /// <inheritdoc cref="ShaderMath.Exp(float2)"/>
+    public static float2 Exp(float2 x) => ShaderMath.Exp(x);
+
+    /// <inheritdoc cref="ShaderMath.Exp(float3)"/>
+    public static float3 Exp(float3 x) => ShaderMath.Exp(x);
+
+    /// <inheritdoc cref="ShaderMath.Exp(float4)"/>
+    public static float4 Exp(float4 x) => ShaderMath.Exp(x);
 
     /// <inheritdoc cref="ShaderMath.Log(float)"/>
     public static float Log(float x) => ShaderMath.Log(x);
 
+    /// <inheritdoc cref="ShaderMath.Log(float2)"/>
+    public static float2 Log(float2 x) => ShaderMath.Log(x);
+
+    /// <inheritdoc cref="ShaderMath.Log(float3)"/>
+    public static float3 Log(float3 x) => ShaderMath.Log(x);
+
+    /// <inheritdoc cref="ShaderMath.Log(float4)"/>
+    public static float4 Log(float4 x) => ShaderMath.Log(x);
+
     /// <inheritdoc cref="ShaderMath.Pow(float, float)"/>
     public static float Pow(float x, float y) => ShaderMath.Pow(x, y);
+
+    /// <inheritdoc cref="ShaderMath.Pow(float2, float2)"/>
+    public static float2 Pow(float2 x, float2 y) => ShaderMath.Pow(x, y);
+
+    /// <inheritdoc cref="ShaderMath.Pow(float3, float3)"/>
+    public static float3 Pow(float3 x, float3 y) => ShaderMath.Pow(x, y);
+
+    /// <inheritdoc cref="ShaderMath.Pow(float4, float4)"/>
+    public static float4 Pow(float4 x, float4 y) => ShaderMath.Pow(x, y);
 
     /// <inheritdoc cref="ShaderMath.Sqrt(float)"/>
     public static float Sqrt(float x) => ShaderMath.Sqrt(x);
 
+    /// <inheritdoc cref="ShaderMath.Sqrt(float2)"/>
+    public static float2 Sqrt(float2 x) => ShaderMath.Sqrt(x);
+
+    /// <inheritdoc cref="ShaderMath.Sqrt(float3)"/>
+    public static float3 Sqrt(float3 x) => ShaderMath.Sqrt(x);
+
+    /// <inheritdoc cref="ShaderMath.Sqrt(float4)"/>
+    public static float4 Sqrt(float4 x) => ShaderMath.Sqrt(x);
+
     /// <inheritdoc cref="ShaderMath.Abs(float)"/>
     public static float Abs(float x) => ShaderMath.Abs(x);
+
+    /// <inheritdoc cref="ShaderMath.Abs(float2)"/>
+    public static float2 Abs(float2 x) => ShaderMath.Abs(x);
+
+    /// <inheritdoc cref="ShaderMath.Abs(float3)"/>
+    public static float3 Abs(float3 x) => ShaderMath.Abs(x);
+
+    /// <inheritdoc cref="ShaderMath.Abs(float4)"/>
+    public static float4 Abs(float4 x) => ShaderMath.Abs(x);
 
     /// <inheritdoc cref="ShaderMath.Floor(float)"/>
     public static float Floor(float x) => ShaderMath.Floor(x);
 
+    /// <inheritdoc cref="ShaderMath.Floor(float2)"/>
+    public static float2 Floor(float2 x) => ShaderMath.Floor(x);
+
+    /// <inheritdoc cref="ShaderMath.Floor(float3)"/>
+    public static float3 Floor(float3 x) => ShaderMath.Floor(x);
+
+    /// <inheritdoc cref="ShaderMath.Floor(float4)"/>
+    public static float4 Floor(float4 x) => ShaderMath.Floor(x);
+
     /// <inheritdoc cref="ShaderMath.Ceil(float)"/>
     public static float Ceil(float x) => ShaderMath.Ceil(x);
+
+    /// <inheritdoc cref="ShaderMath.Ceil(float2)"/>
+    public static float2 Ceil(float2 x) => ShaderMath.Ceil(x);
+
+    /// <inheritdoc cref="ShaderMath.Ceil(float3)"/>
+    public static float3 Ceil(float3 x) => ShaderMath.Ceil(x);
+
+    /// <inheritdoc cref="ShaderMath.Ceil(float4)"/>
+    public static float4 Ceil(float4 x) => ShaderMath.Ceil(x);
 
     /// <inheritdoc cref="ShaderMath.Fract(float)"/>
     public static float Fract(float x) => ShaderMath.Fract(x);
 
+    /// <inheritdoc cref="ShaderMath.Fract(float2)"/>
+    public static float2 Fract(float2 x) => ShaderMath.Fract(x);
+
+    /// <inheritdoc cref="ShaderMath.Fract(float3)"/>
+    public static float3 Fract(float3 x) => ShaderMath.Fract(x);
+
+    /// <inheritdoc cref="ShaderMath.Fract(float4)"/>
+    public static float4 Fract(float4 x) => ShaderMath.Fract(x);
+
     /// <inheritdoc cref="ShaderMath.Clamp(float, float, float)"/>
     public static float Clamp(float x, float min, float max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float2, float, float)"/>
+    public static float2 Clamp(float2 x, float min, float max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float3, float, float)"/>
+    public static float3 Clamp(float3 x, float min, float max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float4, float, float)"/>
+    public static float4 Clamp(float4 x, float min, float max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float2, float2, float2)"/>
+    public static float2 Clamp(float2 x, float2 min, float2 max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float3, float3, float3)"/>
+    public static float3 Clamp(float3 x, float3 min, float3 max) => ShaderMath.Clamp(x, min, max);
+
+    /// <inheritdoc cref="ShaderMath.Clamp(float4, float4, float4)"/>
+    public static float4 Clamp(float4 x, float4 min, float4 max) => ShaderMath.Clamp(x, min, max);
 
     /// <inheritdoc cref="ShaderMath.Lerp(float, float, float)"/>
     public static float Lerp(float a, float b, float t) => ShaderMath.Lerp(a, b, t);
 
+    /// <inheritdoc cref="ShaderMath.Lerp(float2, float2, float)"/>
+    public static float2 Lerp(float2 a, float2 b, float t) => ShaderMath.Lerp(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Lerp(float3, float3, float)"/>
+    public static float3 Lerp(float3 a, float3 b, float t) => ShaderMath.Lerp(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Lerp(float4, float4, float)"/>
+    public static float4 Lerp(float4 a, float4 b, float t) => ShaderMath.Lerp(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Lerp(float2, float2, float2)"/>
+    public static float2 Lerp(float2 a, float2 b, float2 t) => ShaderMath.Lerp(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Lerp(float3, float3, float3)"/>
+    public static float3 Lerp(float3 a, float3 b, float3 t) => ShaderMath.Lerp(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Lerp(float4, float4, float4)"/>
+    public static float4 Lerp(float4 a, float4 b, float4 t) => ShaderMath.Lerp(a, b, t);
+
     /// <inheritdoc cref="ShaderMath.Mix(float, float, float)"/>
     public static float Mix(float a, float b, float t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float2, float2, float)"/>
+    public static float2 Mix(float2 a, float2 b, float t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float3, float3, float)"/>
+    public static float3 Mix(float3 a, float3 b, float t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float4, float4, float)"/>
+    public static float4 Mix(float4 a, float4 b, float t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float2, float2, float2)"/>
+    public static float2 Mix(float2 a, float2 b, float2 t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float3, float3, float3)"/>
+    public static float3 Mix(float3 a, float3 b, float3 t) => ShaderMath.Mix(a, b, t);
+
+    /// <inheritdoc cref="ShaderMath.Mix(float4, float4, float4)"/>
+    public static float4 Mix(float4 a, float4 b, float4 t) => ShaderMath.Mix(a, b, t);
 
     /// <inheritdoc cref="ShaderMath.Mul(float2x2, float2)"/>
     public static float2 Mul(float2x2 m, float2 v) => ShaderMath.Mul(m, v);

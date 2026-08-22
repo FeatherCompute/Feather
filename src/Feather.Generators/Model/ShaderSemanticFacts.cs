@@ -127,7 +127,8 @@ internal static class ShaderSemanticFacts
         return method.Parameters.Length == 2
             && IsFloatVectorType(method.ReturnType)
             && IsSameType(method.ReturnType, method.Parameters[0].Type)
-            && IsSameType(method.ReturnType, method.Parameters[1].Type);
+            && (IsSameType(method.ReturnType, method.Parameters[1].Type) ||
+                IsFloatType(method.Parameters[1].Type));
     }
 
     public static bool HasFloatOrMatchingFloatVectorClampSignature(IMethodSymbol method)
@@ -165,7 +166,27 @@ internal static class ShaderSemanticFacts
             && IsFloatVectorType(method.ReturnType)
             && IsSameType(method.ReturnType, method.Parameters[0].Type)
             && IsSameType(method.ReturnType, method.Parameters[1].Type)
-            && IsFloatType(method.Parameters[2].Type);
+            && (IsFloatType(method.Parameters[2].Type) ||
+                IsSameType(method.ReturnType, method.Parameters[2].Type));
+    }
+
+    public static bool HasFloatOrMatchingFloatVectorSmoothstepSignature(IMethodSymbol method)
+    {
+        if (HasFloatSignature(method, 3))
+        {
+            return true;
+        }
+
+        if (method.Parameters.Length != 3 ||
+            !IsFloatVectorType(method.ReturnType) ||
+            !IsSameType(method.ReturnType, method.Parameters[2].Type))
+        {
+            return false;
+        }
+
+        return (IsSameType(method.ReturnType, method.Parameters[0].Type) &&
+                IsSameType(method.ReturnType, method.Parameters[1].Type)) ||
+            (IsFloatType(method.Parameters[0].Type) && IsFloatType(method.Parameters[1].Type));
     }
 
     public static bool HasFloatVectorDotSignature(IMethodSymbol method)
