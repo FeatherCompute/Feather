@@ -22,9 +22,9 @@ public interface IReadbackGpuTexture2D : IGpuTexture2D
     int MipLevels { get; }
 
     /// <summary>
-    /// Submits an asynchronous base-level texture-region copy into caller-owned byte staging
-    /// storage. The returned operation owns the native texture and staging leases until it is
-    /// consumed or disposed.
+    /// Submits an asynchronous texture-region copy from an allocated mip level into caller-owned
+    /// byte staging storage. The returned operation owns the native texture and staging leases
+    /// until it is consumed or disposed.
     /// </summary>
     ReadbackOperation BeginReadback(
         GpuBuffer<byte> staging,
@@ -32,7 +32,8 @@ public interface IReadbackGpuTexture2D : IGpuTexture2D
         int y,
         int width,
         int height,
-        long stagingByteOffset = 0);
+        long stagingByteOffset = 0,
+        int mipLevel = 0);
 }
 
 internal interface IGpuTexture2DNative : IGpuTexture2D
@@ -271,7 +272,8 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
         int y,
         int width,
         int height,
-        long stagingByteOffset = 0)
+        long stagingByteOffset = 0,
+        int mipLevel = 0)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(staging);
@@ -280,13 +282,15 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
             Handle,
             Width,
             Height,
+            MipLevels,
             Format,
             staging,
             x,
             y,
             width,
             height,
-            stagingByteOffset);
+            stagingByteOffset,
+            mipLevel);
     }
 
     /// <summary>

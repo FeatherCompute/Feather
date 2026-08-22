@@ -79,7 +79,7 @@ tex.Save("output.tga");
 | `AsSampled()` | Creates `SampledTexture2D<TValue>`. |
 | `Upload(pixels)` | Uploads base-level pixels. |
 | `Read(pixels)` | Downloads base-level pixels. |
-| `BeginReadback(staging, x, y, width, height, offset)` | Submits a non-blocking region copy into a `GpuBuffer<byte>`. |
+| `BeginReadback(staging, x, y, width, height, offset, mipLevel)` | Submits a non-blocking region copy from an allocated mip level into a `GpuBuffer<byte>`. |
 | `GenerateMipmaps()` | Generates mipmaps when supported. |
 | `Save(path)` | Saves the base level as TGA. |
 
@@ -106,7 +106,8 @@ finally
 `ReadbackOperation` retains the texture and staging buffer even if their owners dispose them after submission. A
 mapping is stack-confined, exposes no pointer or escaping span, and can be consumed exactly once. Disposing a pending
 operation cancels ownership without waiting for the GPU or draining the device. `GpuContext.OperationCounters` exposes
-the synchronization counters used by integration tests to prove this property.
+the synchronization counters used by integration tests to prove this property. `mipLevel` defaults to zero; region
+coordinates and bounds are relative to the selected level.
 
 Shader texture views use `int2` coordinates. Sampled textures provide:
 

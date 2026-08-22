@@ -424,6 +424,10 @@ FE_API FeResult fe_texture3d_download(FeTextureHandle texture, uint32_t x, uint3
 FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHandle texture,
                                             FeBufferHandle staging_buffer, uint32_t x, uint32_t y, uint32_t width,
                                             uint32_t height, uint64_t staging_offset, FeReadbackHandle* out_readback);
+FE_API FeResult fe_texture2d_begin_readback_mip(FeContextHandle context, FeTextureHandle texture,
+                                                FeBufferHandle staging_buffer, uint32_t mip_level, uint32_t x,
+                                                uint32_t y, uint32_t width, uint32_t height, uint64_t staging_offset,
+                                                FeReadbackHandle* out_readback);
 FE_API FeResult fe_readback_is_complete(FeReadbackHandle readback, bool* out_complete);
 FE_API FeResult fe_readback_wait(FeReadbackHandle readback, uint64_t timeout_nanoseconds, bool* out_complete);
 FE_API FeResult fe_readback_map(FeReadbackHandle readback, FeReadbackMapping* out_mapping);

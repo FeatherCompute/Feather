@@ -444,6 +444,19 @@ public static class NativeMethods
         out FeReadbackHandle out_readback);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_texture2d_begin_readback_mip(
+        FeContextHandle context,
+        FeTextureHandle texture,
+        FeBufferHandle staging_buffer,
+        uint mip_level,
+        uint x,
+        uint y,
+        uint width,
+        uint height,
+        ulong staging_offset,
+        out FeReadbackHandle out_readback);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_readback_is_complete(
         FeReadbackHandle readback,
         [MarshalAs(UnmanagedType.I1)] out bool out_complete);

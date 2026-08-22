@@ -112,13 +112,15 @@ public sealed class ReadbackOperation : IDisposable, IAsyncDisposable
         FeTextureHandle texture,
         int textureWidth,
         int textureHeight,
+        int textureMipLevels,
         PixelFormat format,
         GpuBuffer<byte> staging,
         int x,
         int y,
         int width,
         int height,
-        long stagingByteOffset)
+        long stagingByteOffset,
+        int mipLevel)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(texture);
@@ -128,14 +130,22 @@ public sealed class ReadbackOperation : IDisposable, IAsyncDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
         ArgumentOutOfRangeException.ThrowIfNegative(stagingByteOffset);
+        ArgumentOutOfRangeException.ThrowIfNegative(mipLevel);
 
         if (!ReferenceEquals(context, staging.Context))
         {
             throw new ArgumentException("The texture and staging buffer must belong to the same GPU context.", nameof(staging));
         }
-        if (x > textureWidth || width > textureWidth - x || y > textureHeight || height > textureHeight - y)
+        if (mipLevel >= textureMipLevels)
         {
-            throw new ArgumentOutOfRangeException(nameof(width), "Texture readback region exceeds texture dimensions.");
+            throw new ArgumentOutOfRangeException(nameof(mipLevel), "Texture readback mip level exceeds the allocated mip chain.");
+        }
+
+        var mipWidth = System.Math.Max(1, textureWidth >> mipLevel);
+        var mipHeight = System.Math.Max(1, textureHeight >> mipLevel);
+        if (x > mipWidth || width > mipWidth - x || y > mipHeight || height > mipHeight - y)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), "Texture readback region exceeds the selected mip dimensions.");
         }
 
         var bytesPerPixel = GetColorPixelSize(format);
@@ -165,10 +175,11 @@ public sealed class ReadbackOperation : IDisposable, IAsyncDisposable
             using var contextOperation = context.EnterOperation();
             lock (context.QueueGate)
             {
-                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_begin_readback(
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture2d_begin_readback_mip(
                     context.Handle,
                     texture,
                     stagingHandle,
+                    (uint)mipLevel,
                     (uint)x,
                     (uint)y,
                     (uint)width,

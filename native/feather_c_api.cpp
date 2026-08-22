@@ -13040,6 +13040,14 @@ FE_API FeResult fe_texture2d_download(FeTextureHandle texture, uint32_t x, uint3
 FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHandle texture,
                                             FeBufferHandle staging_buffer, uint32_t x, uint32_t y, uint32_t width,
                                             uint32_t height, uint64_t staging_offset, FeReadbackHandle* out_readback) {
+    return fe_texture2d_begin_readback_mip(context, texture, staging_buffer, 0, x, y, width, height, staging_offset,
+                                           out_readback);
+}
+
+FE_API FeResult fe_texture2d_begin_readback_mip(FeContextHandle context, FeTextureHandle texture,
+                                                FeBufferHandle staging_buffer, uint32_t mip_level, uint32_t x,
+                                                uint32_t y, uint32_t width, uint32_t height, uint64_t staging_offset,
+                                                FeReadbackHandle* out_readback) {
     return protect([&] {
         if (context != kDefaultContext) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid context handle.");
@@ -13064,8 +13072,13 @@ FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHa
         if (texture_state.depth != 1 || !is_color_pixel_format(texture_state.pixel_format)) {
             return fail(FE_ERROR_UNSUPPORTED, "Asynchronous readback supports 2D color textures only.");
         }
-        if (!range_fits(x, width, texture_state.width) || !range_fits(y, height, texture_state.height)) {
-            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback region exceeds texture dimensions.");
+        if (mip_level >= texture_state.mip_levels || mip_level >= std::numeric_limits<uint32_t>::digits) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback mip level exceeds the allocated mip chain.");
+        }
+        const auto mip_width = std::max(1u, texture_state.width >> mip_level);
+        const auto mip_height = std::max(1u, texture_state.height >> mip_level);
+        if (!range_fits(x, width, mip_width) || !range_fits(y, height, mip_height)) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Texture readback region exceeds the selected mip dimensions.");
         }
 
         const size_t bytes_per_pixel = pixel_size(texture_state.pixel_format);
@@ -13101,7 +13114,7 @@ FE_API FeResult fe_texture2d_begin_readback(FeContextHandle context, FeTextureHa
 
         auto state = std::make_shared<ReadbackState>();
         state->submission = backend->BeginTextureReadback(backend_texture, x, y, width, height, backend_staging,
-                                                          static_cast<size_t>(staging_offset));
+                                                          static_cast<size_t>(staging_offset), mip_level);
         state->byte_size = byte_size;
         state->row_pitch = row_pitch;
 

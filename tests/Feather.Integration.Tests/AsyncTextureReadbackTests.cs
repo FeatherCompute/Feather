@@ -56,11 +56,51 @@ public class AsyncTextureReadbackTests
     }
 
     [Fact]
+    public async Task ExplicitMipReadbackReturnsGeneratedMipPixelsAndSelectedLevelGeometry()
+    {
+        using var context = GpuContext.GetDefault();
+        using var texture = GpuTexture2D<uint, uint>.Create(
+            context,
+            4,
+            4,
+            mipLevels: 3,
+            PixelFormat.Rgba8,
+            TextureAccess.ReadWrite);
+        using var staging = GpuBuffer<byte>.Create(context, 16, BufferAccess.ReadWrite);
+        texture.Upload(Enumerable.Repeat(0x44332211u, 16).ToArray());
+        texture.GenerateMipmaps();
+
+        using var readback = texture.BeginReadback(
+            staging,
+            0,
+            0,
+            2,
+            2,
+            mipLevel: 1);
+
+        Assert.True(await readback.WaitAsync(TimeSpan.FromSeconds(30)));
+        using var mapping = readback.Map();
+        Assert.Equal(16, mapping.ByteLength);
+        Assert.Equal(8, mapping.RowPitch);
+        var actual = new byte[mapping.ByteLength];
+        mapping.CopyTo(actual);
+        Assert.Equal(
+            Enumerable.Repeat(new byte[] { 0x11, 0x22, 0x33, 0x44 }, 4).SelectMany(static pixel => pixel),
+            actual);
+    }
+
+    [Fact]
     public void ManagedValidationRejectsInvalidRequestsBeforeNativeSubmission()
     {
         using var context = GpuContext.GetDefault();
         using var otherContext = GpuContext.GetDefault();
-        using var texture = GpuTexture2D<uint, uint>.Create(context, 5, 3, PixelFormat.Rgba8, TextureAccess.ReadWrite);
+        using var texture = GpuTexture2D<uint, uint>.Create(
+            context,
+            5,
+            3,
+            mipLevels: 3,
+            PixelFormat.Rgba8,
+            TextureAccess.ReadWrite);
         using var depth = GpuTexture2D<float, float>.Create(context, 1, 1, PixelFormat.Depth32Float, TextureAccess.DepthStencil);
         using var staging = GpuBuffer<byte>.Create(context, 72, BufferAccess.ReadWrite);
         using var otherStaging = GpuBuffer<byte>.Create(otherContext, 72, BufferAccess.ReadWrite);
@@ -73,6 +113,9 @@ public class AsyncTextureReadbackTests
         Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 5, 3, -1));
         Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 5, 3, 2));
         Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 5, 3, 16));
+        Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 1, 1, mipLevel: -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 1, 1, mipLevel: 3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => texture.BeginReadback(staging, 0, 0, 3, 1, mipLevel: 1));
         Assert.Throws<ArgumentException>(() => texture.BeginReadback(otherStaging, 0, 0, 1, 1));
         Assert.Throws<NotSupportedException>(() => depth.BeginReadback(staging, 0, 0, 1, 1));
 

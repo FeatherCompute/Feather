@@ -163,7 +163,9 @@ The typed EasyGPU texture bridge supports the runtime formats documented in [Sup
 
 Asynchronous 2D color readback uses a submission-scoped ABI rather than exposing a buffer mapping:
 
-- `fe_texture2d_begin_readback` validates the region, byte size, staging capacity, and Vulkan copy alignment before it submits.
+- `fe_texture2d_begin_readback` preserves the base-level ABI, while `fe_texture2d_begin_readback_mip` selects an explicit
+  allocated mip level. Both validate the level-relative region, byte size, staging capacity, and Vulkan copy alignment
+  before submission.
 - `fe_readback_is_complete` and `fe_readback_wait` observe the exact submission.
 - `fe_readback_map` returns tightly packed `data`, `byte_size`, and `row_pitch` metadata exactly once.
 - `fe_readback_unmap` consumes that mapping exactly once.
