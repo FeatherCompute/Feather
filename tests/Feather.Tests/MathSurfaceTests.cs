@@ -224,6 +224,13 @@ public class MathSurfaceTests
     }
 
     [Fact]
+    public void EveryScalarComponentwiseIntrinsicKeepsAllFloatVectorWidths()
+    {
+        AssertScalarVectorParity(typeof(ShaderMath));
+        AssertScalarVectorParity(typeof(Hlsl));
+    }
+
+    [Fact]
     public void ShaderMathVectorIntrinsicsEvaluateComponentwise()
     {
         var x = new float3(0.25f, 0.5f, 1.0f);
@@ -253,6 +260,33 @@ public class MathSurfaceTests
         var method = declaringType.GetMethod(name, BindingFlags.Public | BindingFlags.Static, parameterTypes);
         Assert.NotNull(method);
         Assert.Equal(returnType, method!.ReturnType);
+    }
+
+    private static void AssertScalarVectorParity(Type declaringType)
+    {
+        var scalarIntrinsics = declaringType
+            .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(static method =>
+                method.ReturnType == typeof(float) &&
+                method.GetParameters().Length > 0 &&
+                method.GetParameters().All(static parameter => parameter.ParameterType == typeof(float)))
+            .ToArray();
+
+        Assert.NotEmpty(scalarIntrinsics);
+        foreach (var vectorType in new[] { typeof(float2), typeof(float3), typeof(float4) })
+        {
+            foreach (var scalarIntrinsic in scalarIntrinsics)
+            {
+                var parameterTypes = Enumerable
+                    .Repeat(vectorType, scalarIntrinsic.GetParameters().Length)
+                    .ToArray();
+                AssertVectorOverload(
+                    declaringType,
+                    scalarIntrinsic.Name,
+                    vectorType,
+                    parameterTypes);
+            }
+        }
     }
 
     private static void AssertMatrixNear(float2x2 expected, float2x2 actual)
