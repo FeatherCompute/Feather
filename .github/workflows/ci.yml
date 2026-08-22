@@ -55,6 +55,7 @@ jobs:
             libxrandr-dev \
             mesa-vulkan-drivers \
             spirv-cross \
+            spirv-headers \
             spirv-tools \
             vulkan-tools
 
@@ -151,6 +152,7 @@ jobs:
             libxinerama-dev \
             libxrandr-dev \
             spirv-cross \
+            spirv-headers \
             spirv-tools \
             vulkan-tools
 

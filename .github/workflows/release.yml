@@ -69,6 +69,7 @@ jobs:
             libxinerama-dev \
             libxrandr-dev \
             spirv-cross \
+            spirv-headers \
             spirv-tools \
             vulkan-tools
 
