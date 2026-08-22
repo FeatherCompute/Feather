@@ -54,8 +54,13 @@ extern "C" void __llvm_profile_set_filename(const char* filename);
 
 namespace {
 
+struct ShaderBinarySnapshot;
 void trace_graphics_step(const char* step);
 FeResult write_string(const std::string& value, char* buffer, size_t buffer_size, size_t* out_required_size);
+FeResult write_bytes(const std::vector<unsigned char>& value, uint8_t* buffer, size_t buffer_size,
+                     size_t* out_required_size);
+FeResult write_shader_binary_snapshot(const ShaderBinarySnapshot& snapshot, uint8_t* buffer, size_t buffer_size,
+                                      size_t* out_required_size, FeShaderBinaryFormat* out_format);
 
 #if defined(FEATHER_ENABLE_COVERAGE_FLUSH)
 void write_coverage_profile_snapshot() {
@@ -285,12 +290,19 @@ struct GraphicsResourceLayout {
     std::vector<GraphicsResourceBindingEntry> entries;
 };
 
+struct ShaderBinarySnapshot {
+    FeShaderBinaryFormat format = FE_SHADER_BINARY_FORMAT_UNAVAILABLE;
+    std::vector<unsigned char> bytes;
+};
+
 struct GraphicsPipelineCacheEntry {
     std::string key;
     GPU::Backend::ShaderHandle vertex_shader = GPU::Backend::INVALID_SHADER_HANDLE;
     GPU::Backend::ShaderHandle fragment_shader = GPU::Backend::INVALID_SHADER_HANDLE;
     GPU::Backend::PipelineHandle pipeline = GPU::Backend::INVALID_PIPELINE_HANDLE;
     uint32_t push_constant_size = 0;
+    ShaderBinarySnapshot vertex_shader_binary;
+    ShaderBinarySnapshot fragment_shader_binary;
 };
 
 struct ADGradientState {
@@ -345,6 +357,7 @@ struct KernelState {
 
 struct ComputeKernelCache {
     std::unique_ptr<GPU::Kernel::KernelBuildContext> context;
+    ShaderBinarySnapshot shader_binary;
 };
 
 struct IrResource {
@@ -593,6 +606,7 @@ struct GraphicsPipelineState {
     GraphicsResourceLayout resource_layout;
     std::vector<GraphicsPushConstantLayoutEntry> push_constant_layout;
     std::vector<GraphicsPipelineCacheEntry> backend_cache;
+    std::string last_backend_cache_key;
 };
 
 #if FEATHER_BUILD_WINDOW
@@ -707,12 +721,30 @@ class EasyGpuBufferGuard {
     GPU::Backend::BufferHandle buffer_;
 };
 
+ShaderBinarySnapshot snapshot_loaded_shader_binary(GPU::Backend::Backend& backend,
+                                                   GPU::Backend::ShaderHandle shader) noexcept {
+    ShaderBinarySnapshot snapshot;
+    try {
+        GPU::Backend::ShaderBinaryFormat format = GPU::Backend::ShaderBinaryFormat::Unavailable;
+        snapshot.bytes = backend.GetShaderBinary(shader, format);
+        if (format == GPU::Backend::ShaderBinaryFormat::SpirV && !snapshot.bytes.empty()) {
+            snapshot.format = FE_SHADER_BINARY_FORMAT_SPIRV;
+        } else {
+            snapshot.bytes.clear();
+        }
+    } catch (...) {
+        snapshot = {};
+    }
+    return snapshot;
+}
+
 void reset_compute_kernel_cache(ComputeKernelCache& cache, bool abandon_backend_resources) {
     if (abandon_backend_resources && cache.context != nullptr) {
         cache.context->SetCachedPipeline(GPU::Backend::INVALID_PIPELINE_HANDLE);
     }
 
     cache.context.reset();
+    cache.shader_binary = {};
 }
 
 void erase_compute_kernel_cache(FeKernelHandle kernel, bool abandon_backend_resources = false) {
@@ -738,6 +770,7 @@ void destroy_graphics_pipeline_cache(GraphicsPipelineState& pipeline) {
     auto* backend = GPU::Runtime::Context::GetBackend();
     if (backend == nullptr) {
         pipeline.backend_cache.clear();
+        pipeline.last_backend_cache_key.clear();
         return;
     }
 
@@ -756,6 +789,7 @@ void destroy_graphics_pipeline_cache(GraphicsPipelineState& pipeline) {
         }
     }
     pipeline.backend_cache.clear();
+    pipeline.last_backend_cache_key.clear();
 }
 
 void release_ad_gradient_buffers_with_backend(KernelState& kernel, GPU::Backend::Backend* backend) {
@@ -5552,7 +5586,8 @@ bool can_dispatch_easygpu_buffer_kernel(const KernelState& kernel) {
 }
 
 GPU::Backend::PipelineHandle create_easygpu_compute_pipeline(GPU::Kernel::KernelBuildContext& context,
-                                                             GPU::Backend::Backend& backend) {
+                                                             GPU::Backend::Backend& backend,
+                                                             ShaderBinarySnapshot* out_shader_binary) {
     const auto shader_source = context.GetCompleteCode();
     GPU::Backend::ShaderDesc shader_desc;
     shader_desc.type = GPU::Backend::ShaderType::Compute;
@@ -5595,14 +5630,20 @@ GPU::Backend::PipelineHandle create_easygpu_compute_pipeline(GPU::Kernel::Kernel
         throw std::runtime_error("EasyGPU backend failed to create compute pipeline.");
     }
 
+    if (out_shader_binary != nullptr) {
+        *out_shader_binary = snapshot_loaded_shader_binary(backend, shader);
+    }
+
     return pipeline;
 }
 
 GPU::Kernel::KernelBuildContext* ensure_easygpu_buffer_kernel_compiled(
     FeKernelHandle kernel_handle, KernelState& kernel, GPU::Backend::Backend& backend) {
     GPU::Kernel::KernelBuildContext* context = nullptr;
+    ComputeKernelCache* cache_entry = nullptr;
     auto cache_it = g_compute_kernel_caches.find(kernel_handle);
     if (cache_it != g_compute_kernel_caches.end() && cache_it->second.context != nullptr) {
+        cache_entry = &cache_it->second;
         context = cache_it->second.context.get();
     }
 
@@ -5612,14 +5653,17 @@ GPU::Kernel::KernelBuildContext* ensure_easygpu_buffer_kernel_compiled(
             return nullptr;
         }
 
-        auto& cache = g_compute_kernel_caches[kernel_handle];
-        cache.context = std::move(local_context);
-        context = cache.context.get();
+        auto& stored_cache = g_compute_kernel_caches[kernel_handle];
+        stored_cache.context = std::move(local_context);
+        context = stored_cache.context.get();
+        cache_entry = &stored_cache;
     }
 
     if (!context->HasCachedPipeline()) {
-        const auto pipeline = create_easygpu_compute_pipeline(*context, backend);
+        ShaderBinarySnapshot shader_binary;
+        const auto pipeline = create_easygpu_compute_pipeline(*context, backend, &shader_binary);
         context->SetCachedPipeline(pipeline);
+        cache_entry->shader_binary = std::move(shader_binary);
         kernel.compile_count++;
     }
     return context;
@@ -6466,6 +6510,37 @@ FeResult inspect_graphics_shader(FeGraphicsPipelineHandle pipeline_handle, bool 
                     "Graphics shader inspection is unavailable on the active EasyGPU backend.");
     }
     return write_string(inspected, buffer, buffer_size, out_required_size);
+}
+
+FeResult inspect_graphics_shader_binary(FeGraphicsPipelineHandle pipeline_handle, bool vertex, uint8_t* buffer,
+                                        size_t buffer_size, size_t* out_required_size,
+                                        FeShaderBinaryFormat* out_format) {
+    ShaderBinarySnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto pipeline = g_pipelines.find(pipeline_handle);
+        if (pipeline == g_pipelines.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid graphics pipeline handle.");
+        }
+
+        const auto& active_key = pipeline->second.last_backend_cache_key;
+        const auto active =
+            std::find_if(pipeline->second.backend_cache.begin(), pipeline->second.backend_cache.end(),
+                         [&](const GraphicsPipelineCacheEntry& entry) { return entry.key == active_key; });
+        if (active_key.empty() || active == pipeline->second.backend_cache.end()) {
+            if (out_format != nullptr) {
+                *out_format = FE_SHADER_BINARY_FORMAT_UNAVAILABLE;
+            }
+            if (out_required_size != nullptr) {
+                *out_required_size = 0;
+            }
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Graphics pipeline has no loaded backend shader; complete a typed draw before inspection.");
+        }
+        snapshot = vertex ? active->vertex_shader_binary : active->fragment_shader_binary;
+    }
+
+    return write_shader_binary_snapshot(snapshot, buffer, buffer_size, out_required_size, out_format);
 }
 
 bool dispatch_ad_gradient_reduce_to_buffer(ADGradientState& gradient, BufferState& destination, uint64_t destination_offset,
@@ -10538,6 +10613,8 @@ FeResult get_or_create_graphics_pipeline_variant(GraphicsPipelineState& pipeline
     entry.fragment_shader = fragment_shader;
     entry.pipeline = backend_pipeline;
     entry.push_constant_size = push_constant_size;
+    entry.vertex_shader_binary = snapshot_loaded_shader_binary(backend, vertex_shader);
+    entry.fragment_shader_binary = snapshot_loaded_shader_binary(backend, fragment_shader);
     pipeline.backend_cache.push_back(std::move(entry));
     *out_pipeline = backend_pipeline;
     return ok();
@@ -10982,6 +11059,12 @@ FeResult draw_graphics_pipeline_easygpu(GraphicsPipelineState& pipeline, const F
     }
     trace_graphics_step("end rendering");
     backend->EndRendering();
+    const auto active_variant =
+        std::find_if(pipeline.backend_cache.begin(), pipeline.backend_cache.end(),
+                     [&](const GraphicsPipelineCacheEntry& entry) { return entry.pipeline == backend_pipeline; });
+    if (active_variant != pipeline.backend_cache.end()) {
+        pipeline.last_backend_cache_key = active_variant->key;
+    }
     for (auto* color_target : targets) {
         color_target->device_dirty = true;
         color_target->host_dirty = false;
@@ -11169,6 +11252,41 @@ FeResult write_string(const std::string& value, char* buffer, size_t buffer_size
     std::memcpy(buffer, value.data(), copied);
     buffer[copied] = '\0';
     return FE_OK;
+}
+
+FeResult write_bytes(const std::vector<unsigned char>& value, uint8_t* buffer, size_t buffer_size,
+                     size_t* out_required_size) {
+    if (out_required_size != nullptr) {
+        *out_required_size = value.size();
+    }
+
+    if (buffer == nullptr || buffer_size == 0) {
+        return FE_OK;
+    }
+    if (buffer_size < value.size()) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Shader binary output buffer is smaller than the required size.");
+    }
+
+    if (!value.empty()) {
+        std::memcpy(buffer, value.data(), value.size());
+    }
+    return FE_OK;
+}
+
+FeResult write_shader_binary_snapshot(const ShaderBinarySnapshot& snapshot, uint8_t* buffer, size_t buffer_size,
+                                      size_t* out_required_size, FeShaderBinaryFormat* out_format) {
+    if (out_format == nullptr) {
+        return fail(FE_ERROR_INVALID_ARGUMENT, "Shader binary format output is required.");
+    }
+
+    *out_format = snapshot.format;
+    if (snapshot.format == FE_SHADER_BINARY_FORMAT_UNAVAILABLE || snapshot.bytes.empty()) {
+        if (out_required_size != nullptr) {
+            *out_required_size = 0;
+        }
+        return fail(FE_ERROR_UNSUPPORTED, "Loaded shader binary is unavailable on the active EasyGPU backend.");
+    }
+    return write_bytes(snapshot.bytes, buffer, buffer_size, out_required_size);
 }
 
 #if FEATHER_BUILD_WINDOW
@@ -13724,6 +13842,35 @@ FE_API FeResult fe_kernel_get_optimization_report(FeKernelHandle kernel, char* b
     });
 }
 
+FE_API FeResult fe_kernel_get_shader_binary(FeKernelHandle kernel, uint8_t* buffer, size_t buffer_size,
+                                            size_t* out_required_size, FeShaderBinaryFormat* out_format) {
+    return protect([&] {
+        ShaderBinarySnapshot snapshot;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_kernels.find(kernel) == g_kernels.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+            }
+
+            const auto cache = g_compute_kernel_caches.find(kernel);
+            if (cache == g_compute_kernel_caches.end() || cache->second.context == nullptr ||
+                !cache->second.context->HasCachedPipeline()) {
+                if (out_format != nullptr) {
+                    *out_format = FE_SHADER_BINARY_FORMAT_UNAVAILABLE;
+                }
+                if (out_required_size != nullptr) {
+                    *out_required_size = 0;
+                }
+                return fail(FE_ERROR_UNSUPPORTED,
+                            "Kernel has no loaded backend shader; compile or dispatch it before inspection.");
+            }
+            snapshot = cache->second.shader_binary;
+        }
+
+        return write_shader_binary_snapshot(snapshot, buffer, buffer_size, out_required_size, out_format);
+    });
+}
+
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path) {
     return protect([&] {
         if (out_path == nullptr) {
@@ -14301,6 +14448,22 @@ FE_API FeResult fe_graphics_pipeline_get_fragment_optimization_report(FeGraphics
     return protect([&] {
         return inspect_graphics_shader(
             pipeline, false, GraphicsShaderInspectionKind::OptimizationReport, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_vertex_shader_binary(FeGraphicsPipelineHandle pipeline, uint8_t* buffer,
+                                                              size_t buffer_size, size_t* out_required_size,
+                                                              FeShaderBinaryFormat* out_format) {
+    return protect([&] {
+        return inspect_graphics_shader_binary(pipeline, true, buffer, buffer_size, out_required_size, out_format);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_fragment_shader_binary(FeGraphicsPipelineHandle pipeline, uint8_t* buffer,
+                                                                size_t buffer_size, size_t* out_required_size,
+                                                                FeShaderBinaryFormat* out_format) {
+    return protect([&] {
+        return inspect_graphics_shader_binary(pipeline, false, buffer, buffer_size, out_required_size, out_format);
     });
 }
 

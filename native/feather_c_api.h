@@ -54,6 +54,11 @@ typedef enum FeDispatchPath {
     FE_DISPATCH_PATH_REJECTED = 4
 } FeDispatchPath;
 
+typedef enum FeShaderBinaryFormat {
+    FE_SHADER_BINARY_FORMAT_UNAVAILABLE = 0,
+    FE_SHADER_BINARY_FORMAT_SPIRV = 1
+} FeShaderBinaryFormat;
+
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
     FE_MEMORY_BARRIER_BUFFER = 1u << 0,
@@ -448,6 +453,8 @@ FE_API FeResult fe_kernel_get_optimized_ir(FeKernelHandle kernel, char* buffer, 
                                            size_t* out_required_size);
 FE_API FeResult fe_kernel_get_optimization_report(FeKernelHandle kernel, char* buffer, size_t buffer_size,
                                                   size_t* out_required_size);
+FE_API FeResult fe_kernel_get_shader_binary(FeKernelHandle kernel, uint8_t* buffer, size_t buffer_size,
+                                            size_t* out_required_size, FeShaderBinaryFormat* out_format);
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path);
 FE_API FeResult fe_kernel_get_compile_count(FeKernelHandle kernel, uint64_t* out_count);
 FE_API FeResult fe_kernel_get_ad_gradient_count(FeKernelHandle kernel, uint32_t* out_count);
@@ -500,6 +507,12 @@ FE_API FeResult fe_graphics_pipeline_get_vertex_optimization_report(FeGraphicsPi
 FE_API FeResult fe_graphics_pipeline_get_fragment_optimization_report(FeGraphicsPipelineHandle pipeline,
                                                                       char* buffer, size_t buffer_size,
                                                                       size_t* out_required_size);
+FE_API FeResult fe_graphics_pipeline_get_vertex_shader_binary(FeGraphicsPipelineHandle pipeline, uint8_t* buffer,
+                                                              size_t buffer_size, size_t* out_required_size,
+                                                              FeShaderBinaryFormat* out_format);
+FE_API FeResult fe_graphics_pipeline_get_fragment_shader_binary(FeGraphicsPipelineHandle pipeline, uint8_t* buffer,
+                                                                size_t buffer_size, size_t* out_required_size,
+                                                                FeShaderBinaryFormat* out_format);
 FE_API FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHandle pipeline, uint32_t* out_path);
 
 FE_API FeResult fe_profiler_set_enabled(bool enabled);

@@ -274,6 +274,9 @@ public sealed class GpuKernel : IDisposable
         lock (dispatchGate)
         {
             ThrowIfDisposed();
+            var targetBinary = GetOptionalBinary(
+                (IntPtr buffer, UIntPtr length, out UIntPtr required, out FeShaderBinaryFormat format) =>
+                    NativeMethods.fe_kernel_get_shader_binary(Handle, buffer, length, out required, out format));
             return new LoadedShaderSource(
                 kernelType,
                 ShaderStage.Compute,
@@ -281,7 +284,9 @@ public sealed class GpuKernel : IDisposable
                 NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required)),
                 GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required)),
                 GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_ir(Handle, buffer, length, out required)),
-                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimization_report(Handle, buffer, length, out required)));
+                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimization_report(Handle, buffer, length, out required)),
+                targetBinary.Format,
+                targetBinary.Bytes);
         }
     }
 
@@ -294,6 +299,26 @@ public sealed class GpuKernel : IDisposable
         catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
         {
             return string.Empty;
+        }
+    }
+
+    private static (ShaderBinaryFormat Format, ReadOnlyMemory<byte> Bytes) GetOptionalBinary(NativeByteCall.Getter getter)
+    {
+        try
+        {
+            var binary = NativeByteCall.GetBytes(getter);
+            return binary.Format switch
+            {
+                FeShaderBinaryFormat.SpirV when binary.Bytes.Length > 0 =>
+                    (ShaderBinaryFormat.SpirV, binary.Bytes),
+                FeShaderBinaryFormat.Unavailable when binary.Bytes.Length == 0 =>
+                    (ShaderBinaryFormat.Unavailable, ReadOnlyMemory<byte>.Empty),
+                _ => throw new InvalidOperationException("Native shader binary format and payload are inconsistent.")
+            };
+        }
+        catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
+        {
+            return (ShaderBinaryFormat.Unavailable, ReadOnlyMemory<byte>.Empty);
         }
     }
 

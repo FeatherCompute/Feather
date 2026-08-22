@@ -24,6 +24,12 @@ public enum FeDispatchPath : uint
     Rejected = 4
 }
 
+public enum FeShaderBinaryFormat : uint
+{
+    Unavailable = 0,
+    SpirV = 1
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct FeBackendCaps
 {

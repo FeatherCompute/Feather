@@ -111,6 +111,15 @@ public enum ShaderStage
 }
 
 /// <summary>
+/// Identifies the exact target-binary format used to create a loaded shader module.
+/// </summary>
+public enum ShaderBinaryFormat
+{
+    Unavailable,
+    SpirV
+}
+
+/// <summary>
 /// Exact shader material captured from a live Feather kernel or graphics pipeline.
 /// Optimized fields are empty when the active backend cannot expose that representation.
 /// </summary>
@@ -121,7 +130,9 @@ public sealed record LoadedShaderSource(
     string BackendInputGLSL,
     string OptimizedBackendGLSL,
     string OptimizedTargetIR,
-    string OptimizationReportJson);
+    string OptimizationReportJson,
+    ShaderBinaryFormat TargetBinaryFormat,
+    ReadOnlyMemory<byte> TargetBinary);
 
 internal interface ILoadedGraphicsShaderInspection
 {

@@ -532,6 +532,9 @@ public static class NativeMethods
     public static extern FeResult fe_kernel_get_optimization_report(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_get_shader_binary(FeKernelHandle kernel, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size, out FeShaderBinaryFormat out_format);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, out FeDispatchPath out_path);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -617,6 +620,12 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_graphics_pipeline_get_fragment_optimization_report(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_vertex_shader_binary(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size, out FeShaderBinaryFormat out_format);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_graphics_pipeline_get_fragment_shader_binary(FeGraphicsPipelineHandle pipeline, IntPtr buffer, UIntPtr buffer_size, out UIntPtr out_required_size, out FeShaderBinaryFormat out_format);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_graphics_pipeline_get_last_dispatch_path(FeGraphicsPipelineHandle pipeline, out FeDispatchPath out_path);

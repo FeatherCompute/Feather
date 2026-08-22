@@ -863,7 +863,13 @@ public class GeneratedComputeDispatchTests
             candidate => candidate.SourceType == typeof(CopyKernel)
                 && candidate.Stage == ShaderStage.Compute
                 && !candidate.AutoDiff);
+        var repeatedShader = Assert.Single(
+            ShaderInspection.GetLoadedShaders(typeof(CopyKernel).Assembly),
+            candidate => candidate.SourceType == typeof(CopyKernel)
+                && candidate.Stage == ShaderStage.Compute
+                && !candidate.AutoDiff);
         Assert.Equal(countersBeforeInspection, GPU.Context.ShaderCacheCounters);
+        Assert.Equal(shader.TargetBinary.ToArray(), repeatedShader.TargetBinary.ToArray());
 
         Assert.Contains("#version", shader.BackendInputGLSL, StringComparison.Ordinal);
         Assert.Contains("main", shader.BackendInputGLSL, StringComparison.Ordinal);
@@ -875,6 +881,9 @@ public class GeneratedComputeDispatchTests
             }
             Assert.Contains("OpEntryPoint GLCompute", shader.OptimizedTargetIR, StringComparison.Ordinal);
             Assert.Contains("OpFunction", shader.OptimizedTargetIR, StringComparison.Ordinal);
+            Assert.Equal(ShaderBinaryFormat.SpirV, shader.TargetBinaryFormat);
+            Assert.True(shader.TargetBinary.Length >= 5 * sizeof(uint));
+            Assert.Equal(0x07230203u, BitConverter.ToUInt32(shader.TargetBinary.Span));
             using var report = JsonDocument.Parse(shader.OptimizationReportJson);
             Assert.Equal("EasyGPU.ShaderOptimizationReport", report.RootElement.GetProperty("kind").GetString());
             Assert.Equal(1, report.RootElement.GetProperty("schemaVersion").GetInt32());
@@ -890,6 +899,8 @@ public class GeneratedComputeDispatchTests
         {
             Assert.Empty(shader.OptimizedTargetIR);
             Assert.Empty(shader.OptimizationReportJson);
+            Assert.Equal(ShaderBinaryFormat.Unavailable, shader.TargetBinaryFormat);
+            Assert.True(shader.TargetBinary.IsEmpty);
         }
     }
 

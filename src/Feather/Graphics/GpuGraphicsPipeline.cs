@@ -593,6 +593,14 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         lock (dispatchGate)
         {
             ThrowIfDisposed();
+            var vertexBinary = GetOptionalNativeBinary(
+                (IntPtr buffer, UIntPtr length, out UIntPtr required, out FeShaderBinaryFormat format) =>
+                    NativeMethods.fe_graphics_pipeline_get_vertex_shader_binary(
+                        Handle, buffer, length, out required, out format));
+            var fragmentBinary = GetOptionalNativeBinary(
+                (IntPtr buffer, UIntPtr length, out UIntPtr required, out FeShaderBinaryFormat format) =>
+                    NativeMethods.fe_graphics_pipeline_get_fragment_shader_binary(
+                        Handle, buffer, length, out required, out format));
             return
             [
                 new LoadedShaderSource(
@@ -602,7 +610,9 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_ir(Handle, buffer, length, out required)),
-                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_optimization_report(Handle, buffer, length, out required))),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_optimization_report(Handle, buffer, length, out required)),
+                    vertexBinary.Format,
+                    vertexBinary.Bytes),
                 new LoadedShaderSource(
                     typeof(TFragmentShader),
                     ShaderStage.Fragment,
@@ -610,7 +620,9 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required)),
-                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_optimization_report(Handle, buffer, length, out required)))
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_optimization_report(Handle, buffer, length, out required)),
+                    fragmentBinary.Format,
+                    fragmentBinary.Bytes)
             ];
         }
     }
@@ -637,6 +649,27 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
         {
             return string.Empty;
+        }
+    }
+
+    private static (ShaderBinaryFormat Format, ReadOnlyMemory<byte> Bytes) GetOptionalNativeBinary(
+        NativeByteCall.Getter getter)
+    {
+        try
+        {
+            var binary = NativeByteCall.GetBytes(getter);
+            return binary.Format switch
+            {
+                FeShaderBinaryFormat.SpirV when binary.Bytes.Length > 0 =>
+                    (ShaderBinaryFormat.SpirV, binary.Bytes),
+                FeShaderBinaryFormat.Unavailable when binary.Bytes.Length == 0 =>
+                    (ShaderBinaryFormat.Unavailable, ReadOnlyMemory<byte>.Empty),
+                _ => throw new InvalidOperationException("Native shader binary format and payload are inconsistent.")
+            };
+        }
+        catch (FeatherNativeException exception) when (exception.Result == FeResult.ErrorUnsupported)
+        {
+            return (ShaderBinaryFormat.Unavailable, ReadOnlyMemory<byte>.Empty);
         }
     }
 

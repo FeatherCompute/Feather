@@ -73,6 +73,16 @@ public class GeneratedGraphicsPipelineTests
         var fragment = Assert.Single(
             loaded,
             shader => shader.SourceType == typeof(GeneratedFragmentShader) && shader.Stage == ShaderStage.Fragment);
+        var repeated = ShaderInspection.GetLoadedShaders(typeof(GeneratedVertexShader).Assembly);
+        var repeatedVertex = Assert.Single(
+            repeated,
+            shader => shader.SourceType == typeof(GeneratedVertexShader) && shader.Stage == ShaderStage.Vertex);
+        var repeatedFragment = Assert.Single(
+            repeated,
+            shader => shader.SourceType == typeof(GeneratedFragmentShader) && shader.Stage == ShaderStage.Fragment);
+        Assert.Equal(countersBeforeInspection, GPU.Context.ShaderCacheCounters);
+        Assert.Equal(vertex.TargetBinary.ToArray(), repeatedVertex.TargetBinary.ToArray());
+        Assert.Equal(fragment.TargetBinary.ToArray(), repeatedFragment.TargetBinary.ToArray());
 
         Assert.Equal(pipeline.GetVertexGLSL(), vertex.BackendInputGLSL);
         Assert.Equal(pipeline.GetFragmentGLSL(), fragment.BackendInputGLSL);
@@ -88,6 +98,10 @@ public class GeneratedGraphicsPipelineTests
             }
             Assert.Contains("OpEntryPoint Vertex", vertex.OptimizedTargetIR, StringComparison.Ordinal);
             Assert.Contains("OpEntryPoint Fragment", fragment.OptimizedTargetIR, StringComparison.Ordinal);
+            Assert.Equal(ShaderBinaryFormat.SpirV, vertex.TargetBinaryFormat);
+            Assert.Equal(ShaderBinaryFormat.SpirV, fragment.TargetBinaryFormat);
+            Assert.Equal(0x07230203u, BitConverter.ToUInt32(vertex.TargetBinary.Span));
+            Assert.Equal(0x07230203u, BitConverter.ToUInt32(fragment.TargetBinary.Span));
             using var vertexReport = JsonDocument.Parse(vertex.OptimizationReportJson);
             using var fragmentReport = JsonDocument.Parse(fragment.OptimizationReportJson);
             Assert.Equal("EasyGPU.ShaderOptimizationReport", vertexReport.RootElement.GetProperty("kind").GetString());
@@ -103,6 +117,10 @@ public class GeneratedGraphicsPipelineTests
             Assert.Empty(fragment.OptimizedTargetIR);
             Assert.Empty(vertex.OptimizationReportJson);
             Assert.Empty(fragment.OptimizationReportJson);
+            Assert.Equal(ShaderBinaryFormat.Unavailable, vertex.TargetBinaryFormat);
+            Assert.Equal(ShaderBinaryFormat.Unavailable, fragment.TargetBinaryFormat);
+            Assert.True(vertex.TargetBinary.IsEmpty);
+            Assert.True(fragment.TargetBinary.IsEmpty);
         }
     }
 
