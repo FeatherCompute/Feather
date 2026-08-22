@@ -401,6 +401,11 @@ public static class NativeMethods
     public static extern FeResult fe_buffer_unmap(FeBufferHandle buffer);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_buffer_get_allocation_info(
+        FeBufferHandle buffer,
+        out FeResourceAllocationInfo out_info);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture2d_create(FeContextHandle context, in FeTexture2DDesc desc, IntPtr initial_data, out FeTextureHandle out_texture);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -408,6 +413,11 @@ public static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture_destroy(IntPtr texture);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_texture_get_allocation_info(
+        FeTextureHandle texture,
+        out FeResourceAllocationInfo out_info);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_texture_prepare_declared_access(FeTextureHandle texture);

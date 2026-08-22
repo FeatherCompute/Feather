@@ -108,6 +108,17 @@ typedef struct FeBackendResourceCounters {
     uint64_t live_msaa_attachments;
 } FeBackendResourceCounters;
 
+/**
+ * Exact physical allocation evidence for one materialized GPU resource.
+ * allocation_group is opaque and must never be interpreted as a native handle
+ * or pointer. Equal non-zero groups identify the same physical allocation.
+ */
+typedef struct FeResourceAllocationInfo {
+    uint64_t available;
+    uint64_t physical_bytes;
+    uint64_t allocation_group;
+} FeResourceAllocationInfo;
+
 typedef struct FeBackendShaderCacheCounters {
     uint64_t tracking_supported;
     uint64_t memory_cache_hits;
@@ -385,12 +396,14 @@ FE_API FeResult fe_buffer_copy(FeBufferHandle source, uint64_t source_offset, Fe
                                uint64_t destination_offset, uint64_t size);
 FE_API FeResult fe_buffer_map(FeBufferHandle buffer, uint32_t mode, void** out_ptr);
 FE_API FeResult fe_buffer_unmap(FeBufferHandle buffer);
+FE_API FeResult fe_buffer_get_allocation_info(FeBufferHandle buffer, FeResourceAllocationInfo* out_info);
 
 FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture);
 FE_API FeResult fe_texture3d_create(FeContextHandle context, const FeTexture3DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture);
 FE_API FeResult fe_texture_destroy(FeTextureHandle texture);
+FE_API FeResult fe_texture_get_allocation_info(FeTextureHandle texture, FeResourceAllocationInfo* out_info);
 /** Record a resource-scoped transition back to the texture's declared access; does not submit or wait. */
 FE_API FeResult fe_texture_prepare_declared_access(FeTextureHandle texture);
 /** Record a resource-scoped transition to sampled access; does not submit or wait. */

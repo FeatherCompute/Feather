@@ -7,7 +7,7 @@ namespace Feather.Resources;
 /// Owns a typed EasyGPU storage buffer.
 /// </summary>
 /// <typeparam name="T">The unmanaged shader element type.</typeparam>
-public sealed class GpuBuffer<T> : IDisposable
+public sealed class GpuBuffer<T> : IDisposable, IGpuResourceAllocation
     where T : unmanaged
 {
     private bool disposed;
@@ -43,6 +43,24 @@ public sealed class GpuBuffer<T> : IDisposable
     /// Gets the buffer access mode.
     /// </summary>
     public BufferAccess Access { get; }
+
+    /// <inheritdoc />
+    public GpuResourceAllocationInfo AllocationInfo
+    {
+        get
+        {
+            ThrowIfDisposed();
+            using var operation = Context.EnterOperation();
+            lock (Context.QueueGate)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_get_allocation_info(Handle, out var info));
+                return new GpuResourceAllocationInfo(
+                    info.Available != 0,
+                    info.PhysicalBytes,
+                    info.AllocationGroup);
+            }
+        }
+    }
 
     /// <summary>
     /// Gets the EasyGPU std430 array stride for one element.

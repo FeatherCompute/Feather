@@ -62,6 +62,11 @@ Most applications use `GPU.Context` rather than constructing contexts manually.
 Buffer views returned by `.AsReadOnly()`, `.AsWriteOnly()`, and `.AsReadWrite()` are non-owning shader bindings. Keep and dispose the `GpuBuffer<T>` owner. The convenience allocation methods return that owner rather than a view whose owner would otherwise be lost.
 Owning buffers implicitly convert to a compatible shader view, so existing constructor calls can continue to pass a convenience-factory result directly.
 
+Owning buffers and textures implement `IGpuResourceAllocation`. Its `AllocationInfo` query is side-effect free: before a
+lazy resource is materialized, or when the backend cannot expose exact allocation evidence, `Available` is false. When
+available, `PhysicalBytes` is the backend's exact allocation size and `AllocationGroup` is an opaque identity used only
+to compare whether resources share that allocation.
+
 ## Queue, Command Lists, And Fences
 
 `GPU.Queue` is the context's ordered submission queue. A `GpuCommandList` starts in the recording state, must be closed before submission, and can then be submitted repeatedly. `Reset()` clears it and returns it to recording. `IsClosed`, `IsDisposed`, and `Count` expose its current recording state without changing it.

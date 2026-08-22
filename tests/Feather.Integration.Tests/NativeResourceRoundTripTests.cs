@@ -71,11 +71,22 @@ public class NativeResourceRoundTripTests
             new Rgba32(7, 8, 9, 255),
             new Rgba32(10, 11, 12, 255),
         ]);
+        Assert.Equal(default, buffer.AllocationInfo);
+        Assert.Equal(default, texture.AllocationInfo);
         var readback = texture.BeginReadback(buffer, 0, 0, 2, 2);
         Assert.True(readback.Wait(TimeSpan.FromSeconds(10)));
         var allocated = context.ResourceCounters;
         Assert.Equal(baseline.LiveBufferHandles + 1, allocated.LiveBufferHandles);
         Assert.Equal(baseline.LiveTextureHandles + 1, allocated.LiveTextureHandles);
+        var bufferAllocation = buffer.AllocationInfo;
+        var textureAllocation = texture.AllocationInfo;
+        Assert.True(bufferAllocation.Available);
+        Assert.True(bufferAllocation.PhysicalBytes >= (ulong)buffer.SizeInBytes);
+        Assert.NotEqual(0ul, bufferAllocation.AllocationGroup);
+        Assert.True(textureAllocation.Available);
+        Assert.True(textureAllocation.PhysicalBytes >= 2ul * 2ul * 4ul);
+        Assert.NotEqual(0ul, textureAllocation.AllocationGroup);
+        Assert.NotEqual(bufferAllocation.AllocationGroup, textureAllocation.AllocationGroup);
 
         using (readback.Map())
         {

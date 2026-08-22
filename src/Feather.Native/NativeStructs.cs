@@ -79,6 +79,14 @@ public readonly struct FeBackendResourceCounters
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public readonly struct FeResourceAllocationInfo
+{
+    public readonly ulong Available;
+    public readonly ulong PhysicalBytes;
+    public readonly ulong AllocationGroup;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public readonly struct FeBackendShaderCacheCounters
 {
     public readonly ulong TrackingSupported;

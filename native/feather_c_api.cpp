@@ -12637,6 +12637,36 @@ FE_API FeResult fe_buffer_unmap(FeBufferHandle buffer) {
     });
 }
 
+FE_API FeResult fe_buffer_get_allocation_info(FeBufferHandle buffer, FeResourceAllocationInfo* out_info) {
+    return protect([&] {
+        if (out_info == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_info must not be null.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_buffers.find(buffer);
+        if (it == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid buffer handle.");
+        }
+        if (it->second.backend_buffer == GPU::Backend::INVALID_BUFFER_HANDLE) {
+            *out_info = FeResourceAllocationInfo{};
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        const auto info = backend->GetBufferAllocationInfo(it->second.backend_buffer);
+        *out_info = FeResourceAllocationInfo{
+            info.available ? 1u : 0u,
+            info.physicalBytes,
+            info.allocationGroup,
+        };
+        return ok();
+    });
+}
+
 FE_API FeResult fe_texture2d_create(FeContextHandle context, const FeTexture2DDesc* desc, const void* initial_data,
                                     FeTextureHandle* out_texture) {
     return protect([&] {
@@ -12737,6 +12767,36 @@ FE_API FeResult fe_texture_destroy(FeTextureHandle texture) {
         }
 
         g_textures.erase(it);
+        return ok();
+    });
+}
+
+FE_API FeResult fe_texture_get_allocation_info(FeTextureHandle texture, FeResourceAllocationInfo* out_info) {
+    return protect([&] {
+        if (out_info == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "out_info must not be null.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_textures.find(texture);
+        if (it == g_textures.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid texture handle.");
+        }
+        if (it->second.backend_texture == GPU::Backend::INVALID_TEXTURE_HANDLE) {
+            *out_info = FeResourceAllocationInfo{};
+            return ok();
+        }
+
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        auto* backend = GPU::Runtime::Context::GetBackend();
+        if (backend == nullptr) {
+            return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+        }
+        const auto info = backend->GetTextureAllocationInfo(it->second.backend_texture);
+        *out_info = FeResourceAllocationInfo{
+            info.available ? 1u : 0u,
+            info.physicalBytes,
+            info.allocationGroup,
+        };
         return ok();
     });
 }

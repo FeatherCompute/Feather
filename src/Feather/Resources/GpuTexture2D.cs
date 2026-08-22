@@ -44,6 +44,7 @@ internal interface IGpuTexture2DNative : IGpuTexture2D
 public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     , IGpuTexture2D
     , IReadbackGpuTexture2D
+    , IGpuResourceAllocation
     , IGpuTexture2DNative
     where TPixel : unmanaged
     where TValue : unmanaged
@@ -101,6 +102,24 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     /// Gets the host and shader access mode for this texture.
     /// </summary>
     public TextureAccess Access { get; }
+
+    /// <inheritdoc />
+    public GpuResourceAllocationInfo AllocationInfo
+    {
+        get
+        {
+            ThrowIfDisposed();
+            using var operation = Context.EnterOperation();
+            lock (Context.QueueGate)
+            {
+                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_get_allocation_info(Handle, out var info));
+                return new GpuResourceAllocationInfo(
+                    info.Available != 0,
+                    info.PhysicalBytes,
+                    info.AllocationGroup);
+            }
+        }
+    }
 
     /// <summary>
     /// Creates a two-dimensional texture with one mip level.

@@ -43,6 +43,8 @@ try
     _ = NativeLibrary.GetExport(handle, "fe_runtime_flush_caches");
     _ = NativeLibrary.GetExport(handle, "fe_runtime_shutdown");
     _ = NativeLibrary.GetExport(handle, "fe_context_get_resource_counters");
+    _ = NativeLibrary.GetExport(handle, "fe_buffer_get_allocation_info");
+    _ = NativeLibrary.GetExport(handle, "fe_texture_get_allocation_info");
     _ = NativeLibrary.GetExport(handle, "fe_context_get_shader_cache_counters");
     _ = NativeLibrary.GetExport(handle, "fe_kernel_reduce_ad_gradient_to_buffer_ex");
 
