@@ -417,6 +417,24 @@ public static class ShaderMath
     /// <summary>Integer minimum, for clamping indices inside a kernel.</summary>
     public static int Min(int x, int y) => System.Math.Min(x, y);
 
+    /// <summary>Returns the lesser integer for each component.</summary>
+    public static int2 Min(int2 x, int2 y) => new(Min(x.X, y.X), Min(x.Y, y.Y));
+
+    /// <summary>Returns the lesser integer for each component.</summary>
+    public static int3 Min(int3 x, int3 y) => new(Min(x.X, y.X), Min(x.Y, y.Y), Min(x.Z, y.Z));
+
+    /// <summary>Returns the lesser integer for each component.</summary>
+    public static int4 Min(int4 x, int4 y) => new(Min(x.X, y.X), Min(x.Y, y.Y), Min(x.Z, y.Z), Min(x.W, y.W));
+
+    /// <summary>Returns the lesser of each integer vector component and a scalar.</summary>
+    public static int2 Min(int2 x, int y) => new(Min(x.X, y), Min(x.Y, y));
+
+    /// <summary>Returns the lesser of each integer vector component and a scalar.</summary>
+    public static int3 Min(int3 x, int y) => new(Min(x.X, y), Min(x.Y, y), Min(x.Z, y));
+
+    /// <summary>Returns the lesser of each integer vector component and a scalar.</summary>
+    public static int4 Min(int4 x, int y) => new(Min(x.X, y), Min(x.Y, y), Min(x.Z, y), Min(x.W, y));
+
     /// <summary>
     /// Returns the lesser value for each component.
     /// </summary>
@@ -449,6 +467,24 @@ public static class ShaderMath
     /// <summary>Integer maximum, for clamping indices inside a kernel.</summary>
     public static int Max(int x, int y) => System.Math.Max(x, y);
 
+    /// <summary>Returns the greater integer for each component.</summary>
+    public static int2 Max(int2 x, int2 y) => new(Max(x.X, y.X), Max(x.Y, y.Y));
+
+    /// <summary>Returns the greater integer for each component.</summary>
+    public static int3 Max(int3 x, int3 y) => new(Max(x.X, y.X), Max(x.Y, y.Y), Max(x.Z, y.Z));
+
+    /// <summary>Returns the greater integer for each component.</summary>
+    public static int4 Max(int4 x, int4 y) => new(Max(x.X, y.X), Max(x.Y, y.Y), Max(x.Z, y.Z), Max(x.W, y.W));
+
+    /// <summary>Returns the greater of each integer vector component and a scalar.</summary>
+    public static int2 Max(int2 x, int y) => new(Max(x.X, y), Max(x.Y, y));
+
+    /// <summary>Returns the greater of each integer vector component and a scalar.</summary>
+    public static int3 Max(int3 x, int y) => new(Max(x.X, y), Max(x.Y, y), Max(x.Z, y));
+
+    /// <summary>Returns the greater of each integer vector component and a scalar.</summary>
+    public static int4 Max(int4 x, int y) => new(Max(x.X, y), Max(x.Y, y), Max(x.Z, y), Max(x.W, y));
+
     /// <summary>
     /// Returns the greater value for each component.
     /// </summary>
@@ -480,6 +516,25 @@ public static class ShaderMath
 
     /// <summary>Integer clamp, for keeping a texture index inside bounds.</summary>
     public static int Clamp(int x, int min, int max) => System.Math.Clamp(x, min, max);
+
+    /// <summary>Clamps each integer vector component to a closed scalar interval.</summary>
+    public static int2 Clamp(int2 x, int min, int max) => new(Clamp(x.X, min, max), Clamp(x.Y, min, max));
+
+    /// <summary>Clamps each integer vector component to a closed scalar interval.</summary>
+    public static int3 Clamp(int3 x, int min, int max) => new(Clamp(x.X, min, max), Clamp(x.Y, min, max), Clamp(x.Z, min, max));
+
+    /// <summary>Clamps each integer vector component to a closed scalar interval.</summary>
+    public static int4 Clamp(int4 x, int min, int max)
+        => new(Clamp(x.X, min, max), Clamp(x.Y, min, max), Clamp(x.Z, min, max), Clamp(x.W, min, max));
+
+    /// <summary>Clamps each integer vector component to the corresponding component interval.</summary>
+    public static int2 Clamp(int2 x, int2 min, int2 max) => Max(min, Min(max, x));
+
+    /// <summary>Clamps each integer vector component to the corresponding component interval.</summary>
+    public static int3 Clamp(int3 x, int3 min, int3 max) => Max(min, Min(max, x));
+
+    /// <summary>Clamps each integer vector component to the corresponding component interval.</summary>
+    public static int4 Clamp(int4 x, int4 min, int4 max) => Max(min, Min(max, x));
 
     /// <summary>
     /// Clamps each vector component to a closed scalar interval.

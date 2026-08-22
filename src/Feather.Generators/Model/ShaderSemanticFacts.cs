@@ -62,6 +62,9 @@ internal static class ShaderSemanticFacts
     public static bool IsFloatType(ITypeSymbol? type)
         => type?.SpecialType == SpecialType.System_Single;
 
+    public static bool IsIntType(ITypeSymbol? type)
+        => type?.SpecialType == SpecialType.System_Int32;
+
     public static bool IsFloatVectorType(ITypeSymbol? type, int componentCount)
     {
         var typeName = type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
@@ -70,6 +73,15 @@ internal static class ShaderSemanticFacts
 
     public static bool IsFloatVectorType(ITypeSymbol? type)
         => IsFloatVectorType(type, 2) || IsFloatVectorType(type, 3) || IsFloatVectorType(type, 4);
+
+    public static bool IsIntVectorType(ITypeSymbol? type, int componentCount)
+    {
+        var typeName = type?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        return typeName == "global::Feather.Math.int" + componentCount.ToString(CultureInfo.InvariantCulture);
+    }
+
+    public static bool IsIntVectorType(ITypeSymbol? type)
+        => IsIntVectorType(type, 2) || IsIntVectorType(type, 3) || IsIntVectorType(type, 4);
 
     public static bool IsSquareFloatMatrixType(ITypeSymbol? type)
     {
@@ -117,13 +129,6 @@ internal static class ShaderSemanticFacts
             return true;
         }
 
-        // GLSL min/max accept integers, and clamping an index is common enough in a kernel that
-        // forcing a hand-written comparison chain is a pointless restriction.
-        if (HasIntSignature(method, 2))
-        {
-            return true;
-        }
-
         return method.Parameters.Length == 2
             && IsFloatVectorType(method.ReturnType)
             && IsSameType(method.ReturnType, method.Parameters[0].Type)
@@ -131,14 +136,23 @@ internal static class ShaderSemanticFacts
                 IsFloatType(method.Parameters[1].Type));
     }
 
-    public static bool HasFloatOrMatchingFloatVectorClampSignature(IMethodSymbol method)
+    public static bool HasNumericMinMaxSignature(IMethodSymbol method)
     {
-        if (HasFloatSignature(method, 3))
+        if (HasFloatOrMatchingFloatVectorBinarySignature(method) || HasIntSignature(method, 2))
         {
             return true;
         }
 
-        if (HasIntSignature(method, 3))
+        return method.Parameters.Length == 2
+            && IsIntVectorType(method.ReturnType)
+            && IsSameType(method.ReturnType, method.Parameters[0].Type)
+            && (IsSameType(method.ReturnType, method.Parameters[1].Type) ||
+                IsIntType(method.Parameters[1].Type));
+    }
+
+    public static bool HasFloatOrMatchingFloatVectorClampSignature(IMethodSymbol method)
+    {
+        if (HasFloatSignature(method, 3))
         {
             return true;
         }
@@ -151,6 +165,25 @@ internal static class ShaderSemanticFacts
         }
 
         return (IsFloatType(method.Parameters[1].Type) && IsFloatType(method.Parameters[2].Type)) ||
+            (IsSameType(method.ReturnType, method.Parameters[1].Type) &&
+             IsSameType(method.ReturnType, method.Parameters[2].Type));
+    }
+
+    public static bool HasNumericClampSignature(IMethodSymbol method)
+    {
+        if (HasFloatOrMatchingFloatVectorClampSignature(method) || HasIntSignature(method, 3))
+        {
+            return true;
+        }
+
+        if (method.Parameters.Length != 3 ||
+            !IsIntVectorType(method.ReturnType) ||
+            !IsSameType(method.ReturnType, method.Parameters[0].Type))
+        {
+            return false;
+        }
+
+        return (IsIntType(method.Parameters[1].Type) && IsIntType(method.Parameters[2].Type)) ||
             (IsSameType(method.ReturnType, method.Parameters[1].Type) &&
              IsSameType(method.ReturnType, method.Parameters[2].Type));
     }

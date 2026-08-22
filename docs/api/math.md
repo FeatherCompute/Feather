@@ -67,6 +67,8 @@ The scalar-style functions below also accept `float2`, `float3`, and `float4` an
 
 `Pow` accepts matching base and exponent vectors. `Min` and `Max` accept either a matching vector or a scalar second operand. `Clamp` accepts matching vector bounds or two scalar bounds. `Lerp` and `Mix` accept either a scalar factor or a matching factor vector. `Smoothstep` accepts either three matching vectors or two scalar edges and a vector value. `Reflect` is available for `float2`, `float3`, and `float4`.
 
+The integer bounds helpers follow the same shape rules: `Min`, `Max`, and `Clamp` accept `int2`, `int3`, and `int4`, with either matching vector operands/bounds or scalar operands/bounds where applicable.
+
 ```csharp
 float3 phase = new float3(time, time + uv.X, time + uv.Y);
 float3 wave = ShaderMath.Cos(phase);

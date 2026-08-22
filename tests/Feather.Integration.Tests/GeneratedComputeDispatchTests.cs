@@ -1419,6 +1419,41 @@ public class GeneratedComputeDispatchTests
     }
 
     [Fact]
+    public void DispatchExecutesIntegerVectorBoundsIntrinsicsFromTypedIrWhenLegacySectionsAreRemoved()
+    {
+        try
+        {
+            GpuKernel.IrTransformForTesting = StripToTypedIrOnly;
+            var inputValues = new[]
+            {
+                new int3(-7, 2, 12),
+                new int3(3, 9, -4)
+            };
+            var expected = inputValues.Select(static value =>
+            {
+                var pairwise = ShaderMath.Max(
+                    ShaderMath.Min(value, new int3(5, 4, 3)),
+                    new int3(-2, -1, 0));
+                return ShaderMath.Clamp(
+                    ShaderMath.Max(ShaderMath.Min(pairwise, 8), -2),
+                    new int3(-1, 0, 1),
+                    new int3(4, 5, 6));
+            }).ToArray();
+
+            using var input = GPU.CreateBuffer<int3>(inputValues);
+            using var output = GPU.CreateBuffer<int3>(inputValues.Length);
+
+            GPU.Dispatch(new IntegerVectorBoundsIntrinsicKernel(input.AsReadOnly(), output.AsReadWrite()), inputValues.Length);
+
+            Assert.Equal(expected, output.ToArray());
+        }
+        finally
+        {
+            GpuKernel.IrTransformForTesting = null;
+        }
+    }
+
+    [Fact]
     public void ShaderInspectionBuildsVectorSwizzlesFromTypedIrWhenLegacySectionsAreRemoved()
     {
         try
@@ -4992,6 +5027,23 @@ public readonly partial struct VectorMathIntrinsicOverloadKernel(ReadOnlyBuffer<
             1.0f,
             ShaderMath.Min(ShaderMath.Abs(trigonometric + hyperbolic + exponential), 1.0f));
         output[i] = ShaderMath.Mix(smooth, inverseRoots, new float3(0.25f, 0.5f, 0.75f));
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct IntegerVectorBoundsIntrinsicKernel(ReadOnlyBuffer<int3> input, ReadWriteBuffer<int3> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        int3 pairwise = ShaderMath.Max(
+            ShaderMath.Min(input[i], new int3(5, 4, 3)),
+            new int3(-2, -1, 0));
+        output[i] = ShaderMath.Clamp(
+            ShaderMath.Max(ShaderMath.Min(pairwise, 8), -2),
+            new int3(-1, 0, 1),
+            new int3(4, 5, 6));
     }
 }
 

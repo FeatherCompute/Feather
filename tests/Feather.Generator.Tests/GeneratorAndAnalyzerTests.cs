@@ -3870,6 +3870,35 @@ public class GeneratorAndAnalyzerTests
     }
 
     [Fact]
+    public async Task AnalyzerAcceptsIntegerVectorBoundsIntrinsicOverloadsInsideElementwiseAssignment()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using Feather;
+            using Feather.Math;
+            using Feather.Resources;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct GoodKernel(ReadOnlyBuffer<int3> input, ReadWriteBuffer<int3> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    int3 pairwise = ShaderMath.Max(
+                        ShaderMath.Min(input[i], new int3(5, 4, 3)),
+                        new int3(-2, -1, 0));
+                    output[i] = ShaderMath.Clamp(
+                        ShaderMath.Max(ShaderMath.Min(pairwise, 8), -2),
+                        new int3(-1, 0, 1),
+                        new int3(4, 5, 6));
+                }
+            }
+            """);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "FE0026");
+    }
+
+    [Fact]
     public async Task AnalyzerAcceptsMatrixMathIntrinsicOverloadsInsideElementwiseAssignment()
     {
         var diagnostics = await AnalyzeAsync("""
@@ -5085,6 +5114,45 @@ public class GeneratorAndAnalyzerTests
             Assert.NotEqual(uint.MaxValue, expression.FirstArgument);
             Assert.InRange(expression.FirstArgument, 0u, (uint)section.Arguments.Count - expression.ArgumentCount);
         });
+    }
+
+    [Fact]
+    public void TypedIrWriterSerializesIntegerVectorBoundsIntrinsicCalls()
+    {
+        var module = LowerTypedModule("""
+            using Feather;
+            using Feather.Math;
+            using Feather.Resources;
+
+            namespace Scratch;
+
+            [Kernel]
+            [ThreadGroupSize(1)]
+            public readonly partial struct IntegerVectorBoundsKernel(ReadOnlyBuffer<int3> input, ReadWriteBuffer<int3> output) : IKernel1D
+            {
+                public void Execute()
+                {
+                    int i = ThreadIds.X;
+                    int3 pairwise = ShaderMath.Max(
+                        ShaderMath.Min(input[i], new int3(5, 4, 3)),
+                        new int3(-2, -1, 0));
+                    output[i] = ShaderMath.Clamp(
+                        ShaderMath.Max(ShaderMath.Min(pairwise, 8), -2),
+                        new int3(-1, 0, 1),
+                        new int3(4, 5, 6));
+                }
+            }
+            """);
+
+        var section = ReadTypedIrSection(ShaderIrModuleWriter.WriteModule(module));
+        var intrinsicNames = section.Expressions
+            .Where(expression => expression.Kind == 13)
+            .Select(expression => section.Strings[(int)expression.NameId])
+            .ToArray();
+
+        Assert.Contains("global::Feather.Math.ShaderMath.Min", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Max", intrinsicNames);
+        Assert.Contains("global::Feather.Math.ShaderMath.Clamp", intrinsicNames);
     }
 
     [Fact]

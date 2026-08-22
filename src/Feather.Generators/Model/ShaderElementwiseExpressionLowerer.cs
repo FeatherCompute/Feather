@@ -532,8 +532,8 @@ internal static class ShaderElementwiseExpressionLowerer
                 && ShaderSemanticFacts.IsFeatherVectorType(method.ReturnType)
                 && ShaderSemanticFacts.IsFeatherVectorType(method.Parameters[0].Type),
             "Pow" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),
-            "Min" or "Max" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(method),
-            "Clamp" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorClampSignature(method),
+            "Min" or "Max" => ShaderSemanticFacts.HasNumericMinMaxSignature(method),
+            "Clamp" => ShaderSemanticFacts.HasNumericClampSignature(method),
             "Lerp" or "Mix" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorLerpSignature(method),
             "Smoothstep" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorSmoothstepSignature(method),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(method),

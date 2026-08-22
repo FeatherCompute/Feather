@@ -220,14 +220,25 @@ public class MathSurfaceTests
             AssertVectorOverload(typeof(Hlsl), nameof(Hlsl.Mix), vectorType, vectorType, vectorType, vectorType);
         }
 
+        foreach (var vectorType in new[] { typeof(int2), typeof(int3), typeof(int4) })
+        {
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Min), vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Min), vectorType, vectorType, typeof(int));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Max), vectorType, vectorType, vectorType);
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Max), vectorType, vectorType, typeof(int));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Clamp), vectorType, vectorType, typeof(int), typeof(int));
+            AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Clamp), vectorType, vectorType, vectorType, vectorType);
+        }
+
         AssertVectorOverload(typeof(ShaderMath), nameof(ShaderMath.Reflect), typeof(float4), typeof(float4), typeof(float4));
     }
 
     [Fact]
-    public void EveryScalarComponentwiseIntrinsicKeepsAllFloatVectorWidths()
+    public void EveryScalarComponentwiseIntrinsicKeepsAllVectorWidths()
     {
-        AssertScalarVectorParity(typeof(ShaderMath));
-        AssertScalarVectorParity(typeof(Hlsl));
+        AssertScalarVectorParity(typeof(ShaderMath), typeof(float), typeof(float2), typeof(float3), typeof(float4));
+        AssertScalarVectorParity(typeof(Hlsl), typeof(float), typeof(float2), typeof(float3), typeof(float4));
+        AssertScalarVectorParity(typeof(ShaderMath), typeof(int), typeof(int2), typeof(int3), typeof(int4));
     }
 
     [Fact]
@@ -253,6 +264,10 @@ public class MathSurfaceTests
         Assert.Equal(new float3(0.5f, 0.5f, 1.0f), ShaderMath.Max(x, 0.5f));
         Assert.Equal(new float4(1.0f, -1.0f, 0.0f, 0.0f), ShaderMath.Reflect(new float4(1.0f, 1.0f, 0.0f, 0.0f), new float4(0.0f, 1.0f, 0.0f, 0.0f)));
         Assert.Equal(ShaderMath.Cos(x), Hlsl.Cos(x));
+        Assert.Equal(new int3(-2, 3, 4), ShaderMath.Min(new int3(-2, 7, 4), new int3(0, 3, 8)));
+        Assert.Equal(new int3(0, 7, 9), ShaderMath.Max(new int3(-2, 7, 9), new int3(0, 3, 8)));
+        Assert.Equal(new int3(0, 4, 8), ShaderMath.Clamp(new int3(-2, 4, 11), 0, 8));
+        Assert.Equal(new int3(0, 4, 9), ShaderMath.Clamp(new int3(-2, 4, 11), new int3(0, 1, 2), new int3(3, 6, 9)));
     }
 
     private static void AssertVectorOverload(Type declaringType, string name, Type returnType, params Type[] parameterTypes)
@@ -262,18 +277,18 @@ public class MathSurfaceTests
         Assert.Equal(returnType, method!.ReturnType);
     }
 
-    private static void AssertScalarVectorParity(Type declaringType)
+    private static void AssertScalarVectorParity(Type declaringType, Type scalarType, params Type[] vectorTypes)
     {
         var scalarIntrinsics = declaringType
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Where(static method =>
-                method.ReturnType == typeof(float) &&
+            .Where(method =>
                 method.GetParameters().Length > 0 &&
-                method.GetParameters().All(static parameter => parameter.ParameterType == typeof(float)))
+                method.GetParameters().All(parameter => parameter.ParameterType == scalarType))
+            .Where(method => method.ReturnType == scalarType)
             .ToArray();
 
         Assert.NotEmpty(scalarIntrinsics);
-        foreach (var vectorType in new[] { typeof(float2), typeof(float3), typeof(float4) })
+        foreach (var vectorType in vectorTypes)
         {
             foreach (var scalarIntrinsic in scalarIntrinsics)
             {

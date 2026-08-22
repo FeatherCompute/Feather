@@ -1104,8 +1104,8 @@ internal static class ShaderModelFactory
                 && ShaderSemanticFacts.IsFeatherVectorType(symbol.ReturnType)
                 && ShaderSemanticFacts.IsFeatherVectorType(symbol.Parameters[0].Type),
             "Pow" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),
-            "Min" or "Max" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorBinarySignature(symbol),
-            "Clamp" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorClampSignature(symbol),
+            "Min" or "Max" => ShaderSemanticFacts.HasNumericMinMaxSignature(symbol),
+            "Clamp" => ShaderSemanticFacts.HasNumericClampSignature(symbol),
             "Lerp" or "Mix" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorLerpSignature(symbol),
             "Smoothstep" => ShaderSemanticFacts.HasFloatOrMatchingFloatVectorSmoothstepSignature(symbol),
             "Dot" => ShaderSemanticFacts.HasFloatVectorDotSignature(symbol),
