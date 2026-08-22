@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Feather.Graphics;
 using Feather.Interop;
 using Feather.Math;
@@ -87,11 +88,21 @@ public class GeneratedGraphicsPipelineTests
             }
             Assert.Contains("OpEntryPoint Vertex", vertex.OptimizedTargetIR, StringComparison.Ordinal);
             Assert.Contains("OpEntryPoint Fragment", fragment.OptimizedTargetIR, StringComparison.Ordinal);
+            using var vertexReport = JsonDocument.Parse(vertex.OptimizationReportJson);
+            using var fragmentReport = JsonDocument.Parse(fragment.OptimizationReportJson);
+            Assert.Equal("EasyGPU.ShaderOptimizationReport", vertexReport.RootElement.GetProperty("kind").GetString());
+            Assert.Equal("EasyGPU.ShaderOptimizationReport", fragmentReport.RootElement.GetProperty("kind").GetString());
+            Assert.Equal("VULKAN", vertexReport.RootElement.GetProperty("target").GetProperty("backend").GetString());
+            Assert.Equal("VULKAN", fragmentReport.RootElement.GetProperty("target").GetProperty("backend").GetString());
+            Assert.NotEmpty(vertexReport.RootElement.GetProperty("decisions").EnumerateArray());
+            Assert.NotEmpty(fragmentReport.RootElement.GetProperty("decisions").EnumerateArray());
         }
         else
         {
             Assert.Empty(vertex.OptimizedTargetIR);
             Assert.Empty(fragment.OptimizedTargetIR);
+            Assert.Empty(vertex.OptimizationReportJson);
+            Assert.Empty(fragment.OptimizationReportJson);
         }
     }
 

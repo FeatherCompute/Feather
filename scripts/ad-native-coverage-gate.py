@@ -46,8 +46,8 @@ NATIVE_SCOPE: tuple[NativeScopeEntry, ...] = (
             (2727, 2776),
             (5673, 6153),
             (6211, 6346),
-            (13451, 13529),
-            (13636, 13796),
+            (13489, 13567),
+            (13699, 13859),
         ),
         (
             "try_dispatch_easygpu_ad_kernel",
@@ -297,11 +297,15 @@ def run_ad_tests(root: Path, library: Path, profile_dir: Path) -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
     profile_pattern = profile_dir / "feather-ad-%p-snapshot-%s.profraw"
     profile_sink = "NUL" if os.name == "nt" else "/dev/null"
-    env = os.environ.copy()
-    env["FEATHER_NATIVE_LIBRARY"] = str(library)
-    env["FEATHER_COVERAGE_PROFILE_PATTERN"] = str(profile_pattern)
-    env["FEATHER_COVERAGE_PROFILE_SINK"] = profile_sink
-    env["LLVM_PROFILE_FILE"] = profile_sink
+    cache_root = profile_dir.parent / "shader-cache"
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+
+    base_env = os.environ.copy()
+    base_env["FEATHER_NATIVE_LIBRARY"] = str(library)
+    base_env["FEATHER_COVERAGE_PROFILE_PATTERN"] = str(profile_pattern)
+    base_env["FEATHER_COVERAGE_PROFILE_SINK"] = profile_sink
+    base_env["LLVM_PROFILE_FILE"] = profile_sink
     commands = (
         [
             "dotnet",
@@ -318,7 +322,9 @@ def run_ad_tests(root: Path, library: Path, profile_dir: Path) -> None:
             "FullyQualifiedName~AutoDiff|FullyQualifiedName~AD",
         ],
     )
-    for command in commands:
+    for index, command in enumerate(commands):
+        env = base_env.copy()
+        env["EASYGPU_SHADER_CACHE_DIR"] = str(cache_root / f"managed-{index}")
         run(command, root, env=env)
 
     probe = library.parent / "feather_ad_native_coverage_probe"
@@ -327,7 +333,8 @@ def run_ad_tests(root: Path, library: Path, profile_dir: Path) -> None:
     if not probe.exists():
         raise SystemExit(f"Native AD coverage gate failed: native coverage probe was not produced at {probe}.")
 
-    probe_env = env.copy()
+    probe_env = base_env.copy()
+    probe_env["EASYGPU_SHADER_CACHE_DIR"] = str(cache_root / "native-probe")
     probe_env["LLVM_PROFILE_FILE"] = str(profile_dir / "feather-ad-native-probe-%p.profraw")
     run([str(probe)], root, env=probe_env)
 

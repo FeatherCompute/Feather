@@ -177,6 +177,8 @@ Most code uses `GPU.Dispatch`. `GpuKernel` is available for lower-level inspecti
 | `GpuKernel.Dispatch(...)` | Dispatches with an explicit context/kernel object. |
 | `GetGLSL()` | Returns unoptimized GLSL. |
 | `GetOptimizedGLSL()` | Returns backend-optimized GLSL inspection text. |
+| `GetOptimizedIR()` | Returns backend-specific optimized target IR. |
+| `GetOptimizationReport()` | Returns the backend-owned structured optimizer report as versioned JSON. |
 | `LastDispatchPath` | Last native route. |
 | `CompilationCount` | Number of backend pipelines actually compiled for this kernel handle. |
 

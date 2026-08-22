@@ -125,13 +125,22 @@ Shader inspection reads the same generated shader inputs and optimization settin
 | `fe_kernel_get_glsl` | Exact GLSL lowered from the kernel handle's FEIR. |
 | `fe_kernel_get_optimized_glsl` | Backend inspection GLSL reconstructed after the configured optimizer. |
 | `fe_kernel_get_optimized_ir` | Optimized target IR; Vulkan returns readable SPIR-V assembly. |
+| `fe_kernel_get_optimization_report` | Backend-owned, versioned JSON containing target facts, cost inputs, actual code-size metrics, decisions, and stable reason codes. |
 | `fe_graphics_pipeline_get_vertex_glsl` / `fe_graphics_pipeline_get_fragment_glsl` | Exact per-stage GLSL retained after that pipeline completes typed lowering. |
 | `fe_graphics_pipeline_get_optimized_*_glsl` | Per-stage backend inspection GLSL using the live pipeline's optimization recipe. |
 | `fe_graphics_pipeline_get_optimized_*_ir` | Per-stage optimized target IR; Vulkan returns readable SPIR-V assembly. |
+| `fe_graphics_pipeline_get_*_optimization_report` | Per-stage structured optimization report using the exact live pipeline source and optimization recipe. |
 
 All string getters use the ABI's normal two-call required-size contract. A graphics pipeline that has not completed a typed draw returns `FE_ERROR_UNSUPPORTED`, because no backend shader exists yet. A backend without a stable readable optimized representation also returns `FE_ERROR_UNSUPPORTED`; callers must not relabel source GLSL as target IR.
 
-Managed `ShaderInspection.GetLoadedShaders(Assembly)` snapshots only cached compute kernels and weakly registered live graphics pipelines owned by that assembly. It does not scan types or create unused shaders to manufacture inspection output. Disposed graphics pipelines are removed from the registry, and the weak registry does not pin a collectible user assembly.
+The Vulkan report is currently `EasyGPU.ShaderOptimizationReport` schema version 1. Feather
+passes this backend-owned JSON through without inventing target measurements. Unsupported
+driver register-allocation and occupancy facts remain explicit unavailable objects, while
+the static pressure proxy retains its `SPIRV_FUNCTION_INSTRUCTIONS` unit. Inspection calls
+use non-accounting backend queries, so observing a loaded shader does not mutate shader
+frontend/optimizer cache counters.
+
+Managed `ShaderInspection.GetLoadedShaders(Assembly)` snapshots only cached compute kernels and weakly registered live graphics pipelines owned by that assembly. Each snapshot includes `OptimizationReportJson` when the backend supports it. It does not scan types or create unused shaders to manufacture inspection output. Disposed graphics pipelines are removed from the registry, and the weak registry does not pin a collectible user assembly.
 
 ## Resource ABI
 

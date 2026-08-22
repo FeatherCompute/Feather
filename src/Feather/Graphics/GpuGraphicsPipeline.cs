@@ -571,6 +571,22 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
         => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
             NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required));
 
+    /// <summary>
+    /// Returns the active backend's structured optimization report for the live vertex shader.
+    /// </summary>
+    /// <returns>A versioned backend-owned JSON report.</returns>
+    public string GetVertexOptimizationReport()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_vertex_optimization_report(Handle, buffer, length, out required));
+
+    /// <summary>
+    /// Returns the active backend's structured optimization report for the live fragment shader.
+    /// </summary>
+    /// <returns>A versioned backend-owned JSON report.</returns>
+    public string GetFragmentOptimizationReport()
+        => GetInspectionString((IntPtr buffer, UIntPtr length, out UIntPtr required) =>
+            NativeMethods.fe_graphics_pipeline_get_fragment_optimization_report(Handle, buffer, length, out required));
+
     IReadOnlyList<LoadedShaderSource> ILoadedGraphicsShaderInspection.InspectLoadedShaders()
     {
         using var operation = context.EnterOperation();
@@ -585,14 +601,16 @@ public sealed class GpuGraphicsPipeline<TVertexShader, TFragmentShader, TVarying
                     false,
                     GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_glsl(Handle, buffer, length, out required)),
-                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_ir(Handle, buffer, length, out required))),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_vertex_ir(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_vertex_optimization_report(Handle, buffer, length, out required))),
                 new LoadedShaderSource(
                     typeof(TFragmentShader),
                     ShaderStage.Fragment,
                     false,
                     GetNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_glsl(Handle, buffer, length, out required)),
                     GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_glsl(Handle, buffer, length, out required)),
-                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required)))
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_optimized_fragment_ir(Handle, buffer, length, out required)),
+                    GetOptionalNativeString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_graphics_pipeline_get_fragment_optimization_report(Handle, buffer, length, out required)))
             ];
         }
     }

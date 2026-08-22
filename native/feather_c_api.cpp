@@ -6380,10 +6380,37 @@ bool try_build_easygpu_optimized_kernel_ir(const KernelState& kernel, std::strin
     return !source->empty();
 }
 
+bool try_build_easygpu_kernel_optimization_report(const KernelState& kernel, std::string* report) {
+    if (report == nullptr) {
+        return false;
+    }
+
+    auto context = try_build_easygpu_kernel_context(kernel);
+    if (context == nullptr) {
+        return false;
+    }
+
+    GPU::Runtime::AutoInitContext();
+    GPU::Runtime::ContextGuard guard(GPU::Runtime::Context::GetInstance());
+    auto* backend = GPU::Runtime::Context::GetBackend();
+    if (backend == nullptr) {
+        throw std::runtime_error("EasyGPU backend is not available.");
+    }
+
+    GPU::Backend::ShaderDesc shader_desc;
+    shader_desc.type = GPU::Backend::ShaderType::Compute;
+    shader_desc.sourceCode = context->GetCompleteCode();
+    shader_desc.entryPoint = "main";
+    shader_desc.optimizationLevel = context->GetOptimizationLevel();
+    *report = backend->GetOptimizationReport(shader_desc, false);
+    return !report->empty();
+}
+
 enum class GraphicsShaderInspectionKind {
     Source,
     OptimizedSource,
     OptimizedIr,
+    OptimizationReport,
 };
 
 FeResult inspect_graphics_shader(FeGraphicsPipelineHandle pipeline_handle, bool vertex,
@@ -6420,9 +6447,20 @@ FeResult inspect_graphics_shader(FeGraphicsPipelineHandle pipeline_handle, bool 
     descriptor.sourceCode = source;
     descriptor.entryPoint = "main";
     descriptor.optimizationLevel = kShaderOptimizationLevel;
-    const std::string inspected = kind == GraphicsShaderInspectionKind::OptimizedSource
-                                      ? backend->GetOptimizedGLSL(descriptor, false)
-                                      : backend->GetOptimizedIR(descriptor, false);
+    std::string inspected;
+    switch (kind) {
+    case GraphicsShaderInspectionKind::OptimizedSource:
+        inspected = backend->GetOptimizedGLSL(descriptor, false);
+        break;
+    case GraphicsShaderInspectionKind::OptimizedIr:
+        inspected = backend->GetOptimizedIR(descriptor, false);
+        break;
+    case GraphicsShaderInspectionKind::OptimizationReport:
+        inspected = backend->GetOptimizationReport(descriptor, false);
+        break;
+    case GraphicsShaderInspectionKind::Source:
+        break;
+    }
     if (inspected.empty()) {
         return fail(FE_ERROR_UNSUPPORTED,
                     "Graphics shader inspection is unavailable on the active EasyGPU backend.");
@@ -13601,6 +13639,31 @@ FE_API FeResult fe_kernel_get_optimized_ir(FeKernelHandle kernel, char* buffer, 
     });
 }
 
+FE_API FeResult fe_kernel_get_optimization_report(FeKernelHandle kernel, char* buffer, size_t buffer_size,
+                                                  size_t* out_required_size) {
+    return protect([&] {
+        KernelState state;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            const auto it = g_kernels.find(kernel);
+            if (it == g_kernels.end()) {
+                return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+            }
+
+            state = it->second;
+        }
+
+        std::string report;
+        std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+        if (!try_build_easygpu_kernel_optimization_report(state, &report)) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Kernel optimization report is unavailable on the active EasyGPU backend.");
+        }
+
+        return write_string(report, buffer, buffer_size, out_required_size);
+    });
+}
+
 FE_API FeResult fe_kernel_get_last_dispatch_path(FeKernelHandle kernel, uint32_t* out_path) {
     return protect([&] {
         if (out_path == nullptr) {
@@ -14161,6 +14224,23 @@ FE_API FeResult fe_graphics_pipeline_get_optimized_fragment_ir(FeGraphicsPipelin
     return protect([&] {
         return inspect_graphics_shader(
             pipeline, false, GraphicsShaderInspectionKind::OptimizedIr, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_vertex_optimization_report(FeGraphicsPipelineHandle pipeline, char* buffer,
+                                                                    size_t buffer_size, size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, true, GraphicsShaderInspectionKind::OptimizationReport, buffer, buffer_size, out_required_size);
+    });
+}
+
+FE_API FeResult fe_graphics_pipeline_get_fragment_optimization_report(FeGraphicsPipelineHandle pipeline,
+                                                                      char* buffer, size_t buffer_size,
+                                                                      size_t* out_required_size) {
+    return protect([&] {
+        return inspect_graphics_shader(
+            pipeline, false, GraphicsShaderInspectionKind::OptimizationReport, buffer, buffer_size, out_required_size);
     });
 }
 

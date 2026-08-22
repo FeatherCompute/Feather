@@ -14,6 +14,7 @@ using Feather.Interop;
 string ir = ShaderInspection.GetIR<MyKernel>();
 string glsl = ShaderInspection.GetGLSL<MyKernel>();
 string optimized = ShaderInspection.GetOptimizedGLSL<MyKernel>();
+string optimizationReport = ShaderInspection.GetOptimizationReport<MyKernel>();
 ResourceDescriptor[] resources = ShaderInspection.GetResources<MyKernel>();
 ```
 
@@ -22,8 +23,23 @@ ResourceDescriptor[] resources = ShaderInspection.GetResources<MyKernel>();
 | `GetIR<TKernel>()` | Returns serialized FEIR as uppercase hex. |
 | `GetGLSL<TKernel>()` | Builds through EasyGPU and returns unoptimized GLSL. |
 | `GetOptimizedGLSL<TKernel>()` | Returns backend-optimized GLSL inspection text. |
+| `GetOptimizedIR<TKernel>()` | Returns optimized target IR, such as readable SPIR-V assembly on Vulkan. |
+| `GetOptimizationReport<TKernel>()` | Returns the active backend's versioned structured optimization report. |
 | `GetResources<TKernel>()` | Returns generated resource descriptors. |
 | `GetGraphicsSource<TVS,TFS,TVaryings>()` | Returns graphics FEIR source payloads. |
+
+`GetOptimizationReport<TKernel>()` currently exposes the backend-owned
+`EasyGPU.ShaderOptimizationReport` JSON contract. Vulkan reports stable reason codes and
+cost inputs for inline, loop-unroll, barrier, vectorization, and specialization decisions,
+plus actual whole-shader code-size metrics. Driver register allocation and occupancy are
+marked unavailable when the backend cannot measure them; static instruction pressure is
+not relabeled as a physical-register count.
+
+For already-loaded work, `GetLoadedShaders(assembly)` returns the exact backend-input GLSL,
+optimized GLSL and target IR when available, and `OptimizationReportJson` for each compute,
+vertex, or fragment stage. It inspects cached live handles without compiling a second shader
+or incrementing shader cache counters. Optional optimized fields are empty on unsupported
+backends.
 
 ## Generated Contracts
 
@@ -89,6 +105,7 @@ Interop and inspection APIs are host-side. They expose generated shader metadata
 ## Lifetime And Errors
 
 - `ShaderInspection.GetGLSL<TKernel>()` creates native kernel state internally and can throw native/backend exceptions.
+- Direct optimized-output and optimization-report getters throw when the active backend cannot expose that representation; loaded-shader snapshots leave optional fields empty instead.
 - `FeatherIr.Read(...)` validates binary payload shape and can throw for malformed data.
 - Native library override is process/environment configuration, not a per-kernel option.
 

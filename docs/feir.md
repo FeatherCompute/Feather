@@ -79,10 +79,11 @@ using Feather.Interop;
 string irHex = ShaderInspection.GetIR<MyKernel>();
 string glsl = ShaderInspection.GetGLSL<MyKernel>();
 string optimized = ShaderInspection.GetOptimizedGLSL<MyKernel>();
+string optimizationReport = ShaderInspection.GetOptimizationReport<MyKernel>();
 ResourceDescriptor[] resources = ShaderInspection.GetResources<MyKernel>();
 ```
 
-Use `GetIR` when you need to confirm that the generator produced metadata. Use `GetGLSL` when you need to inspect the native EasyGPU lowering. Use `GetOptimizedGLSL` when backend optimization is involved.
+Use `GetIR` when you need to confirm that the generator produced metadata. Use `GetGLSL` when you need to inspect the native EasyGPU lowering. Use `GetOptimizedGLSL` when backend optimization is involved. Use `GetOptimizationReport` when tooling needs structured cost inputs, decisions, reason codes, and truthful target-measurement availability instead of inferring behavior from text dumps.
 
 ## Dispatch Paths
 

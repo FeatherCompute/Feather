@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text.Json;
 using Feather.Interop;
 using Feather.Math;
 using Feather.Native;
@@ -874,10 +875,21 @@ public class GeneratedComputeDispatchTests
             }
             Assert.Contains("OpEntryPoint GLCompute", shader.OptimizedTargetIR, StringComparison.Ordinal);
             Assert.Contains("OpFunction", shader.OptimizedTargetIR, StringComparison.Ordinal);
+            using var report = JsonDocument.Parse(shader.OptimizationReportJson);
+            Assert.Equal("EasyGPU.ShaderOptimizationReport", report.RootElement.GetProperty("kind").GetString());
+            Assert.Equal(1, report.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal("VULKAN", report.RootElement.GetProperty("target").GetProperty("backend").GetString());
+            Assert.False(report.RootElement.GetProperty("target").GetProperty("registerAllocation").GetProperty("available").GetBoolean());
+            Assert.False(report.RootElement.GetProperty("target").GetProperty("occupancy").GetProperty("available").GetBoolean());
+            Assert.NotEmpty(report.RootElement.GetProperty("decisions").EnumerateArray());
+            Assert.Equal(
+                "easygpu-vulkan-cost-v1",
+                report.RootElement.GetProperty("optimizer").GetProperty("costModelVersion").GetString());
         }
         else
         {
             Assert.Empty(shader.OptimizedTargetIR);
+            Assert.Empty(shader.OptimizationReportJson);
         }
     }
 

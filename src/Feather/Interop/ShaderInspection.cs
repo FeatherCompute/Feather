@@ -50,6 +50,18 @@ public static class ShaderInspection
     }
 
     /// <summary>
+    /// Builds a generated kernel through the active backend and returns its structured optimizer decisions.
+    /// </summary>
+    /// <typeparam name="TKernel">The generated compute kernel type.</typeparam>
+    /// <returns>A versioned backend-owned JSON optimization report.</returns>
+    public static string GetOptimizationReport<TKernel>()
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        using var kernel = GpuKernel.Create<TKernel>(GPU.Context);
+        return kernel.GetOptimizationReport();
+    }
+
+    /// <summary>
     /// Inspects shaders that are currently loaded by the default GPU context for one assembly.
     /// This method does not discover types or create pipelines merely to produce inspection output.
     /// </summary>
@@ -108,7 +120,8 @@ public sealed record LoadedShaderSource(
     bool AutoDiff,
     string BackendInputGLSL,
     string OptimizedBackendGLSL,
-    string OptimizedTargetIR);
+    string OptimizedTargetIR,
+    string OptimizationReportJson);
 
 internal interface ILoadedGraphicsShaderInspection
 {

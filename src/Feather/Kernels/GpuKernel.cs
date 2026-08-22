@@ -254,6 +254,20 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    /// <summary>
+    /// Builds this generated kernel through the active backend and returns its structured optimization report.
+    /// </summary>
+    /// <returns>A versioned backend-owned JSON report.</returns>
+    public string GetOptimizationReport()
+    {
+        using var operation = context.EnterOperation();
+        lock (dispatchGate)
+        {
+            ThrowIfDisposed();
+            return NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimization_report(Handle, buffer, length, out required));
+        }
+    }
+
     internal LoadedShaderSource InspectLoadedShader(bool autoDiff)
     {
         using var operation = context.EnterOperation();
@@ -266,7 +280,8 @@ public sealed class GpuKernel : IDisposable
                 autoDiff,
                 NativeStringCall.GetString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_glsl(Handle, buffer, length, out required)),
                 GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_glsl(Handle, buffer, length, out required)),
-                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_ir(Handle, buffer, length, out required)));
+                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimized_ir(Handle, buffer, length, out required)),
+                GetOptionalString((IntPtr buffer, UIntPtr length, out UIntPtr required) => NativeMethods.fe_kernel_get_optimization_report(Handle, buffer, length, out required)));
         }
     }
 

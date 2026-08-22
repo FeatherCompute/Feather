@@ -104,6 +104,7 @@ Useful checks:
 ```csharp
 Console.WriteLine(ShaderInspection.GetIR<MyKernel>());
 Console.WriteLine(ShaderInspection.GetGLSL<MyKernel>());
+Console.WriteLine(ShaderInspection.GetOptimizationReport<MyKernel>());
 Console.WriteLine(GPU.DispatchAndGetPath(new MyKernel(...), count));
 ```
 
@@ -146,6 +147,8 @@ If source generation succeeds but native dispatch fails, Feather throws a manage
 
 - The exception message from the native bridge.
 - `ShaderInspection.GetGLSL<TKernel>()`.
+- `ShaderInspection.GetOptimizedIR<TKernel>()` and
+  `ShaderInspection.GetOptimizationReport<TKernel>()` when the active backend supports them.
 - `GPU.DispatchAndGetPath(...)`.
 - `GpuADKernel<T>.GetBackwardGLSL()` after a successful AD backward build.
 
