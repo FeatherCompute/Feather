@@ -11,6 +11,30 @@ public interface IGpuTexture2D
     TextureAccess Access { get; }
 }
 
+/// <summary>
+/// Non-generic inspection boundary for a concrete Feather 2D texture. Hosts use this interface
+/// to issue explicit, bounded asynchronous readbacks without guessing the texture's managed
+/// pixel/value type or falling back to a blocking download.
+/// </summary>
+public interface IReadbackGpuTexture2D : IGpuTexture2D
+{
+    /// <summary>Gets the number of allocated mip levels.</summary>
+    int MipLevels { get; }
+
+    /// <summary>
+    /// Submits an asynchronous base-level texture-region copy into caller-owned byte staging
+    /// storage. The returned operation owns the native texture and staging leases until it is
+    /// consumed or disposed.
+    /// </summary>
+    ReadbackOperation BeginReadback(
+        GpuBuffer<byte> staging,
+        int x,
+        int y,
+        int width,
+        int height,
+        long stagingByteOffset = 0);
+}
+
 internal interface IGpuTexture2DNative : IGpuTexture2D
 {
     GpuContext Context { get; }
@@ -19,6 +43,7 @@ internal interface IGpuTexture2DNative : IGpuTexture2D
 
 public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
     , IGpuTexture2D
+    , IReadbackGpuTexture2D
     , IGpuTexture2DNative
     where TPixel : unmanaged
     where TValue : unmanaged

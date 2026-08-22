@@ -17,6 +17,7 @@ public class AsyncTextureReadbackTests
     {
         using var context = GpuContext.GetDefault();
         var texture = GpuTexture2D<uint, uint>.Create(context, 5, 3, PixelFormat.Rgba8, TextureAccess.ReadWrite);
+        IReadbackGpuTexture2D inspectionTexture = texture;
         var staging = GpuBuffer<byte>.Create(context, 72, BufferAccess.ReadWrite);
         var pixels = Enumerable.Range(0, 15)
             .Select(index => 0xff000000u | ((uint)(index * 17) << 16) | ((uint)(index * 11) << 8) | (uint)(index * 5))
@@ -24,7 +25,15 @@ public class AsyncTextureReadbackTests
         var expected = MemoryMarshal.AsBytes(pixels.AsSpan()).ToArray();
         texture.Upload(pixels);
 
-        using var readback = texture.BeginReadback(staging, 0, 0, 5, 3, stagingByteOffset: 12);
+        Assert.Equal(1, inspectionTexture.MipLevels);
+        Assert.Equal(PixelFormat.Rgba8, inspectionTexture.Format);
+        using var readback = inspectionTexture.BeginReadback(
+            staging,
+            0,
+            0,
+            5,
+            3,
+            stagingByteOffset: 12);
         texture.Dispose();
         staging.Dispose();
 
