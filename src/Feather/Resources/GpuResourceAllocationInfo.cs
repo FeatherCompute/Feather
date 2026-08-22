@@ -18,7 +18,8 @@ public readonly record struct GpuResourceAllocationInfo(
 
 /// <summary>
 /// Exposes side-effect-free physical allocation evidence for a managed GPU resource.
-/// Querying an unmaterialized resource does not cause a GPU allocation.
+/// Querying an unmaterialized resource does not cause a GPU allocation, enqueue work,
+/// or acquire the managed queue-recording gate.
 /// </summary>
 public interface IGpuResourceAllocation
 {

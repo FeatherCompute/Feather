@@ -51,14 +51,11 @@ public sealed class GpuBuffer<T> : IDisposable, IGpuResourceAllocation
         {
             ThrowIfDisposed();
             using var operation = Context.EnterOperation();
-            lock (Context.QueueGate)
-            {
-                NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_get_allocation_info(Handle, out var info));
-                return new GpuResourceAllocationInfo(
-                    info.Available != 0,
-                    info.PhysicalBytes,
-                    info.AllocationGroup);
-            }
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_buffer_get_allocation_info(Handle, out var info));
+            return new GpuResourceAllocationInfo(
+                info.Available != 0,
+                info.PhysicalBytes,
+                info.AllocationGroup);
         }
     }
 

@@ -110,14 +110,11 @@ public sealed class GpuTexture2D<TPixel, TValue> : IDisposable
         {
             ThrowIfDisposed();
             using var operation = Context.EnterOperation();
-            lock (Context.QueueGate)
-            {
-                NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_get_allocation_info(Handle, out var info));
-                return new GpuResourceAllocationInfo(
-                    info.Available != 0,
-                    info.PhysicalBytes,
-                    info.AllocationGroup);
-            }
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_texture_get_allocation_info(Handle, out var info));
+            return new GpuResourceAllocationInfo(
+                info.Available != 0,
+                info.PhysicalBytes,
+                info.AllocationGroup);
         }
     }
 

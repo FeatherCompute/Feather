@@ -106,6 +106,52 @@ public class NativeResourceRoundTripTests
     }
 
     [Fact]
+    public async Task AllocationEvidenceDoesNotWaitForTheQueueRecordingGate()
+    {
+        var context = GPU.Context;
+        using var buffer = GPU.CreateBuffer<int>([1, 2, 3, 4]);
+        using var texture = GPU.CreateTexture2D<Rgba32, Rgba32>(
+            2,
+            2,
+            PixelFormat.Rgba8,
+            TextureAccess.ReadWrite);
+        texture.Upload([
+            new Rgba32(1, 2, 3, 255),
+            new Rgba32(4, 5, 6, 255),
+            new Rgba32(7, 8, 9, 255),
+            new Rgba32(10, 11, 12, 255),
+        ]);
+
+        var recordingEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var queryCompleted = new ManualResetEventSlim();
+        var submissionTask = Task.Run(() => context.Queue.SubmitProfiled(
+            new GpuProfilingOptions(GraphCorrelationId: "allocation-query-concurrency"),
+            _ =>
+            {
+                recordingEntered.SetResult();
+                Assert.True(queryCompleted.Wait(TimeSpan.FromSeconds(10)));
+                return 42;
+            }));
+
+        await recordingEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var queryTask = Task.Run(() => (buffer.AllocationInfo, texture.AllocationInfo));
+        (GpuResourceAllocationInfo Buffer, GpuResourceAllocationInfo Texture) allocations;
+        try
+        {
+            allocations = await queryTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            queryCompleted.Set();
+        }
+
+        var submission = await submissionTask;
+        Assert.Equal(42, submission.Result);
+        Assert.Equal(allocations, (buffer.AllocationInfo, texture.AllocationInfo));
+    }
+
+    [Fact]
     public void ShaderCacheCountersObserveRealRepeatedGraphicsCompilation()
     {
         var context = GPU.Context;
