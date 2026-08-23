@@ -6217,7 +6217,8 @@ public class ControlFlowDispatchTests
 
         using var capture = GPU.Context.BeginCounterfactualCapture(
             typeof(BranchDivergenceProbeKernel).FullName!,
-            sourceSite);
+            sourceSite,
+            targetDispatchIndex: 0);
         Assert.False(capture.VariantEnabled);
         Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
 
@@ -6235,10 +6236,7 @@ public class ControlFlowDispatchTests
         }
 
         capture.VariantEnabled = true;
-        GpuKernel variantKernel = GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>();
-        Assert.NotSame(ordinaryKernel, variantKernel);
         Assert.Equal(sourceSite, capture.SourceSiteIndex);
-        Assert.True(capture.SiteCount > sourceSite);
         Assert.Equal(0, capture.VariantDispatchCount);
         GPU.Dispatch(
             new BranchDivergenceProbeKernel(output.AsReadWrite()),
@@ -6246,6 +6244,7 @@ public class ControlFlowDispatchTests
             wait: true);
         int[] counterfactual = output.ToArray();
         Assert.Equal(1, capture.VariantDispatchCount);
+        Assert.True(capture.SiteCount > sourceSite);
 
         for (int i = 0; i < counterfactual.Length; ++i)
         {
@@ -6256,6 +6255,7 @@ public class ControlFlowDispatchTests
         Assert.NotEqual(baseline[0], counterfactual[0]);
 
         capture.VariantEnabled = false;
+        Assert.Equal(1, capture.LastIterationMatchingDispatchCount);
         Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
         GPU.Dispatch(
             new BranchDivergenceProbeKernel(output.AsReadWrite()),
@@ -6272,13 +6272,55 @@ public class ControlFlowDispatchTests
             "output[i] = 10");
         using var capture = GPU.Context.BeginCounterfactualCapture(
             typeof(BranchDivergenceProbeKernel).FullName!,
-            assignmentSite);
+            assignmentSite,
+            targetDispatchIndex: 0);
         capture.VariantEnabled = true;
 
         FeatherNativeException error = Assert.Throws<FeatherNativeException>(
             () => GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
         Assert.Equal(FeResult.ErrorUnsupported, error.Result);
         Assert.Contains("if statement", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CounterfactualVariantTargetsOneMatchingDispatchIndex()
+    {
+        const int InvocationCount = 48;
+        using var firstOutput = GPU.CreateBuffer<int>(InvocationCount);
+        using var secondOutput = GPU.CreateBuffer<int>(InvocationCount);
+        uint sourceSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if ((LocalIds.X & 1) == 0)");
+        using var capture = GPU.Context.BeginCounterfactualCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            sourceSite,
+            targetDispatchIndex: 1);
+        capture.VariantEnabled = true;
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new BranchDivergenceProbeKernel(firstOutput.AsReadWrite()),
+                InvocationCount);
+            commands.Dispatch(
+                new BranchDivergenceProbeKernel(secondOutput.AsReadWrite()),
+                InvocationCount);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            capture.VariantEnabled = false;
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        Assert.Equal(2, capture.LastIterationMatchingDispatchCount);
+        Assert.Equal(1, capture.VariantDispatchCount);
+        int[] first = firstOutput.ToArray();
+        int[] second = secondOutput.ToArray();
+        for (int i = 0; i < InvocationCount; ++i)
+        {
+            int nestedValue = i < 4 ? 100 : 0;
+            int baselineBranch = (i & 1) == 0 ? 10 : 20;
+            Assert.Equal(baselineBranch + 1 + nestedValue, first[i]);
+            Assert.Equal(20 + 1 + nestedValue, second[i]);
+        }
     }
 
     [Fact]

@@ -491,6 +491,7 @@ public sealed class GpuContext : IDisposable
     public GpuCounterfactualCapture BeginCounterfactualCapture(
         string shaderTypeName,
         uint sourceSiteIndex,
+        int targetDispatchIndex = 0,
         GpuCounterfactualTransform transform = GpuCounterfactualTransform.ForceIfFalse)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
@@ -504,6 +505,7 @@ public sealed class GpuContext : IDisposable
                 this,
                 shaderTypeName,
                 sourceSiteIndex,
+                targetDispatchIndex,
                 transform);
             activeDiagnosticCapture = capture;
             return capture;

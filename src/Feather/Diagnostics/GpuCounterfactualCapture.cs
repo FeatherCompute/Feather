@@ -31,10 +31,13 @@ public sealed class GpuCounterfactualCapture : IDisposable, IGpuDiagnosticCaptur
     private readonly GpuContext context;
     private readonly string shaderTypeName;
     private readonly uint sourceSiteIndex;
+    private readonly int targetDispatchIndex;
     private readonly GpuCounterfactualTransform transform;
     private GpuKernel? kernel;
     private FeKernelDiagnosticLayoutV7 layout;
     private bool variantEnabled;
+    private int matchingDispatchCount;
+    private int lastIterationMatchingDispatchCount;
     private int variantDispatchCount;
     private bool disposed;
 
@@ -42,22 +45,27 @@ public sealed class GpuCounterfactualCapture : IDisposable, IGpuDiagnosticCaptur
         GpuContext context,
         string shaderTypeName,
         uint sourceSiteIndex,
+        int targetDispatchIndex,
         GpuCounterfactualTransform transform)
     {
         this.context = context;
         this.shaderTypeName = NormalizeTypeName(shaderTypeName);
         this.sourceSiteIndex = sourceSiteIndex;
+        this.targetDispatchIndex = targetDispatchIndex;
         this.transform = transform;
         if (this.shaderTypeName.Length == 0)
             throw new ArgumentException("Shader type name is empty after normalization.", nameof(shaderTypeName));
         if (sourceSiteIndex == uint.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(sourceSiteIndex));
+        if (targetDispatchIndex < 0)
+            throw new ArgumentOutOfRangeException(nameof(targetDispatchIndex));
         if (transform != GpuCounterfactualTransform.ForceIfFalse)
             throw new ArgumentOutOfRangeException(nameof(transform));
     }
 
     public string ShaderTypeName => shaderTypeName;
     public uint SourceSiteIndex => sourceSiteIndex;
+    public int TargetDispatchIndex => targetDispatchIndex;
     public GpuCounterfactualTransform Transform => transform;
 
     /// <summary>
@@ -72,6 +80,16 @@ public sealed class GpuCounterfactualCapture : IDisposable, IGpuDiagnosticCaptur
             lock (gate)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
+                if (variantEnabled == value)
+                    return;
+                if (value)
+                {
+                    matchingDispatchCount = 0;
+                }
+                else
+                {
+                    lastIterationMatchingDispatchCount = matchingDispatchCount;
+                }
                 variantEnabled = value;
             }
         }
@@ -81,6 +99,15 @@ public sealed class GpuCounterfactualCapture : IDisposable, IGpuDiagnosticCaptur
     public int VariantDispatchCount
     {
         get { lock (gate) { return variantDispatchCount; } }
+    }
+
+    /// <summary>
+    /// Number of matching generated-kernel lookups observed in the most recently completed
+    /// enabled interval. A bounded profiler uses this to reject a stale dispatch index.
+    /// </summary>
+    public int LastIterationMatchingDispatchCount
+    {
+        get { lock (gate) { return lastIterationMatchingDispatchCount; } }
     }
 
     /// <summary>Number of retained typed source sites reported by the configured variant.</summary>
@@ -98,6 +125,14 @@ public sealed class GpuCounterfactualCapture : IDisposable, IGpuDiagnosticCaptur
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!variantEnabled || !string.Equals(candidate, shaderTypeName, StringComparison.Ordinal))
+            {
+                diagnosticKernel = null!;
+                return false;
+            }
+
+            int dispatchIndex = matchingDispatchCount;
+            matchingDispatchCount = checked(matchingDispatchCount + 1);
+            if (dispatchIndex != targetDispatchIndex)
             {
                 diagnosticKernel = null!;
                 return false;
