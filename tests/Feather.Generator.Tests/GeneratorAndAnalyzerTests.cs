@@ -131,6 +131,28 @@ public class GeneratorAndAnalyzerTests
             Assert.InRange(length, 1, sourceText.Length - start);
             Assert.False(string.IsNullOrWhiteSpace(sourceText.Substring(start, length)));
         });
+        JsonElement[] typedStatements = root.GetProperty("typedStatements").EnumerateArray().ToArray();
+        Assert.NotEmpty(typedStatements);
+        Assert.Equal(
+            typedStatements.Select(statement => statement.GetProperty("statementIndex").GetUInt32()).Distinct(),
+            typedStatements.Select(statement => statement.GetProperty("statementIndex").GetUInt32()));
+        Assert.All(typedStatements, statement =>
+        {
+            Assert.Equal("Shaders/AddKernel.cs", statement.GetProperty("sourcePath").GetString());
+            JsonElement statementSpan = statement.GetProperty("span");
+            int start = statementSpan.GetProperty("start").GetInt32();
+            int length = statementSpan.GetProperty("length").GetInt32();
+            Assert.InRange(start, 0, sourceText.Length - 1);
+            Assert.InRange(length, 1, sourceText.Length - start);
+            Assert.False(string.IsNullOrWhiteSpace(sourceText.Substring(start, length)));
+        });
+        Assert.Contains(typedStatements, statement =>
+        {
+            JsonElement statementSpan = statement.GetProperty("span");
+            return sourceText.Substring(
+                statementSpan.GetProperty("start").GetInt32(),
+                statementSpan.GetProperty("length").GetInt32()) == "output[i] = a[i];";
+        });
         Assert.Contains(instructions, instruction =>
         {
             JsonElement span = instruction.GetProperty("span");

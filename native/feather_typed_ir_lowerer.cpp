@@ -375,6 +375,14 @@ private:
             resource_infos_by_binding_[resource.binding] = RegisteredResource{id, resource.kind, resource.access};
         }
 
+        if (inputs_.diagnostic_mode == 1) {
+            const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
+            if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
+                return Fail("execution-heat diagnostic buffer is missing from the lowering inputs");
+            }
+            diagnostic_sites_resource_ = diagnostic->second;
+        }
+
         if (!RegisterBoundsCheckResources()) {
             return false;
         }
@@ -1111,6 +1119,10 @@ private:
         }
 
         const auto& statement = typed_.statements[statement_id];
+        if (statement.kind != kStatementBlock && diagnostic_site_suppression_depth_ == 0 &&
+            !EmitDiagnosticSiteHit(statement_id)) {
+            return false;
+        }
         switch (statement.kind) {
         case kStatementBlock:
             return LowerBlock(statement);
@@ -1162,6 +1174,61 @@ private:
         default:
             return Fail("unsupported section 7 statement kind " + std::to_string(statement.kind));
         }
+    }
+
+    bool EmitDiagnosticSiteHit(uint32_t statement_id) {
+        if (inputs_.diagnostic_mode == 0) {
+            return true;
+        }
+        if (inputs_.diagnostic_mode != 1 ||
+            diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+            statement_id >= inputs_.diagnostic_site_count) {
+            return Fail("execution-heat diagnostic site is outside the configured buffer ABI");
+        }
+
+        const auto index = builder_.Literal(GPU::IR::Type::UInt(), std::to_string(statement_id) + "u");
+        const auto target = builder_.ResourceElement(diagnostic_sites_resource_, index);
+        const auto one = builder_.Literal(GPU::IR::Type::UInt(), "1u");
+        if (index == GPU::IR::InvalidValueId || target == GPU::IR::InvalidValueId ||
+            one == GPU::IR::InvalidValueId) {
+            return Fail("execution-heat diagnostic counter address could not be lowered");
+        }
+        const std::array arguments{one};
+        const auto increment = builder_.Atomic(
+            GPU::IR::AtomicOp::Add,
+            GPU::IR::Type::UInt(),
+            target,
+            arguments);
+        if (increment == GPU::IR::InvalidValueId) {
+            return Fail("execution-heat diagnostic atomic increment could not be lowered");
+        }
+        EmitExpression(increment);
+        return true;
+    }
+
+    bool EmitDiagnosticSiteHitsForSequence(uint32_t statement_id) {
+        if (statement_id >= typed_.statements.size()) {
+            return Fail("diagnostic statement sequence is outside the section 7 statement table");
+        }
+
+        const auto& statement = typed_.statements[statement_id];
+        if (statement.kind != kStatementBlock) {
+            return EmitDiagnosticSiteHit(statement_id);
+        }
+        if (statement.child_count == 0) {
+            return statement.first_child == NoIndex;
+        }
+        if (statement.first_child == NoIndex || statement.first_child > typed_.children.size() ||
+            statement.child_count > typed_.children.size() - statement.first_child) {
+            return Fail("diagnostic statement sequence has an invalid block child range");
+        }
+
+        for (uint32_t index = 0; index < statement.child_count; ++index) {
+            if (!EmitDiagnosticSiteHitsForSequence(typed_.children[statement.first_child + index])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool LowerBlock(const Statement& block) {
@@ -1434,7 +1501,14 @@ private:
             if (statement.a >= typed_.statements.size()) {
                 return false;
             }
-            auto init_statements = LowerStatementListKeepingLocals(statement.a);
+            // GLSL's for initializer is either a declaration or an expression list;
+            // an atomic expression cannot precede a declaration in that header. Count
+            // source-level initializer sites immediately before the loop, then suppress
+            // the normal in-header diagnostic emission while lowering the initializer.
+            if (inputs_.diagnostic_mode != 0 && !EmitDiagnosticSiteHitsForSequence(statement.a)) {
+                return false;
+            }
+            auto init_statements = LowerStatementListKeepingLocals(statement.a, true);
             if (!init_statements.has_value()) {
                 local_values_ = outer_local_values;
                 declared_locals_ = outer_declared_locals;
@@ -1586,14 +1660,22 @@ private:
         return CallableBody{std::move(captured), std::move(blocks)};
     }
 
-    std::optional<std::vector<GPU::IR::Statement>> LowerStatementListKeepingLocals(uint32_t statement_id) {
+    std::optional<std::vector<GPU::IR::Statement>> LowerStatementListKeepingLocals(
+        uint32_t statement_id,
+        bool suppress_diagnostic_site_hits = false) {
         const auto previous_capture = capture_;
         const auto previous_shared_values = shared_values_;
+        if (suppress_diagnostic_site_hits) {
+            ++diagnostic_site_suppression_depth_;
+        }
         std::vector<GPU::IR::Statement> captured;
         capture_ = &captured;
         const auto ok = LowerStatement(statement_id);
         capture_ = previous_capture;
         shared_values_ = previous_shared_values;
+        if (suppress_diagnostic_site_hits) {
+            --diagnostic_site_suppression_depth_;
+        }
         if (!ok) {
             return std::nullopt;
         }
@@ -3313,6 +3395,8 @@ private:
     std::unordered_map<std::string, SharedMemoryInfo> shared_values_;
     std::array<GPU::IR::ResourceId, 3> logical_size_resource_{GPU::IR::InvalidResourceId, GPU::IR::InvalidResourceId,
                                                               GPU::IR::InvalidResourceId};
+    GPU::IR::ResourceId diagnostic_sites_resource_ = GPU::IR::InvalidResourceId;
+    uint32_t diagnostic_site_suppression_depth_ = 0;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;
 };

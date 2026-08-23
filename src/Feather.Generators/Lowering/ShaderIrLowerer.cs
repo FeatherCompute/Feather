@@ -36,7 +36,8 @@ internal static class ShaderIrLowerer
             throw new ShaderIrLoweringException("entry point symbol could not be read from Roslyn semantics", entry.GetLocation());
         }
 
-        var ctx = new LowerCtx(model, semanticModel, ct);
+        var statementOrigins = new List<ShaderStatementSyntaxOrigin>();
+        var ctx = new LowerCtx(model, semanticModel, statementOrigins, ct);
         foreach (var parameter in entrySymbol.Parameters)
         {
             ctx.Register(parameter, ToTy(parameter.Type, entry));
@@ -79,7 +80,7 @@ internal static class ShaderIrLowerer
             var callableSemanticModel = callable.Syntax.SyntaxTree == semanticModel.SyntaxTree
                 ? semanticModel
                 : semanticModel.Compilation.GetSemanticModel(callable.Syntax.SyntaxTree);
-            var callCtx = new LowerCtx(model, callableSemanticModel, ct);
+            var callCtx = new LowerCtx(model, callableSemanticModel, statementOrigins, ct);
             callCtx.RegisterCurrentMethod(callable.Symbol);
             var callableParameters = new List<ShaderParameterModel>();
             if (RequiresLoweredThisParameter(callable.Symbol))
@@ -115,7 +116,8 @@ internal static class ShaderIrLowerer
         return new ShaderModuleModel(
             entryFunc, new EquatableArray<ShaderFunctionModel>(callableFuncs),
             model.Resources, new EquatableArray<ShaderStructType>(),
-            model.ThreadGroup, model.Name, model.Namespace);
+            model.ThreadGroup, model.Name, model.Namespace,
+            new EquatableArray<ShaderStatementSyntaxOrigin>(statementOrigins));
     }
 
     private static ShaderBlockStatement LowerMethodBody(MethodDeclarationSyntax method, SemanticModel semanticModel, LowerCtx ctx, CancellationToken ct)
@@ -152,7 +154,7 @@ internal static class ShaderIrLowerer
 
     private static IReadOnlyList<ShaderStatement> LowerStmt(IOperation op, LowerCtx ctx)
     {
-        return op switch
+        var lowered = op switch
         {
             IBlockOperation b => [LowerBlock(b, ctx)],
             IVariableDeclarationGroupOperation g => LowerVarDecl(g, ctx),
@@ -169,6 +171,24 @@ internal static class ShaderIrLowerer
             IBranchOperation { BranchKind: BranchKind.Continue } => [new ShaderContinueStatement()],
             _ => throw Unsupported(op, $"unsupported statement operation '{op.Kind}'")
         };
+        if (lowered.Count == 0)
+        {
+            return lowered;
+        }
+
+        var span = op.Syntax.Span;
+        foreach (var statement in lowered)
+        {
+            if (statement is not ShaderBlockStatement)
+            {
+                ctx.StatementOrigins.Add(new ShaderStatementSyntaxOrigin(
+                    statement,
+                    op.Syntax.SyntaxTree.FilePath,
+                    span.Start,
+                    span.Length));
+            }
+        }
+        return lowered;
     }
 
     private static IReadOnlyList<ShaderStatement> LowerVarDecl(IVariableDeclarationGroupOperation g, LowerCtx ctx)
@@ -1327,11 +1347,17 @@ internal static class ShaderIrLowerer
         private ISymbol? _thisSymbol;
         private IMethodSymbol? _currentMethod;
         public SemanticModel SemanticModel { get; }
+        public List<ShaderStatementSyntaxOrigin> StatementOrigins { get; }
         public CancellationToken CT { get; }
 
-        public LowerCtx(ShaderModel model, SemanticModel semanticModel, CancellationToken ct)
+        public LowerCtx(
+            ShaderModel model,
+            SemanticModel semanticModel,
+            List<ShaderStatementSyntaxOrigin> statementOrigins,
+            CancellationToken ct)
         {
             SemanticModel = semanticModel;
+            StatementOrigins = statementOrigins;
             CT = ct;
             _resources = new HashSet<string>(model.Resources.Items.Select(r => r.Name), StringComparer.Ordinal);
             _bindings = model.Resources.Items.ToDictionary(r => r.Name, r => r.Binding, StringComparer.Ordinal);

@@ -28,8 +28,15 @@ internal sealed record ShaderModel(
     EquatableArray<LoweredShaderInstructionModel> LoweredInstructions,
     EquatableArray<CallableMethodModel> Callables = default,
     byte[]? TypedIrSection = null,
+    EquatableArray<TypedIrStatementOriginModel> TypedIrStatementOrigins = default,
     EquatableArray<TypedIrDiagnosticModel> TypedIrDiagnostics = default,
     EquatableArray<ShaderBodyDiagnosticModel> BodyDiagnostics = default);
+
+internal readonly record struct TypedIrStatementOriginModel(
+    uint StatementIndex,
+    string SourcePath,
+    int SyntaxStart,
+    int SyntaxLength);
 
 internal sealed record TypedIrDiagnosticModel(Location? Location, string Message);
 

@@ -164,4 +164,16 @@ internal sealed record ShaderModuleModel(
     EquatableArray<ShaderStructType> Structs,
     ThreadGroupModel ThreadGroup,
     string Name,
-    string Namespace);
+    string Namespace,
+    EquatableArray<ShaderStatementSyntaxOrigin> StatementOrigins = default);
+
+/// <summary>
+/// Side-band Roslyn location for a typed statement. Keeping this outside the statement hierarchy
+/// preserves the canonical typed AST consumed by analyzers and tests; section-7 serialization
+/// joins it to the final stable statement-table index by object identity.
+/// </summary>
+internal sealed record ShaderStatementSyntaxOrigin(
+    ShaderStatement Statement,
+    string SourcePath,
+    int SyntaxStart,
+    int SyntaxLength);

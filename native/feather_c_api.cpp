@@ -342,6 +342,9 @@ struct KernelState {
     std::string debug_name;
     bool auto_diff = false;
     bool bounds_check = false;
+    uint32_t diagnostic_mode = FE_KERNEL_DIAGNOSTIC_NONE;
+    uint32_t diagnostic_binding = UINT32_MAX;
+    uint32_t diagnostic_site_count = 0;
     int32_t logical_x = 0;
     int32_t logical_y = 0;
     int32_t logical_z = 0;
@@ -4483,6 +4486,9 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     inputs->logical_x_data = const_cast<int32_t*>(&kernel.logical_x);
     inputs->logical_y_data = const_cast<int32_t*>(&kernel.logical_y);
     inputs->logical_z_data = const_cast<int32_t*>(&kernel.logical_z);
+    inputs->diagnostic_mode = kernel.diagnostic_mode;
+    inputs->diagnostic_binding = kernel.diagnostic_binding;
+    inputs->diagnostic_site_count = kernel.diagnostic_site_count;
     inputs->resources.clear();
     inputs->push_constants.clear();
 
@@ -4537,6 +4543,19 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         }
 
         inputs->resources.push_back(std::move(resource_info));
+    }
+
+    if (kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT) {
+        if (kernel.diagnostic_binding == UINT32_MAX || kernel.diagnostic_site_count == 0) {
+            return false;
+        }
+        Feather::TypedIR::ResourceInfo diagnostic;
+        diagnostic.binding = kernel.diagnostic_binding;
+        diagnostic.kind = kIrResourceKindBuffer;
+        diagnostic.access = 3; // read-write
+        diagnostic.name = "__feather_execution_heat_sites";
+        diagnostic.element_type = "uint";
+        inputs->resources.push_back(std::move(diagnostic));
     }
 
     return true;
@@ -13578,6 +13597,113 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
     });
 }
 
+FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t mode) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (mode != FE_KERNEL_DIAGNOSTIC_NONE && mode != FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Kernel diagnostic mode is unsupported.");
+        }
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (mode == FE_KERNEL_DIAGNOSTIC_NONE) {
+            if (state.diagnostic_binding != UINT32_MAX) {
+                state.buffers.erase(state.diagnostic_binding);
+            }
+            state.diagnostic_mode = FE_KERNEL_DIAGNOSTIC_NONE;
+            state.diagnostic_binding = UINT32_MAX;
+            state.diagnostic_site_count = 0;
+            return ok();
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Execution-heat diagnostics do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Execution-heat diagnostics require bounded compute section-7 typed IR.");
+        }
+
+        uint32_t maximum_binding = 0;
+        bool has_binding = false;
+        for (const auto& resource : parsed.resources) {
+            maximum_binding = has_binding ? std::max(maximum_binding, resource.binding) : resource.binding;
+            has_binding = true;
+        }
+        if (has_binding && maximum_binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Execution-heat diagnostic binding space is exhausted.");
+        }
+        const uint32_t binding = has_binding ? maximum_binding + 1u : 0u;
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = mode;
+        state.diagnostic_binding = binding;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_get_diagnostic_layout(FeKernelHandle kernel, FeKernelDiagnosticLayout* out_layout) {
+    return protect([&] {
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_NONE ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0) {
+            return fail(FE_ERROR_UNSUPPORTED, "Kernel diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayout{
+            1u,
+            state.diagnostic_mode,
+            state.diagnostic_binding,
+            state.diagnostic_site_count,
+            static_cast<uint32_t>(sizeof(uint32_t))};
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer) {
+    return protect([&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto kernel_it = g_kernels.find(kernel);
+        const auto buffer_it = g_buffers.find(buffer);
+        if (kernel_it == g_kernels.end() || buffer_it == g_buffers.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or diagnostic buffer handle.");
+        }
+        auto& state = kernel_it->second;
+        if (state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_NONE ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0) {
+            return fail(FE_ERROR_UNSUPPORTED, "Kernel diagnostics are not configured.");
+        }
+        const uint64_t required = static_cast<uint64_t>(state.diagnostic_site_count) * sizeof(uint32_t);
+        if (buffer_it->second.mode != 3u || buffer_it->second.stride != sizeof(uint32_t) ||
+            buffer_it->second.byte_size < required) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Diagnostic buffer must be a sufficiently large read-write uint buffer.");
+        }
+        state.buffers[state.diagnostic_binding] = buffer;
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel) {
     bool destroyed_ad_kernel = false;
     const auto result = protect([&] {
@@ -13717,6 +13843,13 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         it->second.logical_x = static_cast<int32_t>(logical_x);
         it->second.logical_y = static_cast<int32_t>(logical_y);
         it->second.logical_z = static_cast<int32_t>(logical_z);
+        if (it->second.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_NONE) {
+            const auto diagnostic = it->second.buffers.find(it->second.diagnostic_binding);
+            if (diagnostic == it->second.buffers.end() || g_buffers.find(diagnostic->second) == g_buffers.end()) {
+                return fail(FE_ERROR_INVALID_ARGUMENT,
+                            "Configured kernel diagnostics require a live bound diagnostic buffer.");
+            }
+        }
 
         const auto should_profile = profiler_enabled_locked();
         const auto start = std::chrono::steady_clock::now();

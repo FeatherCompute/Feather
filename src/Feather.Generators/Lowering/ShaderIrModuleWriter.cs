@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace Feather.Generators.Model;
@@ -19,6 +20,9 @@ internal static class ShaderIrModuleWriter
     private const int HeaderSize = 104;
 
     public static byte[] WriteModule(ShaderModuleModel module)
+        => EmitModule(module).Module;
+
+    public static ShaderIrModuleEmission EmitModule(ShaderModuleModel module)
     {
         var strings = new StringTable();
         var types = new TypeTab(module.Structs.Items);
@@ -29,11 +33,26 @@ internal static class ShaderIrModuleWriter
         var lvalues = new List<SerLValRec>();
         var children = new List<uint>();
         var arguments = new List<uint>();
+        var statementOrigins = new List<ShaderIrStatementOrigin>();
+        var syntaxOrigins = new Dictionary<ShaderStatement, ShaderStatementSyntaxOrigin>(
+            ShaderStatementReferenceComparer.Instance);
+        foreach (var origin in module.StatementOrigins.Items)
+        {
+            if (origin.SyntaxStart < 0 || origin.SyntaxLength <= 0)
+            {
+                throw new InvalidOperationException("Typed statement source origins must be non-empty.");
+            }
+            if (syntaxOrigins.ContainsKey(origin.Statement))
+            {
+                throw new InvalidOperationException("A typed statement has more than one source origin.");
+            }
+            syntaxOrigins.Add(origin.Statement, origin);
+        }
 
-        var entryId = SerFunc(module.EntryPoint, strings, types, functions, parameters, statements, expressions, lvalues, children, arguments);
+        var entryId = SerFunc(module.EntryPoint, strings, types, functions, parameters, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins);
         foreach (var callable in module.Callables.Items)
         {
-            SerFunc(callable, strings, types, functions, parameters, statements, expressions, lvalues, children, arguments);
+            SerFunc(callable, strings, types, functions, parameters, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins);
         }
 
         types.CompleteStructTypes();
@@ -190,7 +209,11 @@ internal static class ShaderIrModuleWriter
         writer.Write(stringOffset);
         writer.Write(stringLength);
 
-        return stream.ToArray();
+        return new ShaderIrModuleEmission(
+            stream.ToArray(),
+            statementOrigins
+                .OrderBy(static origin => origin.StatementIndex)
+                .ToArray());
     }
 
     private static uint SerFunc(
@@ -203,7 +226,9 @@ internal static class ShaderIrModuleWriter
         List<SerExprRec> expressions,
         List<SerLValRec> lvalues,
         List<uint> children,
-        List<uint> arguments)
+        List<uint> arguments,
+        IReadOnlyDictionary<ShaderStatement, ShaderStatementSyntaxOrigin> syntaxOrigins,
+        List<ShaderIrStatementOrigin> statementOrigins)
     {
         var firstParameter = function.Parameters.Items.Count == 0 ? NoIdx : checked((uint)parameters.Count);
         foreach (var parameter in function.Parameters.Items)
@@ -214,7 +239,7 @@ internal static class ShaderIrModuleWriter
                 types.Id(parameter.Type)));
         }
 
-        var bodyId = SerBlock(function.Body, strings, types, statements, expressions, lvalues, children, arguments);
+        var bodyId = SerBlock(function.Body, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins);
         var id = checked((uint)functions.Count);
         functions.Add(new SerFuncRec(
             (byte)function.Kind,
@@ -235,12 +260,14 @@ internal static class ShaderIrModuleWriter
         List<SerExprRec> expressions,
         List<SerLValRec> lvalues,
         List<uint> children,
-        List<uint> arguments)
+        List<uint> arguments,
+        IReadOnlyDictionary<ShaderStatement, ShaderStatementSyntaxOrigin> syntaxOrigins,
+        List<ShaderIrStatementOrigin> statementOrigins)
     {
         var childIds = new List<uint>();
         foreach (var statement in block.Statements.Items)
         {
-            childIds.Add(SerStmt(statement, strings, types, statements, expressions, lvalues, children, arguments));
+            childIds.Add(SerStmt(statement, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins));
         }
 
         var firstChild = childIds.Count == 0 ? NoIdx : checked((uint)children.Count);
@@ -261,12 +288,48 @@ internal static class ShaderIrModuleWriter
         List<SerExprRec> expressions,
         List<SerLValRec> lvalues,
         List<uint> children,
-        List<uint> arguments)
+        List<uint> arguments,
+        IReadOnlyDictionary<ShaderStatement, ShaderStatementSyntaxOrigin> syntaxOrigins,
+        List<ShaderIrStatementOrigin> statementOrigins)
+    {
+        uint statementId = SerStmtCore(
+            statement,
+            strings,
+            types,
+            statements,
+            expressions,
+            lvalues,
+            children,
+            arguments,
+            syntaxOrigins,
+            statementOrigins);
+        if (statement is not ShaderBlockStatement && syntaxOrigins.TryGetValue(statement, out var origin))
+        {
+            statementOrigins.Add(new ShaderIrStatementOrigin(
+                statementId,
+                origin.SourcePath,
+                origin.SyntaxStart,
+                origin.SyntaxLength));
+        }
+        return statementId;
+    }
+
+    private static uint SerStmtCore(
+        ShaderStatement statement,
+        StringTable strings,
+        TypeTab types,
+        List<SerStmtRec> statements,
+        List<SerExprRec> expressions,
+        List<SerLValRec> lvalues,
+        List<uint> children,
+        List<uint> arguments,
+        IReadOnlyDictionary<ShaderStatement, ShaderStatementSyntaxOrigin> syntaxOrigins,
+        List<ShaderIrStatementOrigin> statementOrigins)
     {
         switch (statement)
         {
             case ShaderBlockStatement block:
-                return SerBlock(block, strings, types, statements, expressions, lvalues, children, arguments);
+                return SerBlock(block, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins);
             case ShaderLocalDeclarationStatement declaration:
                 return AddS(statements, new SerStmtRec
                 {
@@ -295,30 +358,30 @@ internal static class ShaderIrModuleWriter
                 {
                     Kind = 5,
                     A = SerExpr(ifStatement.Condition, strings, types, expressions, lvalues, arguments),
-                    B = SerBlock(ifStatement.Then, strings, types, statements, expressions, lvalues, children, arguments),
-                    C = ifStatement.Else is { } elseBlock ? SerBlock(elseBlock, strings, types, statements, expressions, lvalues, children, arguments) : NoIdx
+                    B = SerBlock(ifStatement.Then, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins),
+                    C = ifStatement.Else is { } elseBlock ? SerBlock(elseBlock, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins) : NoIdx
                 });
             case ShaderForStatement forStatement:
                 return AddS(statements, new SerStmtRec
                 {
                     Kind = 6,
-                    A = forStatement.Init is { } init ? SerStmt(init, strings, types, statements, expressions, lvalues, children, arguments) : NoIdx,
+                    A = forStatement.Init is { } init ? SerStmt(init, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins) : NoIdx,
                     B = forStatement.Condition is { } condition ? SerExpr(condition, strings, types, expressions, lvalues, arguments) : NoIdx,
-                    C = forStatement.Step is { } step ? SerStmt(step, strings, types, statements, expressions, lvalues, children, arguments) : NoIdx,
-                    Op = SerBlock(forStatement.Body, strings, types, statements, expressions, lvalues, children, arguments)
+                    C = forStatement.Step is { } step ? SerStmt(step, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins) : NoIdx,
+                    Op = SerBlock(forStatement.Body, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins)
                 });
             case ShaderWhileStatement whileStatement:
                 return AddS(statements, new SerStmtRec
                 {
                     Kind = 7,
                     A = SerExpr(whileStatement.Condition, strings, types, expressions, lvalues, arguments),
-                    B = SerBlock(whileStatement.Body, strings, types, statements, expressions, lvalues, children, arguments)
+                    B = SerBlock(whileStatement.Body, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins)
                 });
             case ShaderDoWhileStatement doWhileStatement:
                 return AddS(statements, new SerStmtRec
                 {
                     Kind = 8,
-                    A = SerBlock(doWhileStatement.Body, strings, types, statements, expressions, lvalues, children, arguments),
+                    A = SerBlock(doWhileStatement.Body, strings, types, statements, expressions, lvalues, children, arguments, syntaxOrigins, statementOrigins),
                     B = SerExpr(doWhileStatement.Condition, strings, types, expressions, lvalues, arguments)
                 });
             case ShaderBreakStatement:
@@ -925,4 +988,25 @@ internal static class ShaderIrModuleWriter
             return stream.ToArray();
         }
     }
+
+    private sealed class ShaderStatementReferenceComparer : IEqualityComparer<ShaderStatement>
+    {
+        public static ShaderStatementReferenceComparer Instance { get; } = new();
+
+        public bool Equals(ShaderStatement? left, ShaderStatement? right)
+            => ReferenceEquals(left, right);
+
+        public int GetHashCode(ShaderStatement statement)
+            => RuntimeHelpers.GetHashCode(statement);
+    }
 }
+
+internal sealed record ShaderIrModuleEmission(
+    byte[] Module,
+    IReadOnlyList<ShaderIrStatementOrigin> StatementOrigins);
+
+internal readonly record struct ShaderIrStatementOrigin(
+    uint StatementIndex,
+    string SourcePath,
+    int SyntaxStart,
+    int SyntaxLength);

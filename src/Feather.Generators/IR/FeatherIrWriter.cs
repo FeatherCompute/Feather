@@ -119,7 +119,14 @@ internal static class FeatherIrWriter
             instructions.Select(static (instruction, index) => new FeatherIrInstructionOrigin(
                 checked((uint)index),
                 instruction.SyntaxStart,
-                instruction.SyntaxLength)).ToArray());
+                instruction.SyntaxLength)).ToArray(),
+            model.TypedIrStatementOrigins.Items
+                .Select(static origin => new FeatherIrStatementOrigin(
+                    origin.StatementIndex,
+                    origin.SourcePath,
+                    origin.SyntaxStart,
+                    origin.SyntaxLength))
+                .ToArray());
     }
 
     public static string ToCSharpByteArray(byte[] bytes)

@@ -59,6 +59,21 @@ typedef enum FeShaderBinaryFormat {
     FE_SHADER_BINARY_FORMAT_SPIRV = 1
 } FeShaderBinaryFormat;
 
+/** Explicit diagnostic shader variants. These are never aliases for hardware PC sampling. */
+typedef enum FeKernelDiagnosticMode {
+    FE_KERNEL_DIAGNOSTIC_NONE = 0,
+    FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT = 1
+} FeKernelDiagnosticMode;
+
+/** Versioned device-buffer ABI for one configured diagnostic kernel variant. */
+typedef struct FeKernelDiagnosticLayout {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t buffer_binding;
+    uint32_t site_count;
+    uint32_t counter_stride_bytes;
+} FeKernelDiagnosticLayout;
+
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
     FE_MEMORY_BARRIER_BUFFER = 1u << 0,
@@ -442,6 +457,9 @@ FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler);
 
 FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernelCreateDesc* desc,
                                          FeKernelHandle* out_kernel);
+FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t mode);
+FE_API FeResult fe_kernel_get_diagnostic_layout(FeKernelHandle kernel, FeKernelDiagnosticLayout* out_layout);
+FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, FeBufferHandle buffer);

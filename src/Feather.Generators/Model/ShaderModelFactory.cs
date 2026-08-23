@@ -27,13 +27,21 @@ internal static class ShaderModelFactory
         return model with
         {
             LoweredInstructions = lowered,
-            TypedIrSection = typedIr,
+            TypedIrSection = typedIr?.Module,
+            TypedIrStatementOrigins = new EquatableArray<TypedIrStatementOriginModel>(
+                typedIr?.StatementOrigins
+                    .Select(static origin => new TypedIrStatementOriginModel(
+                        origin.StatementIndex,
+                        origin.SourcePath,
+                        origin.SyntaxStart,
+                        origin.SyntaxLength))
+                    .ToArray() ?? []),
             TypedIrDiagnostics = new EquatableArray<TypedIrDiagnosticModel>(typedIrDiagnostics),
             BodyDiagnostics = new EquatableArray<ShaderBodyDiagnosticModel>(bodyDiagnostics)
         };
     }
 
-    private static byte[]? TryLowerTypedIr(
+    private static ShaderIrModuleEmission? TryLowerTypedIr(
         ShaderModel model,
         SemanticModel semanticModel,
         CancellationToken cancellationToken,
@@ -52,7 +60,7 @@ internal static class ShaderModelFactory
                 return null;
             }
 
-            return ShaderIrModuleWriter.WriteModule(typedModule);
+            return ShaderIrModuleWriter.EmitModule(typedModule);
         }
         catch (ShaderIrLoweringException ex)
         {

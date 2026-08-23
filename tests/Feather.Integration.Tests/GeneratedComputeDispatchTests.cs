@@ -5644,6 +5644,61 @@ public readonly partial struct StructArrayWriteKernel(
 public class ControlFlowDispatchTests
 {
     [Fact]
+    public void ExecutionHeatUsesDiagnosticVariantAndPreservesKernelOutput()
+    {
+        using var counts = GPU.CreateBuffer<int>([1, 2, 3, 4]);
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4, 5, 6, 7]);
+        using var output = GPU.CreateBuffer<float>(4);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
+        Assert.DoesNotContain("atomicAdd", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+        using var capture = GPU.Context.BeginExecutionHeatCapture(
+            typeof(DynamicForSumKernel).FullName!);
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        Assert.Contains("atomicAdd", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+        using var commands = GPU.Queue.CreateCommandList();
+        commands.Dispatch(
+            new DynamicForSumKernel(counts.AsReadOnly(), input.AsReadOnly(), output.AsReadWrite()),
+            4);
+        commands.Close();
+
+        using (var fence = GPU.Queue.Submit(commands))
+        {
+            fence.Wait();
+        }
+        GpuExecutionHeatResult result = capture.CompleteAndRead();
+
+        Assert.Equal(typeof(DynamicForSumKernel).FullName, result.ShaderTypeName);
+        Assert.Equal(1, result.MatchedDispatchCount);
+        Assert.InRange(result.SiteCapacity, 1, GpuExecutionHeatCapture.MaximumSites);
+        Assert.Equal(
+            [
+                new GpuExecutionHeatSite(0, 4),
+                new GpuExecutionHeatSite(1, 4),
+                new GpuExecutionHeatSite(2, 4),
+                new GpuExecutionHeatSite(3, 10),
+                new GpuExecutionHeatSite(4, 10),
+                new GpuExecutionHeatSite(6, 4),
+                new GpuExecutionHeatSite(7, 4)
+            ],
+            result.Sites);
+        Assert.Equal([1, 5, 12, 22], output.ToArray());
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<DynamicForSumKernel>());
+    }
+
+    [Fact]
+    public void ExecutionHeatRejectsOverlappingAndUnmatchedCaptures()
+    {
+        using var capture = GPU.Context.BeginExecutionHeatCapture("Missing.Generated.Kernel");
+
+        Assert.Throws<InvalidOperationException>(() =>
+            GPU.Context.BeginExecutionHeatCapture(typeof(DynamicForSumKernel).FullName!));
+        var error = Assert.Throws<InvalidOperationException>(capture.CompleteAndRead);
+
+        Assert.Contains("No matching generated compute shader", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ShaderInspectionLowersIfConditionThroughEasyGpuBuilder()
     {
         var glsl = ShaderInspection.GetGLSL<IfThresholdKernel>();

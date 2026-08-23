@@ -28,7 +28,8 @@ internal static class FeatherIrSourceMapWriter
         string sourcePath = entryPoint?.SyntaxTree.FilePath ?? model.Syntax.SyntaxTree.FilePath;
         var span = entryPoint?.Span ?? model.Syntax.Span;
 
-        var json = new StringBuilder(512 + emission.Instructions.Count * 64);
+        var json = new StringBuilder(
+            512 + emission.Instructions.Count * 64 + emission.TypedStatements.Count * 72);
         json.Append('{');
         json.Append("\"schemaVersion\":").Append(SchemaVersion).Append(',');
         json.Append("\"kind\":\"Feather.FeirSourceMap\",");
@@ -65,6 +66,22 @@ internal static class FeatherIrSourceMapWriter
             json.Append("\"span\":{");
             json.Append("\"start\":").Append(instruction.SyntaxStart).Append(',');
             json.Append("\"length\":").Append(instruction.SyntaxLength);
+            json.Append("}}");
+        }
+        json.Append("],");
+        json.Append("\"typedStatements\":[");
+        for (int index = 0; index < emission.TypedStatements.Count; index++)
+        {
+            if (index > 0) json.Append(',');
+            var statement = emission.TypedStatements[index];
+            json.Append('{');
+            json.Append("\"statementIndex\":").Append(statement.StatementIndex).Append(',');
+            json.Append("\"sourcePath\":");
+            AppendString(json, statement.SourcePath);
+            json.Append(',');
+            json.Append("\"span\":{");
+            json.Append("\"start\":").Append(statement.SyntaxStart).Append(',');
+            json.Append("\"length\":").Append(statement.SyntaxLength);
             json.Append("}}");
         }
         json.Append("]}");
@@ -132,9 +149,16 @@ internal static class FeatherIrSourceMapWriter
 
 internal sealed record FeatherIrEmission(
     byte[] Module,
-    IReadOnlyList<FeatherIrInstructionOrigin> Instructions);
+    IReadOnlyList<FeatherIrInstructionOrigin> Instructions,
+    IReadOnlyList<FeatherIrStatementOrigin> TypedStatements);
 
 internal readonly record struct FeatherIrInstructionOrigin(
     uint InstructionIndex,
+    int SyntaxStart,
+    int SyntaxLength);
+
+internal readonly record struct FeatherIrStatementOrigin(
+    uint StatementIndex,
+    string SourcePath,
     int SyntaxStart,
     int SyntaxLength);

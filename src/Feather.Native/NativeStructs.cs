@@ -30,6 +30,22 @@ public enum FeShaderBinaryFormat : uint
     SpirV = 1
 }
 
+public enum FeKernelDiagnosticMode : uint
+{
+    None = 0,
+    ExecutionHeat = 1
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayout
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SiteCount;
+    public readonly uint CounterStrideBytes;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct FeBackendCaps
 {

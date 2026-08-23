@@ -13,6 +13,7 @@ public sealed class GpuContext : IDisposable
     private readonly List<IDisposable> pendingSubmissions = [];
     private readonly List<WeakReference<ReadbackOperation>> readbackOperations = [];
     private GpuTimestampRecorder? activeTimestampRecorder;
+    private GpuExecutionHeatCapture? activeExecutionHeatCapture;
     private int activeOperations;
     private bool disposing;
     private bool disposed;
@@ -253,6 +254,8 @@ public sealed class GpuContext : IDisposable
                 CancelReadbacksForShutdownLocked();
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(Handle));
                 DisposePendingSubmissionsLocked();
+                activeExecutionHeatCapture?.DisposeForContextShutdown();
+                activeExecutionHeatCapture = null;
                 foreach (var kernel in kernels.Values)
                 {
                     kernel.Dispose();
@@ -284,6 +287,11 @@ public sealed class GpuContext : IDisposable
         {
             ThrowIfDisposed();
             var resolvedAutoDiff = autoDiff ?? TKernel.Descriptor.AutoDiff;
+            if (activeExecutionHeatCapture is { } capture &&
+                capture.TryGetOrCreateKernel<TKernel>(resolvedAutoDiff, out var diagnosticKernel))
+            {
+                return diagnosticKernel;
+            }
             var key = (typeof(TKernel), resolvedAutoDiff);
             if (!kernels.TryGetValue(key, out var kernel))
             {
@@ -292,6 +300,39 @@ public sealed class GpuContext : IDisposable
             }
 
             return kernel;
+        }
+    }
+
+    /// <summary>
+    /// Arms one explicitly bounded execution-heat diagnostic variant for the named generated
+    /// compute shader type. Ordinary cached kernels remain untouched; only matching dispatches
+    /// recorded while the returned scope is active use the instrumented variant.
+    /// </summary>
+    public GpuExecutionHeatCapture BeginExecutionHeatCapture(string shaderTypeName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeExecutionHeatCapture is not null)
+            {
+                throw new InvalidOperationException(
+                    "A GPU execution-heat capture is already active on this context.");
+            }
+            var capture = new GpuExecutionHeatCapture(this, shaderTypeName);
+            activeExecutionHeatCapture = capture;
+            return capture;
+        }
+    }
+
+    internal void EndExecutionHeatCapture(GpuExecutionHeatCapture capture)
+    {
+        lock (gate)
+        {
+            if (ReferenceEquals(activeExecutionHeatCapture, capture))
+            {
+                activeExecutionHeatCapture = null;
+            }
         }
     }
 

@@ -11,6 +11,7 @@ public sealed class GpuKernel : IDisposable
     private readonly Type kernelType;
     private readonly GpuContext context;
     private readonly object dispatchGate = new();
+    private GpuExecutionHeatCapture? executionHeatCapture;
     internal delegate byte[] IrTransform(ReadOnlySpan<byte> ir);
 
     // Test-only hook used to validate native behavior against transformed generated IR without
@@ -89,6 +90,39 @@ public sealed class GpuKernel : IDisposable
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_create_from_ir(context.Handle, in createDesc, out var handle));
                 return new GpuKernel(context, handle, descriptor, typeof(TKernel));
             }
+        }
+    }
+
+    internal static GpuKernel CreateExecutionHeat<TKernel>(
+        GpuContext context,
+        GpuExecutionHeatCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+        {
+            throw new NotSupportedException(
+                "Execution-heat diagnostics do not yet support differentiable kernels.");
+        }
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics(
+                kernel.Handle,
+                (uint)FeKernelDiagnosticMode.ExecutionHeat));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.executionHeatCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
         }
     }
 
@@ -173,6 +207,7 @@ public sealed class GpuKernel : IDisposable
 
             using var command = new GpuKernelCommand(gpuKernel.Handle);
             TKernel.Bind(in kernel, command);
+            gpuKernel.executionHeatCapture?.Bind(gpuKernel, command);
             var groups = ComputeGroups(size, gpuKernel.Descriptor.ThreadGroupSize);
             var recorder = context.ActiveTimestampRecorder;
             using (recorder?.IncludeCommandIntervals == true
@@ -403,6 +438,15 @@ public sealed class GpuKernelCommand : IDisposable
             ?? throw new ArgumentException("Sampler binding was not created by Feather.", nameof(sampler));
         Retain(native.NativeSamplerHandle);
         NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_sampler(Handle, binding, native.NativeSamplerHandle));
+    }
+
+    internal void BindDiagnosticBuffer(GpuBuffer<uint> buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        Retain(buffer.GetNativeHandle());
+        NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_bind_diagnostic_buffer(
+            Handle,
+            buffer.GetNativeHandle()));
     }
 
     /// <summary>
