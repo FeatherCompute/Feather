@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Reflection;
 using System.Text.Json;
 using Feather.Interop;
 using Feather.Math;
@@ -5653,6 +5654,20 @@ public class ControlFlowDispatchTests
         Assert.DoesNotContain("atomicAdd", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
         using var capture = GPU.Context.BeginExecutionHeatCapture(
             typeof(DynamicForSumKernel).FullName!);
+        FieldInfo sourceMapField = typeof(DynamicForSumKernel).GetField(
+            "__feather_source_map",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] sourceMapBytes = Convert.FromBase64String((string)sourceMapField.GetValue(null)!);
+        int diagnosticSiteCount;
+        using (JsonDocument sourceMap = JsonDocument.Parse(sourceMapBytes))
+        {
+            diagnosticSiteCount = sourceMap.RootElement
+                .GetProperty("diagnosticSiteCount")
+                .GetInt32();
+            using GpuFence preparation = capture.PrepareCounterLayout(
+                diagnosticSiteCount);
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
         GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
         Assert.NotSame(ordinaryKernel, diagnosticKernel);
         Assert.Contains("atomicAdd", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
@@ -5670,7 +5685,7 @@ public class ControlFlowDispatchTests
 
         Assert.Equal(typeof(DynamicForSumKernel).FullName, result.ShaderTypeName);
         Assert.Equal(1, result.MatchedDispatchCount);
-        Assert.InRange(result.SiteCapacity, 1, GpuExecutionHeatCapture.MaximumSites);
+        Assert.Equal(diagnosticSiteCount, result.SiteCapacity);
         Assert.Equal(
             [
                 new GpuExecutionHeatSite(0, 4),

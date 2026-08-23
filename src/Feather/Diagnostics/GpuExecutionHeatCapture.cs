@@ -58,6 +58,65 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         get { lock (gate) { return siteCount; } }
     }
 
+    /// <summary>
+    /// Allocates and queues initialization of the exact diagnostic counter layout before command
+    /// timestamp intervals begin. The returned fence must complete before a matching dispatch.
+    /// This is an explicit-capture operation; ordinary kernels never call it or allocate the
+    /// diagnostic buffer. The count must come from the matching generated source-map contract.
+    /// </summary>
+    public GpuFence PrepareCounterLayout(int expectedSiteCount)
+    {
+        if (expectedSiteCount is < 1 or > MaximumSites)
+            throw new ArgumentOutOfRangeException(nameof(expectedSiteCount));
+
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (completed || kernel is not null || counters is not null)
+            {
+                throw new InvalidOperationException(
+                    "The execution-heat counter layout can only be prepared once before dispatch.");
+            }
+        }
+
+        GpuBuffer<uint>? prepared = GpuBuffer<uint>.Create(
+            context,
+            expectedSiteCount,
+            BufferAccess.ReadWrite);
+        using var zeroSource = GpuBuffer<uint>.Create(
+            context,
+            new uint[expectedSiteCount],
+            BufferAccess.ReadOnly);
+        using var commands = context.Queue.CreateCommandList();
+        commands.CopyBuffer(zeroSource, prepared);
+        commands.Close();
+        GpuFence? preparationFence = null;
+        try
+        {
+            preparationFence = context.Queue.Submit(commands);
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                if (completed || kernel is not null || counters is not null)
+                {
+                    throw new InvalidOperationException(
+                        "The execution-heat counter layout changed while it was being prepared.");
+                }
+                counters = prepared;
+                prepared = null;
+                siteCount = expectedSiteCount;
+            }
+            GpuFence result = preparationFence;
+            preparationFence = null;
+            return result;
+        }
+        finally
+        {
+            preparationFence?.Dispose();
+            prepared?.Dispose();
+        }
+    }
+
     internal bool TryGetOrCreateKernel<TKernel>(bool autoDiff, out GpuKernel diagnosticKernel)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
@@ -85,7 +144,7 @@ public sealed class GpuExecutionHeatCapture : IDisposable
     {
         lock (gate)
         {
-            if (kernel is not null || counters is not null)
+            if (kernel is not null)
             {
                 throw new InvalidOperationException("The execution-heat capture already owns a kernel variant.");
             }
@@ -97,9 +156,18 @@ public sealed class GpuExecutionHeatCapture : IDisposable
                 throw new InvalidDataException("The native execution-heat buffer ABI is unsupported.");
             }
 
-            var initial = new uint[checked((int)layout.SiteCount)];
-            counters = GpuBuffer<uint>.Create(context, initial, BufferAccess.ReadWrite);
-            siteCount = initial.Length;
+            int resolvedSiteCount = checked((int)layout.SiteCount);
+            if (counters is null)
+            {
+                var initial = new uint[resolvedSiteCount];
+                counters = GpuBuffer<uint>.Create(context, initial, BufferAccess.ReadWrite);
+                siteCount = initial.Length;
+            }
+            else if (siteCount != resolvedSiteCount)
+            {
+                throw new InvalidDataException(
+                    "The prepared execution-heat counter layout does not match the generated kernel.");
+            }
             kernel = attachedKernel;
         }
     }
