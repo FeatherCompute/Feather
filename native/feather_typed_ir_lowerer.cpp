@@ -28,6 +28,8 @@ constexpr uint32_t kDiagnosticUbsan = 3;
 constexpr uint32_t kDiagnosticPrintAssert = 4;
 constexpr uint32_t kDiagnosticBranchDivergence = 5;
 constexpr uint32_t kDiagnosticComputeTrace = 6;
+constexpr uint32_t kDiagnosticCounterfactual = 7;
+constexpr uint32_t kCounterfactualForceIfFalse = 1;
 
 constexpr uint32_t kTraceEventFunctionEnter = 1;
 constexpr uint32_t kTraceEventStatement = 2;
@@ -304,7 +306,9 @@ public:
             !LowerStatement(entry.body_statement_index) ||
             !EmitComputeTraceEntryEnd(typed_.entry_function, entry.body_statement_index) ||
             (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
-             !branch_divergence_site_emitted_)) {
+             !branch_divergence_site_emitted_) ||
+            (inputs_.diagnostic_mode == kDiagnosticCounterfactual &&
+             !counterfactual_site_emitted_)) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
             return nullptr;
         }
@@ -473,6 +477,14 @@ private:
                 (inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags != 0u)) {
                 return Fail("compute-trace capacity or feature contract is invalid");
             }
+        }
+
+        if (inputs_.diagnostic_mode == kDiagnosticCounterfactual &&
+            (inputs_.diagnostic_site_count == 0u ||
+             inputs_.diagnostic_source_site >= inputs_.diagnostic_site_count ||
+             inputs_.diagnostic_transform_kind != kCounterfactualForceIfFalse ||
+             inputs_.diagnostic_flags != 0u)) {
+            return Fail("counterfactual source site or transformation contract is invalid");
         }
 
         if (!RegisterBoundsCheckResources()) {
@@ -2897,6 +2909,17 @@ private:
                 return false;
             }
         }
+        if (inputs_.diagnostic_mode == kDiagnosticCounterfactual &&
+            current_statement_id_ == inputs_.diagnostic_source_site) {
+            if (inputs_.diagnostic_transform_kind != kCounterfactualForceIfFalse) {
+                return Fail("counterfactual if transformation is unsupported");
+            }
+            condition = builder_.Literal(GPU::IR::Type::Bool(), "false");
+            if (condition == GPU::IR::InvalidValueId) {
+                return Fail("counterfactual false predicate could not be materialized");
+            }
+            counterfactual_site_emitted_ = true;
+        }
 
         auto then_statements = LowerStatementList(statement.b);
         if (!then_statements.has_value()) {
@@ -5286,6 +5309,7 @@ private:
     uint32_t current_statement_id_ = NoIndex;
     uint32_t current_function_id_ = NoIndex;
     bool branch_divergence_site_emitted_ = false;
+    bool counterfactual_site_emitted_ = false;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;
 };

@@ -560,6 +560,16 @@ public static class NativeMethods
         out FeKernelDiagnosticLayoutV6 out_layout);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_configure_diagnostics_v7(
+        FeKernelHandle kernel,
+        in FeKernelDiagnosticConfigV7 config);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern FeResult fe_kernel_get_diagnostic_layout_v7(
+        FeKernelHandle kernel,
+        out FeKernelDiagnosticLayoutV7 out_layout);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

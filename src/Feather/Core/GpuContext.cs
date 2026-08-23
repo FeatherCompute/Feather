@@ -483,6 +483,33 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Creates one inert private counterfactual compute variant for bounded differential
+    /// profiling. Matching dispatches use the transformed variant only while the returned scope's
+    /// <see cref="GpuCounterfactualCapture.VariantEnabled"/> property is true.
+    /// </summary>
+    public GpuCounterfactualCapture BeginCounterfactualCapture(
+        string shaderTypeName,
+        uint sourceSiteIndex,
+        GpuCounterfactualTransform transform = GpuCounterfactualTransform.ForceIfFalse)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuCounterfactualCapture(
+                this,
+                shaderTypeName,
+                sourceSiteIndex,
+                transform);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
     internal void EndDiagnosticCapture(IGpuDiagnosticCapture capture)
     {
         lock (gate)

@@ -38,7 +38,13 @@ public enum FeKernelDiagnosticMode : uint
     Ubsan = 3,
     PrintAssert = 4,
     BranchDivergence = 5,
-    ComputeTrace = 6
+    ComputeTrace = 6,
+    Counterfactual = 7
+}
+
+public enum FeKernelCounterfactualTransform : uint
+{
+    ForceIfFalse = 1
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -292,6 +298,45 @@ public readonly struct FeKernelDiagnosticLayoutV6
     public readonly uint RecordStrideBytes;
     public readonly uint RecordCapacity;
     public readonly uint EventSchemaVersion;
+    public readonly uint Flags;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV7
+{
+    public FeKernelDiagnosticConfigV7(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint sourceSiteIndex,
+        FeKernelCounterfactualTransform transformKind,
+        uint flags,
+        uint reserved)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        SourceSiteIndex = sourceSiteIndex;
+        TransformKind = (uint)transformKind;
+        Flags = flags;
+        Reserved = reserved;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint SourceSiteIndex;
+    public readonly uint TransformKind;
+    public readonly uint Flags;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV7
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint SiteCount;
+    public readonly uint SourceSiteIndex;
+    public readonly uint TransformKind;
     public readonly uint Flags;
     public readonly uint Reserved;
 }

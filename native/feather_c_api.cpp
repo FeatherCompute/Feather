@@ -360,6 +360,7 @@ struct KernelState {
     uint32_t diagnostic_record_capacity = 0;
     uint32_t diagnostic_header_stride = 0;
     uint32_t diagnostic_flags = 0;
+    uint32_t diagnostic_transform_kind = 0;
     uint32_t diagnostic_filter_mode = 0;
     uint32_t diagnostic_logical_x = 0;
     uint32_t diagnostic_logical_y = 0;
@@ -4519,6 +4520,7 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     inputs->diagnostic_selected_z = kernel.diagnostic_selected_z;
     inputs->diagnostic_record_capacity = kernel.diagnostic_record_capacity;
     inputs->diagnostic_flags = kernel.diagnostic_flags;
+    inputs->diagnostic_transform_kind = kernel.diagnostic_transform_kind;
     inputs->diagnostic_filter_mode = kernel.diagnostic_filter_mode;
     inputs->diagnostic_logical_x = kernel.diagnostic_logical_x;
     inputs->diagnostic_logical_y = kernel.diagnostic_logical_y;
@@ -13763,6 +13765,7 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
             state.diagnostic_mask_cell_stride = 0;
             state.diagnostic_value_type_tag = 0;
             state.diagnostic_component_count = 0;
+            state.diagnostic_transform_kind = 0;
             return ok();
         }
         if (state.auto_diff) {
@@ -13811,6 +13814,7 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
         state.diagnostic_mask_cell_stride = 0;
         state.diagnostic_value_type_tag = 0;
         state.diagnostic_component_count = 0;
+        state.diagnostic_transform_kind = 0;
         return ok();
     });
 }
@@ -13927,6 +13931,7 @@ FE_API FeResult fe_kernel_configure_diagnostics_v2(
         state.diagnostic_mask_cell_stride = 0u;
         state.diagnostic_value_type_tag = primitive->a + 1u;
         state.diagnostic_component_count = component_count;
+        state.diagnostic_transform_kind = 0u;
         return ok();
     });
 }
@@ -14002,6 +14007,7 @@ FE_API FeResult fe_kernel_configure_diagnostics_v3(
         state.diagnostic_mask_cell_stride = 0u;
         state.diagnostic_value_type_tag = 0u;
         state.diagnostic_component_count = 0u;
+        state.diagnostic_transform_kind = 0u;
         return ok();
     });
 }
@@ -14087,6 +14093,7 @@ FE_API FeResult fe_kernel_configure_diagnostics_v4(
         state.diagnostic_mask_cell_stride = 4u;
         state.diagnostic_value_type_tag = 0u;
         state.diagnostic_component_count = 0u;
+        state.diagnostic_transform_kind = 0u;
         return ok();
     });
 }
@@ -14182,6 +14189,7 @@ FE_API FeResult fe_kernel_configure_diagnostics_v5(
         state.diagnostic_mask_cell_stride = 0u;
         state.diagnostic_value_type_tag = 0u;
         state.diagnostic_component_count = 0u;
+        state.diagnostic_transform_kind = 0u;
         return ok();
     });
 }
@@ -14248,6 +14256,76 @@ FE_API FeResult fe_kernel_configure_diagnostics_v6(
         state.diagnostic_record_stride = 64u;
         state.diagnostic_record_capacity = config->record_capacity;
         state.diagnostic_flags = 0u;
+        state.diagnostic_filter_mode = 0u;
+        state.diagnostic_logical_x = 0u;
+        state.diagnostic_logical_y = 0u;
+        state.diagnostic_logical_z = 0u;
+        state.diagnostic_mask_header_stride = 0u;
+        state.diagnostic_mask_cell_stride = 0u;
+        state.diagnostic_value_type_tag = 0u;
+        state.diagnostic_component_count = 0u;
+        state.diagnostic_transform_kind = 0u;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_configure_diagnostics_v7(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV7* config) {
+    return protect([&] {
+        if (config == nullptr || config->abi_version != 7u ||
+            config->mode != FE_KERNEL_DIAGNOSTIC_COUNTERFACTUAL ||
+            config->source_site_index == UINT32_MAX ||
+            config->transform_kind != FE_KERNEL_COUNTERFACTUAL_FORCE_IF_FALSE ||
+            config->flags != 0u || config->reserved != 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Counterfactual diagnostic configuration is unsupported.");
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Counterfactual variants do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536 ||
+            config->source_site_index >= parsed.typed_module.statements.size()) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Counterfactual variants require retained typed compute FEIR and a retained site.");
+        }
+        if (parsed.typed_module.statements[config->source_site_index].kind != kTypedStatementIf) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "The selected counterfactual source site is not an if statement.");
+        }
+
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = config->mode;
+        state.diagnostic_binding = UINT32_MAX;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        state.diagnostic_source_site = config->source_site_index;
+        state.diagnostic_selected_x = 0u;
+        state.diagnostic_selected_y = 0u;
+        state.diagnostic_selected_z = 0u;
+        state.diagnostic_header_stride = 0u;
+        state.diagnostic_record_stride = 0u;
+        state.diagnostic_record_capacity = 0u;
+        state.diagnostic_flags = 0u;
+        state.diagnostic_transform_kind = config->transform_kind;
         state.diagnostic_filter_mode = 0u;
         state.diagnostic_logical_x = 0u;
         state.diagnostic_logical_y = 0u;
@@ -14467,6 +14545,39 @@ FE_API FeResult fe_kernel_get_diagnostic_layout_v6(
     });
 }
 
+FE_API FeResult fe_kernel_get_diagnostic_layout_v7(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV7* out_layout) {
+    return protect([&] {
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Counterfactual diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_COUNTERFACTUAL ||
+            state.diagnostic_binding != UINT32_MAX || state.diagnostic_site_count == 0u ||
+            state.diagnostic_source_site == UINT32_MAX ||
+            state.diagnostic_transform_kind != FE_KERNEL_COUNTERFACTUAL_FORCE_IF_FALSE ||
+            state.diagnostic_flags != 0u) {
+            return fail(FE_ERROR_UNSUPPORTED, "Counterfactual diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayoutV7{
+            7u,
+            state.diagnostic_mode,
+            state.diagnostic_site_count,
+            state.diagnostic_source_site,
+            state.diagnostic_transform_kind,
+            state.diagnostic_flags,
+            0u};
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer) {
     return protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -14649,7 +14760,8 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
         it->second.logical_x = static_cast<int32_t>(logical_x);
         it->second.logical_y = static_cast<int32_t>(logical_y);
         it->second.logical_z = static_cast<int32_t>(logical_z);
-        if (it->second.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_NONE) {
+        if (it->second.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_NONE &&
+            it->second.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_COUNTERFACTUAL) {
             const auto diagnostic = it->second.buffers.find(it->second.diagnostic_binding);
             if (diagnostic == it->second.buffers.end() || g_buffers.find(diagnostic->second) == g_buffers.end()) {
                 return fail(FE_ERROR_INVALID_ARGUMENT,

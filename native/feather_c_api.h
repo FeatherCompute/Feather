@@ -67,8 +67,14 @@ typedef enum FeKernelDiagnosticMode {
     FE_KERNEL_DIAGNOSTIC_UBSAN = 3,
     FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT = 4,
     FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE = 5,
-    FE_KERNEL_DIAGNOSTIC_COMPUTE_TRACE = 6
+    FE_KERNEL_DIAGNOSTIC_COMPUTE_TRACE = 6,
+    FE_KERNEL_DIAGNOSTIC_COUNTERFACTUAL = 7
 } FeKernelDiagnosticMode;
+
+/** Explicit source transformation used by a private counterfactual kernel variant. */
+typedef enum FeKernelCounterfactualTransform {
+    FE_KERNEL_COUNTERFACTUAL_FORCE_IF_FALSE = 1
+} FeKernelCounterfactualTransform;
 
 /** Versioned device-buffer ABI for one configured diagnostic kernel variant. */
 typedef struct FeKernelDiagnosticLayout {
@@ -219,6 +225,30 @@ typedef struct FeKernelDiagnosticLayoutV6 {
     uint32_t flags;
     uint32_t reserved;
 } FeKernelDiagnosticLayoutV6;
+
+/**
+ * Versioned configuration for one private counterfactual compute variant. Counterfactual variants
+ * do not allocate or bind a diagnostic buffer and are never semantic-equivalence claims.
+ */
+typedef struct FeKernelDiagnosticConfigV7 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t source_site_index;
+    uint32_t transform_kind;
+    uint32_t flags;
+    uint32_t reserved;
+} FeKernelDiagnosticConfigV7;
+
+/** Immutable identity for one configured counterfactual compute variant. */
+typedef struct FeKernelDiagnosticLayoutV7 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t site_count;
+    uint32_t source_site_index;
+    uint32_t transform_kind;
+    uint32_t flags;
+    uint32_t reserved;
+} FeKernelDiagnosticLayoutV7;
 
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
@@ -643,6 +673,12 @@ FE_API FeResult fe_kernel_configure_diagnostics_v6(
 FE_API FeResult fe_kernel_get_diagnostic_layout_v6(
     FeKernelHandle kernel,
     FeKernelDiagnosticLayoutV6* out_layout);
+FE_API FeResult fe_kernel_configure_diagnostics_v7(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV7* config);
+FE_API FeResult fe_kernel_get_diagnostic_layout_v7(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV7* out_layout);
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);

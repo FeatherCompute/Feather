@@ -328,6 +328,44 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel CreateCounterfactual<TKernel>(
+        GpuContext context,
+        GpuCounterfactualCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "GPU counterfactual variants do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV7(
+                GpuCounterfactualCapture.AbiVersion,
+                FeKernelDiagnosticMode.Counterfactual,
+                capture.SourceSiteIndex,
+                (FeKernelCounterfactualTransform)capture.Transform,
+                flags: 0,
+                reserved: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v7(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v7(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {

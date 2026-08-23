@@ -6207,6 +6207,81 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void CounterfactualVariantIsExplicitPrivateAndRestoresOrdinaryKernelPath()
+    {
+        const int InvocationCount = 96;
+        using var output = GPU.CreateBuffer<int>(InvocationCount);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>();
+        uint sourceSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if ((LocalIds.X & 1) == 0)");
+
+        using var capture = GPU.Context.BeginCounterfactualCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            sourceSite);
+        Assert.False(capture.VariantEnabled);
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
+
+        GPU.Dispatch(
+            new BranchDivergenceProbeKernel(output.AsReadWrite()),
+            InvocationCount,
+            wait: true);
+        int[] baseline = output.ToArray();
+        for (int i = 0; i < baseline.Length; ++i)
+        {
+            int branchValue = (i % 48 & 1) == 0 ? 10 : 20;
+            int workgroupValue = ((i / 48) & 1) == 0 ? 1 : 2;
+            int nestedValue = i % 48 < 4 ? 100 : 0;
+            Assert.Equal(branchValue + workgroupValue + nestedValue, baseline[i]);
+        }
+
+        capture.VariantEnabled = true;
+        GpuKernel variantKernel = GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>();
+        Assert.NotSame(ordinaryKernel, variantKernel);
+        Assert.Equal(sourceSite, capture.SourceSiteIndex);
+        Assert.True(capture.SiteCount > sourceSite);
+        Assert.Equal(0, capture.VariantDispatchCount);
+        GPU.Dispatch(
+            new BranchDivergenceProbeKernel(output.AsReadWrite()),
+            InvocationCount,
+            wait: true);
+        int[] counterfactual = output.ToArray();
+        Assert.Equal(1, capture.VariantDispatchCount);
+
+        for (int i = 0; i < counterfactual.Length; ++i)
+        {
+            int workgroupValue = ((i / 48) & 1) == 0 ? 1 : 2;
+            int nestedValue = i % 48 < 4 ? 100 : 0;
+            Assert.Equal(20 + workgroupValue + nestedValue, counterfactual[i]);
+        }
+        Assert.NotEqual(baseline[0], counterfactual[0]);
+
+        capture.VariantEnabled = false;
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
+        GPU.Dispatch(
+            new BranchDivergenceProbeKernel(output.AsReadWrite()),
+            InvocationCount,
+            wait: true);
+        Assert.Equal(baseline, output.ToArray());
+        Assert.Equal(1, capture.VariantDispatchCount);
+    }
+
+    [Fact]
+    public void CounterfactualVariantRejectsNonIfSourceSite()
+    {
+        uint assignmentSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "output[i] = 10");
+        using var capture = GPU.Context.BeginCounterfactualCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            assignmentSite);
+        capture.VariantEnabled = true;
+
+        FeatherNativeException error = Assert.Throws<FeatherNativeException>(
+            () => GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
+        Assert.Equal(FeResult.ErrorUnsupported, error.Result);
+        Assert.Contains("if statement", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void ComputeTraceCapturesSelectedInvocationCallStackValuesAndBranchPath()
     {
         using var input = GPU.CreateBuffer<float>([1f, 8f, -1f]);

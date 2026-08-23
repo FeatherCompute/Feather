@@ -668,6 +668,23 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void CounterfactualVariantV7HasStableSequentialLayout()
+    {
+        Assert.Equal(7u, (uint)FeKernelDiagnosticMode.Counterfactual);
+        Assert.Equal(1u, (uint)FeKernelCounterfactualTransform.ForceIfFalse);
+        Assert.Equal(24, Marshal.SizeOf<FeKernelDiagnosticConfigV7>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticConfigV7>(nameof(FeKernelDiagnosticConfigV7.AbiVersion)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeKernelDiagnosticConfigV7>(nameof(FeKernelDiagnosticConfigV7.SourceSiteIndex)).ToInt32());
+        Assert.Equal(12, Marshal.OffsetOf<FeKernelDiagnosticConfigV7>(nameof(FeKernelDiagnosticConfigV7.TransformKind)).ToInt32());
+        Assert.Equal(20, Marshal.OffsetOf<FeKernelDiagnosticConfigV7>(nameof(FeKernelDiagnosticConfigV7.Reserved)).ToInt32());
+        Assert.Equal(28, Marshal.SizeOf<FeKernelDiagnosticLayoutV7>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticLayoutV7>(nameof(FeKernelDiagnosticLayoutV7.AbiVersion)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeKernelDiagnosticLayoutV7>(nameof(FeKernelDiagnosticLayoutV7.SiteCount)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticLayoutV7>(nameof(FeKernelDiagnosticLayoutV7.TransformKind)).ToInt32());
+        Assert.Equal(24, Marshal.OffsetOf<FeKernelDiagnosticLayoutV7>(nameof(FeKernelDiagnosticLayoutV7.Reserved)).ToInt32());
+    }
+
+    [Fact]
     public void TextureDescriptorHasStableSequentialLayout()
     {
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());
