@@ -207,7 +207,11 @@ public sealed class GpuKernel : IDisposable
 
             using var command = new GpuKernelCommand(gpuKernel.Handle);
             TKernel.Bind(in kernel, command);
-            gpuKernel.executionHeatCapture?.Bind(gpuKernel, command);
+            gpuKernel.executionHeatCapture?.Bind(
+                gpuKernel,
+                command,
+                size,
+                gpuKernel.Descriptor.ThreadGroupSize);
             var groups = ComputeGroups(size, gpuKernel.Descriptor.ThreadGroupSize);
             var recorder = context.ActiveTimestampRecorder;
             using (recorder?.IncludeCommandIntervals == true

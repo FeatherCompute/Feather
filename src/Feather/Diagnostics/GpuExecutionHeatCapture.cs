@@ -1,4 +1,5 @@
 using Feather.Interop;
+using Feather.Math;
 using Feather.Native;
 using Feather.Resources;
 
@@ -8,12 +9,32 @@ namespace Feather;
 public readonly record struct GpuExecutionHeatSite(uint SiteIndex, uint HitCount);
 
 /// <summary>
+/// Immutable geometry for one generated compute dispatch observed by an execution-heat capture.
+/// Logical extents exclude padded lanes; workgroup counts are the exact native dispatch group
+/// counts derived from the generated kernel's thread-group size.
+/// </summary>
+public readonly record struct GpuExecutionHeatDispatch(
+    int DispatchIndex,
+    int LogicalSizeX,
+    int LogicalSizeY,
+    int LogicalSizeZ,
+    int ThreadGroupSizeX,
+    int ThreadGroupSizeY,
+    int ThreadGroupSizeZ,
+    int WorkgroupCountX,
+    int WorkgroupCountY,
+    int WorkgroupCountZ);
+
+/// <summary>
 /// Immutable result of an instrumented compute capture. Counts are execution frequency, not
 /// nanoseconds, hardware PC samples, or an estimate of source cost.
 /// </summary>
 public sealed record GpuExecutionHeatResult(
     string ShaderTypeName,
     int MatchedDispatchCount,
+    int DispatchRecordCapacity,
+    int DroppedDispatchRecordCount,
+    IReadOnlyList<GpuExecutionHeatDispatch> Dispatches,
     int SiteCapacity,
     IReadOnlyList<GpuExecutionHeatSite> Sites);
 
@@ -25,13 +46,16 @@ public sealed class GpuExecutionHeatCapture : IDisposable
 {
     public const uint AbiVersion = 1;
     public const int MaximumSites = 65_536;
+    public const int MaximumDispatchRecords = 4_096;
 
     private readonly object gate = new();
     private readonly GpuContext context;
     private readonly string shaderTypeName;
     private GpuKernel? kernel;
     private GpuBuffer<uint>? counters;
+    private readonly List<GpuExecutionHeatDispatch> dispatches = [];
     private int matchedDispatchCount;
+    private int droppedDispatchRecordCount;
     private int siteCount;
     private bool completed;
     private bool disposed;
@@ -172,7 +196,11 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         }
     }
 
-    internal void Bind(GpuKernel dispatchKernel, GpuKernelCommand command)
+    internal void Bind(
+        GpuKernel dispatchKernel,
+        GpuKernelCommand command,
+        GpuDispatchSize logicalSize,
+        int3 threadGroupSize)
     {
         lock (gate)
         {
@@ -182,7 +210,26 @@ public sealed class GpuExecutionHeatCapture : IDisposable
                 throw new InvalidOperationException("Execution-heat capture binding is not active.");
             }
             command.BindDiagnosticBuffer(counters);
+            int dispatchIndex = matchedDispatchCount;
             matchedDispatchCount = checked(matchedDispatchCount + 1);
+            if (dispatches.Count < MaximumDispatchRecords)
+            {
+                dispatches.Add(new GpuExecutionHeatDispatch(
+                    dispatchIndex,
+                    logicalSize.X,
+                    logicalSize.Y,
+                    logicalSize.Z,
+                    threadGroupSize.X,
+                    threadGroupSize.Y,
+                    threadGroupSize.Z,
+                    DivRoundUp(logicalSize.X, threadGroupSize.X),
+                    DivRoundUp(logicalSize.Y, threadGroupSize.Y),
+                    DivRoundUp(logicalSize.Z, threadGroupSize.Z)));
+            }
+            else
+            {
+                droppedDispatchRecordCount = checked(droppedDispatchRecordCount + 1);
+            }
         }
     }
 
@@ -195,6 +242,8 @@ public sealed class GpuExecutionHeatCapture : IDisposable
     {
         GpuBuffer<uint> captureCounters;
         int dispatches;
+        int droppedDispatches;
+        GpuExecutionHeatDispatch[] dispatchRecords;
         int capacity;
         lock (gate)
         {
@@ -211,6 +260,8 @@ public sealed class GpuExecutionHeatCapture : IDisposable
             completed = true;
             captureCounters = counters;
             dispatches = matchedDispatchCount;
+            droppedDispatches = droppedDispatchRecordCount;
+            dispatchRecords = [.. this.dispatches];
             capacity = siteCount;
         }
 
@@ -220,7 +271,14 @@ public sealed class GpuExecutionHeatCapture : IDisposable
             .Select(static (hits, index) => new GpuExecutionHeatSite(checked((uint)index), hits))
             .Where(static site => site.HitCount != 0)
             .ToArray();
-        return new GpuExecutionHeatResult(shaderTypeName, dispatches, capacity, sites);
+        return new GpuExecutionHeatResult(
+            shaderTypeName,
+            dispatches,
+            MaximumDispatchRecords,
+            droppedDispatches,
+            dispatchRecords,
+            capacity,
+            sites);
     }
 
     public void Dispose()
@@ -267,4 +325,9 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         }
         return normalized.Replace('+', '.');
     }
+
+    private static int DivRoundUp(int value, int divisor)
+        => divisor <= 0
+            ? throw new ArgumentOutOfRangeException(nameof(divisor))
+            : checked((value + divisor - 1) / divisor);
 }

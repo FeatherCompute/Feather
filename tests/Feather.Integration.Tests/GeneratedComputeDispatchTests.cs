@@ -5685,6 +5685,21 @@ public class ControlFlowDispatchTests
 
         Assert.Equal(typeof(DynamicForSumKernel).FullName, result.ShaderTypeName);
         Assert.Equal(1, result.MatchedDispatchCount);
+        Assert.Equal(GpuExecutionHeatCapture.MaximumDispatchRecords, result.DispatchRecordCapacity);
+        Assert.Equal(0, result.DroppedDispatchRecordCount);
+        Assert.Equal(
+            [new GpuExecutionHeatDispatch(
+                DispatchIndex: 0,
+                LogicalSizeX: 4,
+                LogicalSizeY: 1,
+                LogicalSizeZ: 1,
+                ThreadGroupSizeX: 1,
+                ThreadGroupSizeY: 1,
+                ThreadGroupSizeZ: 1,
+                WorkgroupCountX: 4,
+                WorkgroupCountY: 1,
+                WorkgroupCountZ: 1)],
+            result.Dispatches);
         Assert.Equal(diagnosticSiteCount, result.SiteCapacity);
         Assert.Equal(
             [
