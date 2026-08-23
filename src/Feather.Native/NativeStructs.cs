@@ -33,7 +33,8 @@ public enum FeShaderBinaryFormat : uint
 public enum FeKernelDiagnosticMode : uint
 {
     None = 0,
-    ExecutionHeat = 1
+    ExecutionHeat = 1,
+    LineValue = 2
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -44,6 +45,52 @@ public readonly struct FeKernelDiagnosticLayout
     public readonly uint BufferBinding;
     public readonly uint SiteCount;
     public readonly uint CounterStrideBytes;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV2
+{
+    public FeKernelDiagnosticConfigV2(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint sourceSiteIndex,
+        uint selectedX,
+        uint selectedY,
+        uint selectedZ,
+        uint recordCapacity,
+        uint flags)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        SourceSiteIndex = sourceSiteIndex;
+        SelectedX = selectedX;
+        SelectedY = selectedY;
+        SelectedZ = selectedZ;
+        RecordCapacity = recordCapacity;
+        Flags = flags;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint SourceSiteIndex;
+    public readonly uint SelectedX;
+    public readonly uint SelectedY;
+    public readonly uint SelectedZ;
+    public readonly uint RecordCapacity;
+    public readonly uint Flags;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV2
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SourceSiteIndex;
+    public readonly uint RecordStrideBytes;
+    public readonly uint RecordCapacity;
+    public readonly uint ValueTypeTag;
+    public readonly uint ComponentCount;
 }
 
 [StructLayout(LayoutKind.Sequential)]

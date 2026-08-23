@@ -375,12 +375,16 @@ private:
             resource_infos_by_binding_[resource.binding] = RegisteredResource{id, resource.kind, resource.access};
         }
 
-        if (inputs_.diagnostic_mode == 1) {
+        if (inputs_.diagnostic_mode == 1 || inputs_.diagnostic_mode == 2) {
             const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
             if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
-                return Fail("execution-heat diagnostic buffer is missing from the lowering inputs");
+                return Fail("diagnostic buffer is missing from the lowering inputs");
             }
             diagnostic_sites_resource_ = diagnostic->second;
+            if (inputs_.diagnostic_mode == 2 &&
+                inputs_.diagnostic_source_site >= inputs_.diagnostic_site_count) {
+                return Fail("line-value source site is outside the configured diagnostic ABI");
+            }
         }
 
         if (!RegisterBoundsCheckResources()) {
@@ -1118,6 +1122,13 @@ private:
             return Fail("statement index " + std::to_string(statement_id) + " is outside the section 7 statement table");
         }
 
+        struct StatementIdScope {
+            uint32_t& slot;
+            uint32_t previous;
+            ~StatementIdScope() { slot = previous; }
+        } statement_scope{current_statement_id_, current_statement_id_};
+        current_statement_id_ = statement_id;
+
         const auto& statement = typed_.statements[statement_id];
         if (statement.kind != kStatementBlock && diagnostic_site_suppression_depth_ == 0 &&
             !EmitDiagnosticSiteHit(statement_id)) {
@@ -1154,13 +1165,20 @@ private:
                             " outside the section 7 expression table");
             }
 
-            const auto value = BuildExpression(statement.a);
+            auto value = BuildExpression(statement.a);
+            if (value == GPU::IR::InvalidValueId) {
+                return false;
+            }
+
+            value = MaterializeLineValueIfSelected(
+                statement_id, value, typed_.expressions[statement.a].type_id);
             if (value == GPU::IR::InvalidValueId) {
                 return false;
             }
 
             EmitExpression(value);
-            return true;
+            return EmitLineValueRecord(
+                statement_id, value, typed_.expressions[statement.a].type_id);
         }
         case kStatementBarrier:
             if (!EmitBarrier(statement.op)) {
@@ -1177,11 +1195,10 @@ private:
     }
 
     bool EmitDiagnosticSiteHit(uint32_t statement_id) {
-        if (inputs_.diagnostic_mode == 0) {
+        if (inputs_.diagnostic_mode != 1) {
             return true;
         }
-        if (inputs_.diagnostic_mode != 1 ||
-            diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+        if (diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
             statement_id >= inputs_.diagnostic_site_count) {
             return Fail("execution-heat diagnostic site is outside the configured buffer ABI");
         }
@@ -1203,6 +1220,187 @@ private:
             return Fail("execution-heat diagnostic atomic increment could not be lowered");
         }
         EmitExpression(increment);
+        return true;
+    }
+
+    GPU::IR::ValueId MaterializeLineValueIfSelected(
+        uint32_t statement_id,
+        GPU::IR::ValueId value,
+        uint32_t type_id) {
+        if (inputs_.diagnostic_mode != 2 ||
+            inputs_.diagnostic_source_site != statement_id ||
+            diagnostic_site_suppression_depth_ != 0) {
+            return value;
+        }
+        if (type_id >= typed_.types.size()) {
+            return GPU::IR::InvalidValueId;
+        }
+        const auto type = ToModuleType(type_id);
+        const auto name = UniqueGlslName("__feather_line_value_once");
+        if (!type.IsValid() || name.empty()) {
+            return GPU::IR::InvalidValueId;
+        }
+        const auto local = builder_.LocalVariable(type, name);
+        if (local == GPU::IR::InvalidValueId) {
+            return GPU::IR::InvalidValueId;
+        }
+        EmitLocalDeclaration(type, name, value);
+        return local;
+    }
+
+    bool EmitLineValueRecord(
+        uint32_t statement_id,
+        GPU::IR::ValueId value,
+        uint32_t type_id) {
+        if (inputs_.diagnostic_mode != 2 ||
+            inputs_.diagnostic_source_site != statement_id ||
+            diagnostic_site_suppression_depth_ != 0) {
+            return true;
+        }
+        if (diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+            type_id >= typed_.types.size()) {
+            return Fail("line-value record target or type is unavailable");
+        }
+
+        const auto type = ToModuleType(type_id);
+        GPU::IR::Type scalar_type;
+        uint32_t type_tag = 0;
+        uint32_t component_count = 0;
+        switch (type.kind) {
+        case GPU::IR::Type::Kind::Bool:
+            scalar_type = GPU::IR::Type::Bool(); type_tag = 1; component_count = 1; break;
+        case GPU::IR::Type::Kind::Int:
+            scalar_type = GPU::IR::Type::Int(); type_tag = 2; component_count = 1; break;
+        case GPU::IR::Type::Kind::UInt:
+            scalar_type = GPU::IR::Type::UInt(); type_tag = 3; component_count = 1; break;
+        case GPU::IR::Type::Kind::Float:
+            scalar_type = GPU::IR::Type::Float(); type_tag = 4; component_count = 1; break;
+        case GPU::IR::Type::Kind::Bool2:
+        case GPU::IR::Type::Kind::Bool3:
+        case GPU::IR::Type::Kind::Bool4:
+            scalar_type = GPU::IR::Type::Bool(); type_tag = 1;
+            component_count = type.kind == GPU::IR::Type::Kind::Bool2 ? 2u :
+                              type.kind == GPU::IR::Type::Kind::Bool3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::Int2:
+        case GPU::IR::Type::Kind::Int3:
+        case GPU::IR::Type::Kind::Int4:
+            scalar_type = GPU::IR::Type::Int(); type_tag = 2;
+            component_count = type.kind == GPU::IR::Type::Kind::Int2 ? 2u :
+                              type.kind == GPU::IR::Type::Kind::Int3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::UInt2:
+        case GPU::IR::Type::Kind::UInt3:
+        case GPU::IR::Type::Kind::UInt4:
+            scalar_type = GPU::IR::Type::UInt(); type_tag = 3;
+            component_count = type.kind == GPU::IR::Type::Kind::UInt2 ? 2u :
+                              type.kind == GPU::IR::Type::Kind::UInt3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::Float2:
+        case GPU::IR::Type::Kind::Float3:
+        case GPU::IR::Type::Kind::Float4:
+            scalar_type = GPU::IR::Type::Float(); type_tag = 4;
+            component_count = type.kind == GPU::IR::Type::Kind::Float2 ? 2u :
+                              type.kind == GPU::IR::Type::Kind::Float3 ? 3u : 4u;
+            break;
+        default:
+            return Fail("line-value selected type is not a 32-bit scalar or vector");
+        }
+
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto one = builder_.Literal(uint_type, "1u");
+        const auto zero = builder_.Literal(uint_type, "0u");
+        const auto thread_x = builder_.ThreadIndexX();
+        const auto thread_y = builder_.ThreadIndexY();
+        const auto thread_z = builder_.ThreadIndexZ();
+        const std::array x_args{thread_x};
+        const std::array y_args{thread_y};
+        const std::array z_args{thread_z};
+        const auto x = builder_.Intrinsic("uint", uint_type, x_args);
+        const auto y = builder_.Intrinsic("uint", uint_type, y_args);
+        const auto z = builder_.Intrinsic("uint", uint_type, z_args);
+        const auto selected_x = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_x) + "u");
+        const auto selected_y = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_y) + "u");
+        const auto selected_z = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_z) + "u");
+        auto selected = builder_.Compare(GPU::IR::CompareOp::Equal, x, selected_x);
+        const auto y_selected = builder_.Compare(GPU::IR::CompareOp::Equal, y, selected_y);
+        const auto z_selected = builder_.Compare(GPU::IR::CompareOp::Equal, z, selected_z);
+        selected = builder_.Binary(GPU::IR::BinaryOp::LogicalAnd, selected, y_selected);
+        selected = builder_.Binary(GPU::IR::BinaryOp::LogicalAnd, selected, z_selected);
+        if (one == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId ||
+            x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId ||
+            z == GPU::IR::InvalidValueId || selected == GPU::IR::InvalidValueId) {
+            return Fail("line-value invocation filter could not be lowered");
+        }
+
+        auto word = [&](uint32_t index) {
+            const auto literal = builder_.Literal(uint_type, std::to_string(index) + "u");
+            return builder_.ResourceElement(diagnostic_sites_resource_, literal);
+        };
+        std::vector<GPU::IR::Statement> writes;
+        const auto previous_capture = capture_;
+        capture_ = &writes;
+        auto store_constant = [&](uint32_t index, uint32_t constant) {
+            EmitStore(
+                word(index),
+                builder_.Literal(uint_type, std::to_string(constant) + "u"));
+        };
+        store_constant(0, 1u);
+        store_constant(1, 1u);
+        const auto occurrence_target = word(2);
+        const std::array occurrence_arguments{one};
+        const auto occurrence_increment = builder_.Atomic(
+            GPU::IR::AtomicOp::Add,
+            uint_type,
+            occurrence_target,
+            occurrence_arguments);
+        EmitExpression(occurrence_increment);
+        store_constant(3, statement_id);
+        EmitStore(word(4), x);
+        EmitStore(word(5), y);
+        EmitStore(word(6), z);
+        store_constant(7, type_tag);
+        store_constant(8, component_count);
+
+        constexpr std::string_view components = "xyzw";
+        for (uint32_t component_index = 0; component_index < component_count; ++component_index) {
+            auto component = value;
+            if (component_count > 1) {
+                component = builder_.Swizzle(
+                    value,
+                    scalar_type,
+                    std::string(1, components[component_index]));
+            }
+            GPU::IR::ValueId raw = GPU::IR::InvalidValueId;
+            if (type_tag == 1) {
+                raw = builder_.Ternary(component, one, zero);
+            } else if (type_tag == 2) {
+                const std::array args{component};
+                raw = builder_.Intrinsic("uint", uint_type, args);
+            } else if (type_tag == 3) {
+                raw = component;
+            } else {
+                const std::array args{component};
+                raw = builder_.Intrinsic("floatBitsToUint", uint_type, args);
+            }
+            if (raw == GPU::IR::InvalidValueId) {
+                capture_ = previous_capture;
+                return Fail("line-value payload encoding could not be lowered");
+            }
+            EmitStore(word(9u + component_index), raw);
+        }
+        for (uint32_t index = 9u + component_count; index < 16u; ++index) {
+            store_constant(index, 0u);
+        }
+        capture_ = previous_capture;
+
+        if (occurrence_increment == GPU::IR::InvalidValueId) {
+            return Fail("line-value occurrence counter could not be lowered");
+        }
+        EmitIf(selected, AddBlock(std::move(writes)), GPU::IR::InvalidBlockId);
         return true;
     }
 
@@ -1322,7 +1520,8 @@ private:
         declared_locals_[*name] = type;
         local_glsl_names_[*name] = glsl_name;
         EmitLocalDeclaration(type, glsl_name, value);
-        return local_values_[*name] != GPU::IR::InvalidValueId;
+        return local_values_[*name] != GPU::IR::InvalidValueId &&
+               EmitLineValueRecord(current_statement_id_, local_values_[*name], statement.op);
     }
 
     bool LowerSharedMemoryDeclaration(const Statement& statement) {
@@ -1347,7 +1546,13 @@ private:
             return false;
         }
 
-        const auto value = BuildExpression(statement.b);
+        auto value = BuildExpression(statement.b);
+        if (value == GPU::IR::InvalidValueId) {
+            return false;
+        }
+
+        value = MaterializeLineValueIfSelected(current_statement_id_, value,
+                                               typed_.lvalues[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1360,7 +1565,8 @@ private:
             }
 
             EmitStore(destination, value);
-            return true;
+            return EmitLineValueRecord(
+                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
         }
 
         const auto destination = BuildLValueAddress(statement.a);
@@ -1369,7 +1575,8 @@ private:
         }
 
         EmitStore(destination, value);
-        return true;
+        return EmitLineValueRecord(
+            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
     }
 
     bool LowerCompoundAssignment(const Statement& statement) {
@@ -1388,7 +1595,13 @@ private:
             return false;
         }
 
-        const auto value = builder_.Binary(op, left, right);
+        auto value = builder_.Binary(op, left, right);
+        if (value == GPU::IR::InvalidValueId) {
+            return false;
+        }
+
+        value = MaterializeLineValueIfSelected(current_statement_id_, value,
+                                               typed_.lvalues[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1401,7 +1614,8 @@ private:
             }
 
             EmitStore(destination, value);
-            return true;
+            return EmitLineValueRecord(
+                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
         }
 
         const auto address = BuildLValueAddress(statement.a);
@@ -1410,7 +1624,8 @@ private:
         }
 
         EmitStore(address, value);
-        return true;
+        return EmitLineValueRecord(
+            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
     }
 
     bool LowerIncrementDecrement(const Statement& statement) {
@@ -1430,7 +1645,13 @@ private:
         }
 
         const auto op = (statement.op & 1u) != 0 ? GPU::IR::BinaryOp::Add : GPU::IR::BinaryOp::Sub;
-        const auto value = builder_.Binary(op, current, one);
+        auto value = builder_.Binary(op, current, one);
+        if (value == GPU::IR::InvalidValueId) {
+            return false;
+        }
+
+        value = MaterializeLineValueIfSelected(current_statement_id_, value,
+                                               typed_.lvalues[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1443,7 +1664,8 @@ private:
             }
 
             EmitStore(destination, value);
-            return true;
+            return EmitLineValueRecord(
+                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
         }
 
         const auto address = BuildLValueAddress(statement.a);
@@ -1452,7 +1674,8 @@ private:
         }
 
         EmitStore(address, value);
-        return true;
+        return EmitLineValueRecord(
+            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
     }
 
     bool LowerIf(const Statement& statement) {
@@ -1505,10 +1728,12 @@ private:
             // an atomic expression cannot precede a declaration in that header. Count
             // source-level initializer sites immediately before the loop, then suppress
             // the normal in-header diagnostic emission while lowering the initializer.
-            if (inputs_.diagnostic_mode != 0 && !EmitDiagnosticSiteHitsForSequence(statement.a)) {
+            if (inputs_.diagnostic_mode == 1 && !EmitDiagnosticSiteHitsForSequence(statement.a)) {
                 return false;
             }
-            auto init_statements = LowerStatementListKeepingLocals(statement.a, true);
+            auto init_statements = LowerStatementListKeepingLocals(
+                statement.a,
+                inputs_.diagnostic_mode == 1);
             if (!init_statements.has_value()) {
                 local_values_ = outer_local_values;
                 declared_locals_ = outer_declared_locals;
@@ -1610,8 +1835,16 @@ private:
             return false;
         }
 
-        const auto value = BuildExpression(statement.a);
+        auto value = BuildExpression(statement.a);
         if (value == GPU::IR::InvalidValueId) {
+            return false;
+        }
+
+        value = MaterializeLineValueIfSelected(
+            current_statement_id_, value, typed_.expressions[statement.a].type_id);
+        if (value == GPU::IR::InvalidValueId ||
+            !EmitLineValueRecord(
+                current_statement_id_, value, typed_.expressions[statement.a].type_id)) {
             return false;
         }
 
@@ -3397,6 +3630,7 @@ private:
                                                               GPU::IR::InvalidResourceId};
     GPU::IR::ResourceId diagnostic_sites_resource_ = GPU::IR::InvalidResourceId;
     uint32_t diagnostic_site_suppression_depth_ = 0;
+    uint32_t current_statement_id_ = NoIndex;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;
 };

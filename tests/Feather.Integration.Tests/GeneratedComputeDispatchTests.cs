@@ -5718,6 +5718,96 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void LineValueCapturesLastLoopOccurrenceForOneInvocationAndPreservesOutput()
+    {
+        using var counts = GPU.CreateBuffer<int>([1, 2, 3, 4]);
+        using var input = GPU.CreateBuffer<float>([1, 2, 3, 4, 5, 6, 7]);
+        using var baselineOutput = GPU.CreateBuffer<float>(4);
+        using var diagnosticOutput = GPU.CreateBuffer<float>(4);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
+
+        using (var baselineCommands = GPU.Queue.CreateCommandList())
+        {
+            baselineCommands.Dispatch(
+                new DynamicForSumKernel(
+                    counts.AsReadOnly(),
+                    input.AsReadOnly(),
+                    baselineOutput.AsReadWrite()),
+                4);
+            baselineCommands.Close();
+            using var baselineFence = GPU.Queue.Submit(baselineCommands);
+            Assert.True(baselineFence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        uint sourceSite = FindTypedStatementSite<DynamicForSumKernel>("sum += input[i + j]");
+        using var capture = GPU.Context.BeginLineValueCapture(
+            typeof(DynamicForSumKernel).FullName!,
+            sourceSite,
+            targetDispatchIndex: 0,
+            new int3(2, 0, 0));
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        Assert.Contains("floatBitsToUint", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.Contains("__feather_line_value_once", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new DynamicForSumKernel(
+                    counts.AsReadOnly(),
+                    input.AsReadOnly(),
+                    diagnosticOutput.AsReadWrite()),
+                4);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuLineValueResult result = capture.CompleteAndRead();
+        Assert.True(result.Executed);
+        Assert.Equal(3u, result.OccurrenceCount);
+        Assert.Equal(GpuLineValueType.Float32, result.ValueType);
+        Assert.Equal(1, result.ComponentCount);
+        Assert.Equal([BitConverter.SingleToUInt32Bits(12f)], result.RawComponents);
+        Assert.False(result.HasNaN);
+        Assert.False(result.HasInfinity);
+        Assert.Equal(new int3(2, 0, 0), result.SelectedInvocation);
+        Assert.Equal(0, result.TargetDispatchIndex);
+        Assert.Equal(1, result.MatchedDispatchCount);
+        Assert.Equal(4, result.Dispatch!.Value.LogicalSizeX);
+        Assert.Equal(baselineOutput.ToArray(), diagnosticOutput.ToArray());
+        Assert.Equal([1, 5, 12, 22], diagnosticOutput.ToArray());
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<DynamicForSumKernel>());
+    }
+
+    [Fact]
+    public void LineValueKeepsUnexecutedBranchDistinctFromNumericZero()
+    {
+        using var input = GPU.CreateBuffer<float>([-2f, 3f]);
+        using var output = GPU.CreateBuffer<float>(2);
+        uint sourceSite = FindTypedStatementSite<IfThresholdKernel>("output[i] = input[i]");
+        using var capture = GPU.Context.BeginLineValueCapture(
+            typeof(IfThresholdKernel).FullName!,
+            sourceSite,
+            targetDispatchIndex: 0,
+            new int3(0, 0, 0));
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(new IfThresholdKernel(input.AsReadOnly(), output.AsReadWrite()), 2);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuLineValueResult result = capture.CompleteAndRead();
+        Assert.False(result.Executed);
+        Assert.Equal(0u, result.OccurrenceCount);
+        Assert.Empty(result.RawComponents);
+        Assert.Equal([-0f, 3f], output.ToArray());
+    }
+
+    [Fact]
     public void ExecutionHeatRejectsOverlappingAndUnmatchedCaptures()
     {
         using var capture = GPU.Context.BeginExecutionHeatCapture("Missing.Generated.Kernel");
@@ -5727,6 +5817,33 @@ public class ControlFlowDispatchTests
         var error = Assert.Throws<InvalidOperationException>(capture.CompleteAndRead);
 
         Assert.Contains("No matching generated compute shader", error.Message, StringComparison.Ordinal);
+    }
+
+    private static uint FindTypedStatementSite<TKernel>(string sourceFragment)
+        where TKernel : struct
+    {
+        FieldInfo sourceMapField = typeof(TKernel).GetField(
+            "__feather_source_map",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] sourceMapBytes = Convert.FromBase64String((string)sourceMapField.GetValue(null)!);
+        using JsonDocument sourceMap = JsonDocument.Parse(sourceMapBytes);
+        var matches = new List<(int Length, uint Site)>();
+        foreach (JsonElement statement in sourceMap.RootElement.GetProperty("typedStatements").EnumerateArray())
+        {
+            string sourcePath = statement.GetProperty("sourcePath").GetString()!;
+            JsonElement span = statement.GetProperty("span");
+            string source = File.ReadAllText(sourcePath);
+            string statementText = source.Substring(
+                span.GetProperty("start").GetInt32(),
+                span.GetProperty("length").GetInt32());
+            if (statementText.Contains(sourceFragment, StringComparison.Ordinal))
+            {
+                matches.Add((statementText.Length, statement.GetProperty("statementIndex").GetUInt32()));
+            }
+        }
+        if (matches.Count != 0)
+            return matches.MinBy(static match => match.Length).Site;
+        throw new InvalidOperationException($"Typed statement containing '{sourceFragment}' was not found.");
     }
 
     [Fact]

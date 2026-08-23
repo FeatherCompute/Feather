@@ -1,4 +1,5 @@
 using Feather.Interop;
+using Feather.Math;
 using Feather.Native;
 using Feather.Resources;
 using System.Reflection;
@@ -13,7 +14,7 @@ public sealed class GpuContext : IDisposable
     private readonly List<IDisposable> pendingSubmissions = [];
     private readonly List<WeakReference<ReadbackOperation>> readbackOperations = [];
     private GpuTimestampRecorder? activeTimestampRecorder;
-    private GpuExecutionHeatCapture? activeExecutionHeatCapture;
+    private IGpuDiagnosticCapture? activeDiagnosticCapture;
     private int activeOperations;
     private bool disposing;
     private bool disposed;
@@ -254,8 +255,8 @@ public sealed class GpuContext : IDisposable
                 CancelReadbacksForShutdownLocked();
                 NativeMethods.ThrowIfFailed(NativeMethods.fe_context_wait_idle(Handle));
                 DisposePendingSubmissionsLocked();
-                activeExecutionHeatCapture?.DisposeForContextShutdown();
-                activeExecutionHeatCapture = null;
+                activeDiagnosticCapture?.DisposeForContextShutdown();
+                activeDiagnosticCapture = null;
                 foreach (var kernel in kernels.Values)
                 {
                     kernel.Dispose();
@@ -287,7 +288,7 @@ public sealed class GpuContext : IDisposable
         {
             ThrowIfDisposed();
             var resolvedAutoDiff = autoDiff ?? TKernel.Descriptor.AutoDiff;
-            if (activeExecutionHeatCapture is { } capture &&
+            if (activeDiagnosticCapture is { } capture &&
                 capture.TryGetOrCreateKernel<TKernel>(resolvedAutoDiff, out var diagnosticKernel))
             {
                 return diagnosticKernel;
@@ -314,24 +315,52 @@ public sealed class GpuContext : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
-            if (activeExecutionHeatCapture is not null)
+            if (activeDiagnosticCapture is not null)
             {
                 throw new InvalidOperationException(
-                    "A GPU execution-heat capture is already active on this context.");
+                    "A GPU diagnostic capture is already active on this context.");
             }
             var capture = new GpuExecutionHeatCapture(this, shaderTypeName);
-            activeExecutionHeatCapture = capture;
+            activeDiagnosticCapture = capture;
             return capture;
         }
     }
 
-    internal void EndExecutionHeatCapture(GpuExecutionHeatCapture capture)
+    /// <summary>
+    /// Arms one selected-invocation typed line-value variant. Only the named generated compute
+    /// shader is substituted and only while the returned capture scope remains active.
+    /// </summary>
+    public GpuLineValueCapture BeginLineValueCapture(
+        string shaderTypeName,
+        uint sourceSiteIndex,
+        int targetDispatchIndex,
+        int3 selectedInvocation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuLineValueCapture(
+                this,
+                shaderTypeName,
+                sourceSiteIndex,
+                targetDispatchIndex,
+                selectedInvocation);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
+    internal void EndDiagnosticCapture(IGpuDiagnosticCapture capture)
     {
         lock (gate)
         {
-            if (ReferenceEquals(activeExecutionHeatCapture, capture))
+            if (ReferenceEquals(activeDiagnosticCapture, capture))
             {
-                activeExecutionHeatCapture = null;
+                activeDiagnosticCapture = null;
             }
         }
     }

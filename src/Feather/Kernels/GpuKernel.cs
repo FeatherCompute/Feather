@@ -11,7 +11,7 @@ public sealed class GpuKernel : IDisposable
     private readonly Type kernelType;
     private readonly GpuContext context;
     private readonly object dispatchGate = new();
-    private GpuExecutionHeatCapture? executionHeatCapture;
+    private IGpuDiagnosticCapture? diagnosticCapture;
     internal delegate byte[] IrTransform(ReadOnlySpan<byte> ir);
 
     // Test-only hook used to validate native behavior against transformed generated IR without
@@ -116,7 +116,47 @@ public sealed class GpuKernel : IDisposable
                 kernel.Handle,
                 out var layout));
             capture.AttachKernel(kernel, layout);
-            kernel.executionHeatCapture = capture;
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
+    internal static GpuKernel CreateLineValue<TKernel>(
+        GpuContext context,
+        GpuLineValueCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "Line-value diagnostics do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV2(
+                GpuLineValueCapture.AbiVersion,
+                FeKernelDiagnosticMode.LineValue,
+                capture.SourceSiteIndex,
+                checked((uint)capture.SelectedInvocation.X),
+                checked((uint)capture.SelectedInvocation.Y),
+                checked((uint)capture.SelectedInvocation.Z),
+                recordCapacity: 1,
+                flags: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v2(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v2(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
             return kernel;
         }
         catch
@@ -207,7 +247,7 @@ public sealed class GpuKernel : IDisposable
 
             using var command = new GpuKernelCommand(gpuKernel.Handle);
             TKernel.Bind(in kernel, command);
-            gpuKernel.executionHeatCapture?.Bind(
+            gpuKernel.diagnosticCapture?.Bind(
                 gpuKernel,
                 command,
                 size,

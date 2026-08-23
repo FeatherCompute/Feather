@@ -42,7 +42,7 @@ public sealed record GpuExecutionHeatResult(
 /// Context-scoped diagnostic shader substitution. The caller must complete the queue submission
 /// that contains every matching dispatch before calling <see cref="CompleteAndRead"/>.
 /// </summary>
-public sealed class GpuExecutionHeatCapture : IDisposable
+public sealed class GpuExecutionHeatCapture : IDisposable, IGpuDiagnosticCapture
 {
     public const uint AbiVersion = 1;
     public const int MaximumSites = 65_536;
@@ -150,8 +150,9 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         }
     }
 
-    internal bool TryGetOrCreateKernel<TKernel>(bool autoDiff, out GpuKernel diagnosticKernel)
-        where TKernel : struct, IGeneratedKernel<TKernel>
+    bool IGpuDiagnosticCapture.TryGetOrCreateKernel<TKernel>(
+        bool autoDiff,
+        out GpuKernel diagnosticKernel)
     {
         string candidate = NormalizeTypeName(typeof(TKernel).FullName ?? typeof(TKernel).Name);
         if (!string.Equals(candidate, shaderTypeName, StringComparison.Ordinal))
@@ -205,7 +206,7 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         }
     }
 
-    internal void Bind(
+    void IGpuDiagnosticCapture.Bind(
         GpuKernel dispatchKernel,
         GpuKernelCommand command,
         GpuDispatchSize logicalSize,
@@ -274,7 +275,7 @@ public sealed class GpuExecutionHeatCapture : IDisposable
             capacity = siteCount;
         }
 
-        context.EndExecutionHeatCapture(this);
+        context.EndDiagnosticCapture(this);
         uint[] values = captureCounters.ToArray();
         var sites = values
             .Select(static (hits, index) => new GpuExecutionHeatSite(checked((uint)index), hits))
@@ -303,12 +304,12 @@ public sealed class GpuExecutionHeatCapture : IDisposable
             kernel = null;
             counters = null;
         }
-        context.EndExecutionHeatCapture(this);
+        context.EndDiagnosticCapture(this);
         ownedKernel?.Dispose();
         ownedCounters?.Dispose();
     }
 
-    internal void DisposeForContextShutdown()
+    void IGpuDiagnosticCapture.DisposeForContextShutdown()
     {
         GpuKernel? ownedKernel;
         GpuBuffer<uint>? ownedCounters;

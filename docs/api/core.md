@@ -192,6 +192,19 @@ Console.WriteLine(GpuProfiler.GetFormattedReport());
 | `Query(name)` | Gets count/min/max/average/total for one name. |
 | `GetFormattedReport()` | Gets a textual report. |
 
+### Explicit diagnostic captures
+
+`GpuContext.BeginExecutionHeatCapture(...)` and `GpuContext.BeginLineValueCapture(...)` create
+private instrumented compute variants for an explicitly bounded diagnostic operation. They do not
+alter or replace the ordinary cached kernel. Only one diagnostic capture may be active per
+context, and the caller must wait the exact submission fence before reading the result.
+
+`BeginLineValueCapture` binds one typed FEIR statement, one matching dispatch index, and one
+global compute invocation. Its fixed 64-byte record returns whether the statement executed, its
+dynamic occurrence count, and the raw bits of the LAST bool/int/uint/float32 scalar or vector
+value. Unsupported sites and aggregate types fail closed. This is source-value evidence from an
+instrumented variant; it is not line timing, a PC sample, or a hardware Hot Path.
+
 ## Errors
 
 Native failures throw `FeatherNativeException`. Generator failures appear as `FE0001`-style diagnostics. See [Diagnostics](../diagnostics.md).

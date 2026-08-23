@@ -62,7 +62,8 @@ typedef enum FeShaderBinaryFormat {
 /** Explicit diagnostic shader variants. These are never aliases for hardware PC sampling. */
 typedef enum FeKernelDiagnosticMode {
     FE_KERNEL_DIAGNOSTIC_NONE = 0,
-    FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT = 1
+    FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT = 1,
+    FE_KERNEL_DIAGNOSTIC_LINE_VALUE = 2
 } FeKernelDiagnosticMode;
 
 /** Versioned device-buffer ABI for one configured diagnostic kernel variant. */
@@ -73,6 +74,34 @@ typedef struct FeKernelDiagnosticLayout {
     uint32_t site_count;
     uint32_t counter_stride_bytes;
 } FeKernelDiagnosticLayout;
+
+/**
+ * Versioned configuration for one selected-invocation diagnostic variant. The selected source
+ * site and invocation coordinates are compiled into a private scratch variant; ordinary kernels
+ * never consume this structure.
+ */
+typedef struct FeKernelDiagnosticConfigV2 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t source_site_index;
+    uint32_t selected_x;
+    uint32_t selected_y;
+    uint32_t selected_z;
+    uint32_t record_capacity;
+    uint32_t flags;
+} FeKernelDiagnosticConfigV2;
+
+/** Versioned record layout for selected-invocation diagnostic variants. */
+typedef struct FeKernelDiagnosticLayoutV2 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t buffer_binding;
+    uint32_t source_site_index;
+    uint32_t record_stride_bytes;
+    uint32_t record_capacity;
+    uint32_t value_type_tag;
+    uint32_t component_count;
+} FeKernelDiagnosticLayoutV2;
 
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
@@ -459,6 +488,12 @@ FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernel
                                          FeKernelHandle* out_kernel);
 FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t mode);
 FE_API FeResult fe_kernel_get_diagnostic_layout(FeKernelHandle kernel, FeKernelDiagnosticLayout* out_layout);
+FE_API FeResult fe_kernel_configure_diagnostics_v2(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV2* config);
+FE_API FeResult fe_kernel_get_diagnostic_layout_v2(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV2* out_layout);
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);

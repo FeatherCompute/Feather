@@ -45,6 +45,10 @@ struct LoweringInputs {
     uint32_t diagnostic_mode = 0;
     uint32_t diagnostic_binding = UINT32_MAX;
     uint32_t diagnostic_site_count = 0;
+    uint32_t diagnostic_source_site = UINT32_MAX;
+    uint32_t diagnostic_selected_x = 0;
+    uint32_t diagnostic_selected_y = 0;
+    uint32_t diagnostic_selected_z = 0;
     int32_t* logical_x_data = nullptr;
     int32_t* logical_y_data = nullptr;
     int32_t* logical_z_data = nullptr;
