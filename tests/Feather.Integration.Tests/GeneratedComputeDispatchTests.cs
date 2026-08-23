@@ -5903,6 +5903,7 @@ public class ControlFlowDispatchTests
             Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
         }
 
+        Assert.Equal(1, capture.MatchedDispatchCount);
         GpuPrintAssertResult result = capture.CompleteAndRead();
         Assert.Equal(12u, result.AttemptedCount);
         Assert.Equal(12u, result.CommittedCount);
@@ -5949,6 +5950,7 @@ public class ControlFlowDispatchTests
             Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
         }
 
+        Assert.Equal(1, capture.MatchedDispatchCount);
         GpuPrintAssertResult result = capture.CompleteAndRead();
         Assert.Equal(2u, result.AttemptedCount);
         Assert.Equal(2u, result.CommittedCount);
@@ -6015,6 +6017,7 @@ public class ControlFlowDispatchTests
             Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
         }
 
+        Assert.Equal(2, capture.MatchedDispatchCount);
         GpuPrintAssertResult result = capture.CompleteAndRead();
         Assert.Equal(2, result.MatchedDispatchCount);
         Assert.Equal(1, result.Dispatch!.Value.DispatchIndex);

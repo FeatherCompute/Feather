@@ -154,6 +154,15 @@ public sealed class GpuPrintAssertCapture : IDisposable, IGpuDiagnosticCapture
     public int3 SelectedInvocation => selectedInvocation;
 
     /// <summary>
+    /// Number of matching shader dispatches observed so far. Render hosts use this monotonic
+    /// capture-local count to authenticate the target dispatch against pass boundaries.
+    /// </summary>
+    public int MatchedDispatchCount
+    {
+        get { lock (gate) { return matchedDispatchCount; } }
+    }
+
+    /// <summary>
     /// Queues initialization of the exact target stream before measured command intervals begin.
     /// The returned fence must complete before the target dispatch.
     /// </summary>
