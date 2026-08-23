@@ -620,6 +620,22 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void PrintAssertStreamV4HasStableSequentialLayout()
+    {
+        Assert.Equal(4u, (uint)FeKernelDiagnosticMode.PrintAssert);
+        Assert.Equal(48, Marshal.SizeOf<FeKernelDiagnosticConfigV4>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticConfigV4>(nameof(FeKernelDiagnosticConfigV4.AbiVersion)).ToInt32());
+        Assert.Equal(12, Marshal.OffsetOf<FeKernelDiagnosticConfigV4>(nameof(FeKernelDiagnosticConfigV4.FilterMode)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<FeKernelDiagnosticConfigV4>(nameof(FeKernelDiagnosticConfigV4.Flags)).ToInt32());
+        Assert.Equal(44, Marshal.OffsetOf<FeKernelDiagnosticConfigV4>(nameof(FeKernelDiagnosticConfigV4.Reserved)).ToInt32());
+        Assert.Equal(52, Marshal.SizeOf<FeKernelDiagnosticLayoutV4>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticLayoutV4>(nameof(FeKernelDiagnosticLayoutV4.AbiVersion)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticLayoutV4>(nameof(FeKernelDiagnosticLayoutV4.HeaderStrideBytes)).ToInt32());
+        Assert.Equal(32, Marshal.OffsetOf<FeKernelDiagnosticLayoutV4>(nameof(FeKernelDiagnosticLayoutV4.MaskHeaderStrideBytes)).ToInt32());
+        Assert.Equal(48, Marshal.OffsetOf<FeKernelDiagnosticLayoutV4>(nameof(FeKernelDiagnosticLayoutV4.LogicalZ)).ToInt32());
+    }
+
+    [Fact]
     public void TextureDescriptorHasStableSequentialLayout()
     {
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());

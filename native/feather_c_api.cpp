@@ -360,6 +360,12 @@ struct KernelState {
     uint32_t diagnostic_record_capacity = 0;
     uint32_t diagnostic_header_stride = 0;
     uint32_t diagnostic_flags = 0;
+    uint32_t diagnostic_filter_mode = 0;
+    uint32_t diagnostic_logical_x = 0;
+    uint32_t diagnostic_logical_y = 0;
+    uint32_t diagnostic_logical_z = 0;
+    uint32_t diagnostic_mask_header_stride = 0;
+    uint32_t diagnostic_mask_cell_stride = 0;
     uint32_t diagnostic_value_type_tag = 0;
     uint32_t diagnostic_component_count = 0;
     std::map<uint32_t, uint32_t> buffer_element_counts;
@@ -4513,6 +4519,10 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     inputs->diagnostic_selected_z = kernel.diagnostic_selected_z;
     inputs->diagnostic_record_capacity = kernel.diagnostic_record_capacity;
     inputs->diagnostic_flags = kernel.diagnostic_flags;
+    inputs->diagnostic_filter_mode = kernel.diagnostic_filter_mode;
+    inputs->diagnostic_logical_x = kernel.diagnostic_logical_x;
+    inputs->diagnostic_logical_y = kernel.diagnostic_logical_y;
+    inputs->diagnostic_logical_z = kernel.diagnostic_logical_z;
     inputs->resources.clear();
     inputs->push_constants.clear();
 
@@ -4578,7 +4588,8 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
 
     if (kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT ||
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE ||
-        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN) {
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN ||
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT) {
         if (kernel.diagnostic_binding == UINT32_MAX || kernel.diagnostic_site_count == 0) {
             return false;
         }
@@ -4590,7 +4601,9 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                               ? "__feather_execution_heat_sites"
                           : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE
                               ? "__feather_line_value_record"
-                              : "__feather_ubsan_stream";
+                          : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN
+                              ? "__feather_ubsan_stream"
+                              : "__feather_print_assert_stream";
         diagnostic.element_type = "uint";
         inputs->resources.push_back(std::move(diagnostic));
     }
@@ -13664,6 +13677,12 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
             state.diagnostic_record_stride = 0;
             state.diagnostic_record_capacity = 0;
             state.diagnostic_flags = 0;
+            state.diagnostic_filter_mode = 0;
+            state.diagnostic_logical_x = 0;
+            state.diagnostic_logical_y = 0;
+            state.diagnostic_logical_z = 0;
+            state.diagnostic_mask_header_stride = 0;
+            state.diagnostic_mask_cell_stride = 0;
             state.diagnostic_value_type_tag = 0;
             state.diagnostic_component_count = 0;
             return ok();
@@ -13706,6 +13725,12 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
         state.diagnostic_record_stride = sizeof(uint32_t);
         state.diagnostic_record_capacity = state.diagnostic_site_count;
         state.diagnostic_flags = 0;
+        state.diagnostic_filter_mode = 0;
+        state.diagnostic_logical_x = 0;
+        state.diagnostic_logical_y = 0;
+        state.diagnostic_logical_z = 0;
+        state.diagnostic_mask_header_stride = 0;
+        state.diagnostic_mask_cell_stride = 0;
         state.diagnostic_value_type_tag = 0;
         state.diagnostic_component_count = 0;
         return ok();
@@ -13816,6 +13841,12 @@ FE_API FeResult fe_kernel_configure_diagnostics_v2(
         state.diagnostic_record_stride = 64u;
         state.diagnostic_record_capacity = 1u;
         state.diagnostic_flags = 0u;
+        state.diagnostic_filter_mode = 0u;
+        state.diagnostic_logical_x = 0u;
+        state.diagnostic_logical_y = 0u;
+        state.diagnostic_logical_z = 0u;
+        state.diagnostic_mask_header_stride = 0u;
+        state.diagnostic_mask_cell_stride = 0u;
         state.diagnostic_value_type_tag = primitive->a + 1u;
         state.diagnostic_component_count = component_count;
         return ok();
@@ -13885,6 +13916,97 @@ FE_API FeResult fe_kernel_configure_diagnostics_v3(
         state.diagnostic_record_stride = 32u;
         state.diagnostic_record_capacity = config->record_capacity;
         state.diagnostic_flags = config->flags;
+        state.diagnostic_filter_mode = 0u;
+        state.diagnostic_logical_x = 0u;
+        state.diagnostic_logical_y = 0u;
+        state.diagnostic_logical_z = 0u;
+        state.diagnostic_mask_header_stride = 0u;
+        state.diagnostic_mask_cell_stride = 0u;
+        state.diagnostic_value_type_tag = 0u;
+        state.diagnostic_component_count = 0u;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_configure_diagnostics_v4(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV4* config) {
+    return protect([&] {
+        constexpr uint32_t kMaximumRecordCapacity = 4096u;
+        constexpr uint64_t kMaximumLogicalInvocations = 16'777'216ull;
+        if (config == nullptr || config->abi_version != 4u ||
+            config->mode != FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT ||
+            config->record_capacity == 0u || config->record_capacity > kMaximumRecordCapacity ||
+            config->filter_mode > 1u || config->flags != 0u || config->reserved != 0u ||
+            config->logical_x == 0u || config->logical_y == 0u || config->logical_z == 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Print/Assert diagnostic configuration is unsupported.");
+        }
+        const uint64_t logical_invocations = static_cast<uint64_t>(config->logical_x) *
+                                             static_cast<uint64_t>(config->logical_y) *
+                                             static_cast<uint64_t>(config->logical_z);
+        if (logical_invocations == 0u || logical_invocations > kMaximumLogicalInvocations ||
+            (config->filter_mode == 1u &&
+             (config->selected_x >= config->logical_x ||
+              config->selected_y >= config->logical_y ||
+              config->selected_z >= config->logical_z))) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Print/Assert logical extent or selected invocation is invalid.");
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Print/Assert diagnostics do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Print/Assert diagnostics require bounded compute section-7 typed IR.");
+        }
+
+        uint32_t maximum_binding = 0;
+        bool has_binding = false;
+        for (const auto& resource : parsed.resources) {
+            maximum_binding = has_binding ? std::max(maximum_binding, resource.binding) : resource.binding;
+            has_binding = true;
+        }
+        if (has_binding && maximum_binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Print/Assert diagnostic binding space is exhausted.");
+        }
+        const uint32_t binding = has_binding ? maximum_binding + 1u : 0u;
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = config->mode;
+        state.diagnostic_binding = binding;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        state.diagnostic_source_site = UINT32_MAX;
+        state.diagnostic_selected_x = config->selected_x;
+        state.diagnostic_selected_y = config->selected_y;
+        state.diagnostic_selected_z = config->selected_z;
+        state.diagnostic_header_stride = 32u;
+        state.diagnostic_record_stride = 64u;
+        state.diagnostic_record_capacity = config->record_capacity;
+        state.diagnostic_flags = 0u;
+        state.diagnostic_filter_mode = config->filter_mode;
+        state.diagnostic_logical_x = config->logical_x;
+        state.diagnostic_logical_y = config->logical_y;
+        state.diagnostic_logical_z = config->logical_z;
+        state.diagnostic_mask_header_stride = 16u;
+        state.diagnostic_mask_cell_stride = 4u;
         state.diagnostic_value_type_tag = 0u;
         state.diagnostic_component_count = 0u;
         return ok();
@@ -13981,6 +14103,46 @@ FE_API FeResult fe_kernel_get_diagnostic_layout_v3(
     });
 }
 
+FE_API FeResult fe_kernel_get_diagnostic_layout_v4(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV4* out_layout) {
+    return protect([&] {
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Print/Assert diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0 ||
+            state.diagnostic_header_stride != 32u || state.diagnostic_record_stride != 64u ||
+            state.diagnostic_record_capacity == 0u || state.diagnostic_filter_mode > 1u ||
+            state.diagnostic_mask_header_stride != 16u || state.diagnostic_mask_cell_stride != 4u ||
+            state.diagnostic_logical_x == 0u || state.diagnostic_logical_y == 0u ||
+            state.diagnostic_logical_z == 0u) {
+            return fail(FE_ERROR_UNSUPPORTED, "Print/Assert diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayoutV4{
+            4u,
+            state.diagnostic_mode,
+            state.diagnostic_binding,
+            state.diagnostic_site_count,
+            state.diagnostic_header_stride,
+            state.diagnostic_record_stride,
+            state.diagnostic_record_capacity,
+            state.diagnostic_filter_mode,
+            state.diagnostic_mask_header_stride,
+            state.diagnostic_mask_cell_stride,
+            state.diagnostic_logical_x,
+            state.diagnostic_logical_y,
+            state.diagnostic_logical_z};
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer) {
     return protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -13994,14 +14156,17 @@ FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBuffer
             state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0) {
             return fail(FE_ERROR_UNSUPPORTED, "Kernel diagnostics are not configured.");
         }
-        const uint64_t required = state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT
-                                      ? static_cast<uint64_t>(state.diagnostic_site_count) * sizeof(uint32_t)
-                                  : state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE
-                                      ? static_cast<uint64_t>(state.diagnostic_record_stride) *
-                                            state.diagnostic_record_capacity
-                                      : static_cast<uint64_t>(state.diagnostic_header_stride) +
-                                            static_cast<uint64_t>(state.diagnostic_record_stride) *
-                                                state.diagnostic_record_capacity;
+        uint64_t required = state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT
+                                ? static_cast<uint64_t>(state.diagnostic_site_count) * sizeof(uint32_t)
+                            : state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE
+                                ? static_cast<uint64_t>(state.diagnostic_record_stride) *
+                                      state.diagnostic_record_capacity
+                                : static_cast<uint64_t>(state.diagnostic_header_stride) +
+                                      static_cast<uint64_t>(state.diagnostic_record_stride) *
+                                          state.diagnostic_record_capacity;
+        if (state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT) {
+            required += static_cast<uint64_t>(state.diagnostic_mask_header_stride);
+        }
         if (buffer_it->second.mode != 3u || buffer_it->second.stride != sizeof(uint32_t) ||
             buffer_it->second.byte_size < required) {
             return fail(FE_ERROR_INVALID_ARGUMENT,
@@ -14165,6 +14330,20 @@ FE_API FeResult fe_kernel_dispatch(FeKernelHandle kernel, uint32_t group_x, uint
             if (diagnostic == it->second.buffers.end() || g_buffers.find(diagnostic->second) == g_buffers.end()) {
                 return fail(FE_ERROR_INVALID_ARGUMENT,
                             "Configured kernel diagnostics require a live bound diagnostic buffer.");
+            }
+            if (it->second.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT) {
+                const uint64_t logical_invocations = static_cast<uint64_t>(logical_x) *
+                                                     static_cast<uint64_t>(logical_y) *
+                                                     static_cast<uint64_t>(logical_z);
+                const uint64_t required = static_cast<uint64_t>(it->second.diagnostic_header_stride) +
+                                          static_cast<uint64_t>(it->second.diagnostic_record_stride) *
+                                              it->second.diagnostic_record_capacity +
+                                          static_cast<uint64_t>(it->second.diagnostic_mask_header_stride) +
+                                          logical_invocations * it->second.diagnostic_mask_cell_stride;
+                if (g_buffers.find(diagnostic->second)->second.byte_size < required) {
+                    return fail(FE_ERROR_INVALID_ARGUMENT,
+                                "Print/Assert diagnostic buffer is smaller than this dispatch extent.");
+                }
             }
         }
 

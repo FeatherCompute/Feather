@@ -35,7 +35,8 @@ public enum FeKernelDiagnosticMode : uint
     None = 0,
     ExecutionHeat = 1,
     LineValue = 2,
-    Ubsan = 3
+    Ubsan = 3,
+    PrintAssert = 4
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -138,6 +139,69 @@ public readonly struct FeKernelDiagnosticLayoutV3
     public readonly uint RecordStrideBytes;
     public readonly uint RecordCapacity;
     public readonly uint Flags;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV4
+{
+    public FeKernelDiagnosticConfigV4(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint recordCapacity,
+        uint filterMode,
+        uint selectedX,
+        uint selectedY,
+        uint selectedZ,
+        uint flags,
+        uint logicalX,
+        uint logicalY,
+        uint logicalZ,
+        uint reserved)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        RecordCapacity = recordCapacity;
+        FilterMode = filterMode;
+        SelectedX = selectedX;
+        SelectedY = selectedY;
+        SelectedZ = selectedZ;
+        Flags = flags;
+        LogicalX = logicalX;
+        LogicalY = logicalY;
+        LogicalZ = logicalZ;
+        Reserved = reserved;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint RecordCapacity;
+    public readonly uint FilterMode;
+    public readonly uint SelectedX;
+    public readonly uint SelectedY;
+    public readonly uint SelectedZ;
+    public readonly uint Flags;
+    public readonly uint LogicalX;
+    public readonly uint LogicalY;
+    public readonly uint LogicalZ;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV4
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SiteCount;
+    public readonly uint HeaderStrideBytes;
+    public readonly uint RecordStrideBytes;
+    public readonly uint RecordCapacity;
+    public readonly uint FilterMode;
+    public readonly uint MaskHeaderStrideBytes;
+    public readonly uint MaskCellStrideBytes;
+    public readonly uint LogicalX;
+    public readonly uint LogicalY;
+    public readonly uint LogicalZ;
 }
 
 [StructLayout(LayoutKind.Sequential)]

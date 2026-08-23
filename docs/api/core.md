@@ -194,10 +194,12 @@ Console.WriteLine(GpuProfiler.GetFormattedReport());
 
 ### Explicit diagnostic captures
 
-`GpuContext.BeginExecutionHeatCapture(...)` and `GpuContext.BeginLineValueCapture(...)` create
-private instrumented compute variants for an explicitly bounded diagnostic operation. They do not
-alter or replace the ordinary cached kernel. Only one diagnostic capture may be active per
-context, and the caller must wait the exact submission fence before reading the result.
+`GpuContext.BeginExecutionHeatCapture(...)`, `BeginLineValueCapture(...)`,
+`BeginUbsanCapture(...)`, and `BeginPrintAssertCapture(...)` create private instrumented compute
+variants for an explicitly bounded diagnostic operation. They do not alter or replace the
+ordinary cached kernel. Only one diagnostic capture may be active per context, and the caller
+must wait the exact submission fence before reading the result. These low-level APIs are intended
+for an owning host's explicit Profile mode; Feather never instruments an ordinary cached kernel.
 
 `BeginLineValueCapture` binds one typed FEIR statement, one matching dispatch index, and one
 global compute invocation. Its fixed 64-byte record returns whether the statement executed, its
@@ -209,6 +211,14 @@ Hosts that wrap diagnostic execution in GPU timestamp intervals call
 `GpuLineValueCapture.PrepareRecordLayout()` first and wait its exact fence. This initializes the
 private value and sink records before timestamp recording begins; it remains an explicit Profile
 operation and is never part of an ordinary dispatch.
+
+`BeginUbsanCapture` adds bounded compiler-authored checks for float divide-by-zero, sqrt/log domain
+errors, non-finite values, and scalar buffer bounds. Invalid operations use a deterministic zero
+fallback. `BeginPrintAssertCapture` is separate user-authored evidence: `GpuDebug.Print` and
+`GpuDebug.Assert` are identity-only markers in ordinary kernels, while the private diagnostic
+variant emits fixed 64-byte typed raw records. Assertion failures also update an unfiltered
+dispatch-wide spatial mask, even when log records are filtered to one selected invocation. Both
+streams retain exact attempted/committed/dropped counters and fail closed on unsupported ABI data.
 
 ## Errors
 

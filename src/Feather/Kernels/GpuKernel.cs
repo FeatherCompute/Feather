@@ -206,6 +206,50 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel CreatePrintAssert<TKernel>(
+        GpuContext context,
+        GpuPrintAssertCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "GPU Print/Assert diagnostics do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV4(
+                GpuPrintAssertCapture.AbiVersion,
+                FeKernelDiagnosticMode.PrintAssert,
+                checked((uint)capture.RecordCapacity),
+                (uint)capture.FilterMode,
+                checked((uint)capture.SelectedInvocation.X),
+                checked((uint)capture.SelectedInvocation.Y),
+                checked((uint)capture.SelectedInvocation.Z),
+                flags: 0,
+                checked((uint)capture.LogicalSize.X),
+                checked((uint)capture.LogicalSize.Y),
+                checked((uint)capture.LogicalSize.Z),
+                reserved: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v4(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v4(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {

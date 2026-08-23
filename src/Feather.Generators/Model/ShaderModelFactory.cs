@@ -665,7 +665,7 @@ internal static class ShaderModelFactory
         }
 
         var containing = symbol.ContainingType?.ToDisplayString();
-        if (containing is "Feather.Math.ShaderMath" or "Feather.Math.Hlsl" or "Feather.AD.AD" or "Feather.GpuBarrier" or "Feather.GpuAtomic")
+        if (containing is "Feather.Math.ShaderMath" or "Feather.Math.Hlsl" or "Feather.AD.AD" or "Feather.GpuBarrier" or "Feather.GpuAtomic" or "Feather.GpuDebug")
         {
             yield break;
         }

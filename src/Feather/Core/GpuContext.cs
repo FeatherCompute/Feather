@@ -382,6 +382,38 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Arms one bounded user-authored Print/Assert stream and dispatch-wide assertion mask for an
+    /// exact matching compute dispatch. Ordinary cached kernels remain uninstrumented.
+    /// </summary>
+    public GpuPrintAssertCapture BeginPrintAssertCapture(
+        string shaderTypeName,
+        int targetDispatchIndex,
+        GpuDispatchSize logicalSize,
+        int recordCapacity = 256,
+        GpuPrintAssertFilterMode filterMode = GpuPrintAssertFilterMode.AllInvocations,
+        int3 selectedInvocation = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuPrintAssertCapture(
+                this,
+                shaderTypeName,
+                targetDispatchIndex,
+                logicalSize,
+                recordCapacity,
+                filterMode,
+                selectedInvocation);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
     internal void EndDiagnosticCapture(IGpuDiagnosticCapture capture)
     {
         lock (gate)

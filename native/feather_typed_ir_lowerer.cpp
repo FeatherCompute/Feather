@@ -25,6 +25,7 @@ constexpr uint8_t kAccessSample = 4;
 constexpr uint32_t kDiagnosticExecutionHeat = 1;
 constexpr uint32_t kDiagnosticLineValue = 2;
 constexpr uint32_t kDiagnosticUbsan = 3;
+constexpr uint32_t kDiagnosticPrintAssert = 4;
 constexpr uint32_t kUbsanCheckFloatDivideByZero = 1u << 0;
 constexpr uint32_t kUbsanCheckSqrtDomain = 1u << 1;
 constexpr uint32_t kUbsanCheckLogDomain = 1u << 2;
@@ -419,7 +420,8 @@ private:
 
         if (inputs_.diagnostic_mode == kDiagnosticExecutionHeat ||
             inputs_.diagnostic_mode == kDiagnosticLineValue ||
-            inputs_.diagnostic_mode == kDiagnosticUbsan) {
+            inputs_.diagnostic_mode == kDiagnosticUbsan ||
+            inputs_.diagnostic_mode == kDiagnosticPrintAssert) {
             const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
             if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
                 return Fail("diagnostic buffer is missing from the lowering inputs");
@@ -433,6 +435,18 @@ private:
                 (inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags == 0u)) {
                 return Fail("UBSan stream capacity or enabled-check mask is invalid");
             }
+            if (inputs_.diagnostic_mode == kDiagnosticPrintAssert &&
+                (inputs_.diagnostic_record_capacity == 0u ||
+                 inputs_.diagnostic_filter_mode > 1u ||
+                 inputs_.diagnostic_logical_x == 0u ||
+                 inputs_.diagnostic_logical_y == 0u ||
+                 inputs_.diagnostic_logical_z == 0u ||
+                 (inputs_.diagnostic_filter_mode == 1u &&
+                  (inputs_.diagnostic_selected_x >= inputs_.diagnostic_logical_x ||
+                   inputs_.diagnostic_selected_y >= inputs_.diagnostic_logical_y ||
+                   inputs_.diagnostic_selected_z >= inputs_.diagnostic_logical_z)))) {
+                return Fail("Print/Assert stream filter or immutable logical extent is invalid");
+            }
         }
 
         if (!RegisterBoundsCheckResources()) {
@@ -443,7 +457,7 @@ private:
     }
 
     bool RegisterBoundsCheckResources() {
-        if (!inputs_.bounds_check) {
+        if (!inputs_.bounds_check && inputs_.diagnostic_mode != kDiagnosticPrintAssert) {
             return true;
         }
 
@@ -1213,6 +1227,13 @@ private:
                             " outside the section 7 expression table");
             }
 
+            const auto& expression = typed_.expressions[statement.a];
+            const auto* expression_symbol = expression.kind == kExpressionIntrinsic
+                                                ? GetString(expression.name_id)
+                                                : nullptr;
+            const bool is_gpu_debug_marker = expression_symbol != nullptr &&
+                (*expression_symbol == "global::Feather.GpuDebug.Print" ||
+                 *expression_symbol == "global::Feather.GpuDebug.Assert");
             auto value = BuildExpression(statement.a);
             if (value == GPU::IR::InvalidValueId) {
                 return false;
@@ -1224,7 +1245,9 @@ private:
                 return false;
             }
 
-            EmitExpression(value);
+            if (!is_gpu_debug_marker) {
+                EmitExpression(value);
+            }
             return EmitLineValueRecord(
                 statement_id, value, typed_.expressions[statement.a].type_id);
         }
@@ -2876,6 +2899,369 @@ private:
         return builder_.Intrinsic(constructor, result_type, *arguments);
     }
 
+    struct PrintAssertPayloadInfo {
+        GPU::IR::Type scalar_type;
+        uint32_t type_tag = 0;
+        uint32_t component_count = 0;
+    };
+
+    std::optional<PrintAssertPayloadInfo> PrintAssertPayloadType(uint32_t type_id) const {
+        const auto type = ToModuleType(type_id);
+        PrintAssertPayloadInfo info;
+        switch (type.kind) {
+        case GPU::IR::Type::Kind::Bool:
+            info = {GPU::IR::Type::Bool(), 1u, 1u};
+            break;
+        case GPU::IR::Type::Kind::Bool2:
+        case GPU::IR::Type::Kind::Bool3:
+        case GPU::IR::Type::Kind::Bool4:
+            info = {GPU::IR::Type::Bool(), 1u,
+                    type.kind == GPU::IR::Type::Kind::Bool2 ? 2u :
+                    type.kind == GPU::IR::Type::Kind::Bool3 ? 3u : 4u};
+            break;
+        case GPU::IR::Type::Kind::Int:
+            info = {GPU::IR::Type::Int(), 2u, 1u};
+            break;
+        case GPU::IR::Type::Kind::Int2:
+        case GPU::IR::Type::Kind::Int3:
+        case GPU::IR::Type::Kind::Int4:
+            info = {GPU::IR::Type::Int(), 2u,
+                    type.kind == GPU::IR::Type::Kind::Int2 ? 2u :
+                    type.kind == GPU::IR::Type::Kind::Int3 ? 3u : 4u};
+            break;
+        case GPU::IR::Type::Kind::UInt:
+            info = {GPU::IR::Type::UInt(), 3u, 1u};
+            break;
+        case GPU::IR::Type::Kind::UInt2:
+        case GPU::IR::Type::Kind::UInt3:
+        case GPU::IR::Type::Kind::UInt4:
+            info = {GPU::IR::Type::UInt(), 3u,
+                    type.kind == GPU::IR::Type::Kind::UInt2 ? 2u :
+                    type.kind == GPU::IR::Type::Kind::UInt3 ? 3u : 4u};
+            break;
+        case GPU::IR::Type::Kind::Float:
+            info = {GPU::IR::Type::Float(), 4u, 1u};
+            break;
+        case GPU::IR::Type::Kind::Float2:
+        case GPU::IR::Type::Kind::Float3:
+        case GPU::IR::Type::Kind::Float4:
+            info = {GPU::IR::Type::Float(), 4u,
+                    type.kind == GPU::IR::Type::Kind::Float2 ? 2u :
+                    type.kind == GPU::IR::Type::Kind::Float3 ? 3u : 4u};
+            break;
+        default:
+            return std::nullopt;
+        }
+        return info;
+    }
+
+    GPU::IR::ValueId PrintAssertWord(uint32_t index) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(index) + "u");
+        return literal == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, literal);
+    }
+
+    GPU::IR::ValueId PrintAssertWord(GPU::IR::ValueId base, uint32_t offset) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(offset) + "u");
+        const auto index = builder_.Binary(GPU::IR::BinaryOp::Add, base, literal);
+        return literal == GPU::IR::InvalidValueId || index == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, index);
+    }
+
+    GPU::IR::ValueId EncodePrintAssertComponent(
+        GPU::IR::ValueId payload,
+        const PrintAssertPayloadInfo& info,
+        uint32_t component_index) {
+        auto component = payload;
+        if (info.component_count > 1u) {
+            constexpr std::string_view components = "xyzw";
+            component = builder_.Swizzle(
+                payload,
+                info.scalar_type,
+                std::string(1, components[component_index]));
+        }
+        const auto uint_type = GPU::IR::Type::UInt();
+        if (component == GPU::IR::InvalidValueId) {
+            return GPU::IR::InvalidValueId;
+        }
+        if (info.type_tag == 1u) {
+            const auto one = builder_.Literal(uint_type, "1u");
+            const auto zero = builder_.Literal(uint_type, "0u");
+            return one == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId
+                       ? GPU::IR::InvalidValueId
+                       : builder_.Ternary(component, one, zero);
+        }
+        if (info.type_tag == 2u) {
+            const std::array arguments{component};
+            return builder_.Intrinsic("uint", uint_type, arguments);
+        }
+        if (info.type_tag == 3u) {
+            return component;
+        }
+        const std::array arguments{component};
+        return builder_.Intrinsic("floatBitsToUint", uint_type, arguments);
+    }
+
+    bool EmitPrintAssertRecord(
+        uint32_t code,
+        uint32_t severity,
+        GPU::IR::ValueId x,
+        GPU::IR::ValueId y,
+        GPU::IR::ValueId z,
+        GPU::IR::ValueId linear,
+        GPU::IR::ValueId payload,
+        const PrintAssertPayloadInfo& payload_info) {
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto one = builder_.Literal(uint_type, "1u");
+        const auto sixteen = builder_.Literal(uint_type, "16u");
+        const auto eight = builder_.Literal(uint_type, "8u");
+        const std::array increment_arguments{one};
+        const auto attempted = builder_.Atomic(
+            GPU::IR::AtomicOp::Add,
+            uint_type,
+            PrintAssertWord(3u),
+            increment_arguments);
+        const auto slot = MaterializeOnce(
+            attempted, uint_type, "feather_print_assert_slot");
+        const auto capacity = PrintAssertWord(2u);
+        const auto has_capacity = builder_.Compare(
+            GPU::IR::CompareOp::Less, slot, capacity);
+        const auto record_offset = builder_.Binary(
+            GPU::IR::BinaryOp::Mul, slot, sixteen);
+        const auto record_base = builder_.Binary(
+            GPU::IR::BinaryOp::Add, eight, record_offset);
+        if (one == GPU::IR::InvalidValueId || sixteen == GPU::IR::InvalidValueId ||
+            eight == GPU::IR::InvalidValueId || attempted == GPU::IR::InvalidValueId ||
+            slot == GPU::IR::InvalidValueId || capacity == GPU::IR::InvalidValueId ||
+            has_capacity == GPU::IR::InvalidValueId || record_offset == GPU::IR::InvalidValueId ||
+            record_base == GPU::IR::InvalidValueId) {
+            return Fail("Print/Assert bounded record reservation could not be lowered");
+        }
+
+        const auto committed = CaptureDiagnosticStatements([&] {
+            auto store_constant = [&](uint32_t offset, uint32_t value) {
+                EmitStore(
+                    PrintAssertWord(record_base, offset),
+                    builder_.Literal(uint_type, std::to_string(value) + "u"));
+            };
+            store_constant(0u, code);
+            store_constant(1u, current_statement_id_);
+            store_constant(2u, 3u);
+            store_constant(3u, severity);
+            EmitStore(PrintAssertWord(record_base, 4u), x);
+            EmitStore(PrintAssertWord(record_base, 5u), y);
+            EmitStore(PrintAssertWord(record_base, 6u), z);
+            EmitStore(PrintAssertWord(record_base, 7u), linear);
+            store_constant(8u, payload_info.type_tag);
+            store_constant(9u, payload_info.component_count);
+            for (uint32_t component = 0; component < payload_info.component_count; ++component) {
+                const auto raw = EncodePrintAssertComponent(payload, payload_info, component);
+                if (raw == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitStore(PrintAssertWord(record_base, 10u + component), raw);
+            }
+            for (uint32_t component = payload_info.component_count; component < 4u; ++component) {
+                store_constant(10u + component, 0u);
+            }
+            store_constant(14u, code == 2u ? 1u : 0u);
+            store_constant(15u, 0u);
+            const auto committed_increment = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                PrintAssertWord(4u),
+                increment_arguments);
+            if (committed_increment == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitExpression(committed_increment);
+            return true;
+        });
+        const auto dropped = CaptureDiagnosticStatements([&] {
+            const auto dropped_increment = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                PrintAssertWord(5u),
+                increment_arguments);
+            if (dropped_increment == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitExpression(dropped_increment);
+            return true;
+        });
+        if (!committed.has_value() || !dropped.has_value()) {
+            return Fail("Print/Assert record commit or drop accounting could not be lowered");
+        }
+        EmitIf(
+            has_capacity,
+            AddBlock(std::move(*committed)),
+            AddBlock(std::move(*dropped)));
+        return true;
+    }
+
+    bool EmitPrintAssertMask(GPU::IR::ValueId linear) {
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto one = builder_.Literal(uint_type, "1u");
+        const uint32_t mask_base_index = 8u + inputs_.diagnostic_record_capacity * 16u;
+        const auto mask_base = builder_.Literal(
+            uint_type, std::to_string(mask_base_index) + "u");
+        const auto four = builder_.Literal(uint_type, "4u");
+        const auto cell_offset = builder_.Binary(
+            GPU::IR::BinaryOp::Add, four, linear);
+        const auto cell_index = builder_.Binary(
+            GPU::IR::BinaryOp::Add, mask_base, cell_offset);
+        const std::array increment_arguments{one};
+        const auto failure_count = builder_.Atomic(
+            GPU::IR::AtomicOp::Add,
+            uint_type,
+            PrintAssertWord(mask_base_index + 3u),
+            increment_arguments);
+        if (one == GPU::IR::InvalidValueId || mask_base == GPU::IR::InvalidValueId ||
+            four == GPU::IR::InvalidValueId || cell_offset == GPU::IR::InvalidValueId ||
+            cell_index == GPU::IR::InvalidValueId || failure_count == GPU::IR::InvalidValueId) {
+            return Fail("Print/Assert assertion mask address could not be lowered");
+        }
+        EmitExpression(failure_count);
+        EmitStore(builder_.ResourceElement(diagnostic_sites_resource_, cell_index), one);
+        return true;
+    }
+
+    GPU::IR::ValueId BuildPrintAssertIntrinsic(
+        const Expression& expression,
+        std::string_view intrinsic,
+        GPU::IR::Type result_type,
+        const std::vector<GPU::IR::ValueId>& arguments) {
+        const bool is_print = intrinsic == "feather_debug_print";
+        if ((is_print && arguments.size() != 1u) ||
+            (!is_print && arguments.size() != 1u && arguments.size() != 2u) ||
+            expression.first_argument == NoIndex ||
+            expression.first_argument > typed_.arguments.size() ||
+            expression.argument_count > typed_.arguments.size() - expression.first_argument) {
+            return InvalidValue("GpuDebug marker has an invalid argument layout");
+        }
+
+        const uint32_t payload_argument = is_print || arguments.size() == 1u ? 0u : 1u;
+        const uint32_t payload_expression_id = typed_.arguments[
+            expression.first_argument + payload_argument];
+        if (payload_expression_id >= typed_.expressions.size()) {
+            return InvalidValue("GpuDebug payload expression is outside the typed expression table");
+        }
+        const auto payload_info = PrintAssertPayloadType(
+            typed_.expressions[payload_expression_id].type_id);
+        if (!payload_info.has_value()) {
+            return InvalidValue("GpuDebug payload must be a 32-bit scalar or 2-4 component vector");
+        }
+
+        auto condition = is_print
+                             ? builder_.Literal(GPU::IR::Type::Bool(), "true")
+                             : arguments[0];
+        auto payload = arguments[payload_argument];
+        if (condition == GPU::IR::InvalidValueId || payload == GPU::IR::InvalidValueId) {
+            return GPU::IR::InvalidValueId;
+        }
+        if (inputs_.diagnostic_mode != kDiagnosticPrintAssert) {
+            return is_print ? payload : condition;
+        }
+        if (!is_print) {
+            condition = MaterializeOnce(
+                condition, GPU::IR::Type::Bool(), "feather_debug_condition");
+        }
+        if (!is_print && arguments.size() == 1u) {
+            payload = condition;
+        } else {
+            payload = MaterializeOnce(
+                payload,
+                ToModuleType(typed_.expressions[payload_expression_id].type_id),
+                "feather_debug_payload");
+        }
+        if (condition == GPU::IR::InvalidValueId || payload == GPU::IR::InvalidValueId) {
+            return GPU::IR::InvalidValueId;
+        }
+
+        if (diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+            current_statement_id_ >= inputs_.diagnostic_site_count) {
+            return InvalidValue("GpuDebug marker has no configured diagnostic stream or source site");
+        }
+
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto x = UbsanUInt(builder_.ThreadIndexX());
+        const auto y = UbsanUInt(builder_.ThreadIndexY());
+        const auto z = UbsanUInt(builder_.ThreadIndexZ());
+        const auto logical_x = UbsanUInt(
+            builder_.PushConstant(logical_size_resource_[0]));
+        const auto logical_y = UbsanUInt(
+            builder_.PushConstant(logical_size_resource_[1]));
+        const auto y_plus_z = builder_.Binary(
+            GPU::IR::BinaryOp::Add,
+            y,
+            builder_.Binary(GPU::IR::BinaryOp::Mul, logical_y, z));
+        const auto linear = builder_.Binary(
+            GPU::IR::BinaryOp::Add,
+            x,
+            builder_.Binary(GPU::IR::BinaryOp::Mul, logical_x, y_plus_z));
+        auto selected = builder_.Literal(GPU::IR::Type::Bool(), "true");
+        if (inputs_.diagnostic_filter_mode == 1u) {
+            const auto selected_x = builder_.Literal(
+                uint_type, std::to_string(inputs_.diagnostic_selected_x) + "u");
+            const auto selected_y = builder_.Literal(
+                uint_type, std::to_string(inputs_.diagnostic_selected_y) + "u");
+            const auto selected_z = builder_.Literal(
+                uint_type, std::to_string(inputs_.diagnostic_selected_z) + "u");
+            selected = builder_.Compare(GPU::IR::CompareOp::Equal, x, selected_x);
+            selected = builder_.Binary(
+                GPU::IR::BinaryOp::LogicalAnd,
+                selected,
+                builder_.Compare(GPU::IR::CompareOp::Equal, y, selected_y));
+            selected = builder_.Binary(
+                GPU::IR::BinaryOp::LogicalAnd,
+                selected,
+                builder_.Compare(GPU::IR::CompareOp::Equal, z, selected_z));
+        }
+        if (x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId ||
+            z == GPU::IR::InvalidValueId || logical_x == GPU::IR::InvalidValueId ||
+            logical_y == GPU::IR::InvalidValueId || y_plus_z == GPU::IR::InvalidValueId ||
+            linear == GPU::IR::InvalidValueId || selected == GPU::IR::InvalidValueId) {
+            return InvalidValue("GpuDebug invocation identity could not be lowered");
+        }
+
+        if (is_print) {
+            const auto record = CaptureDiagnosticStatements([&] {
+                return EmitPrintAssertRecord(
+                    1u, 1u, x, y, z, linear, payload, *payload_info);
+            });
+            if (!record.has_value()) {
+                return GPU::IR::InvalidValueId;
+            }
+            EmitIf(selected, AddBlock(std::move(*record)), GPU::IR::InvalidBlockId);
+            return payload;
+        }
+
+        const auto failed = builder_.Unary(GPU::IR::UnaryOp::LogicalNot, condition);
+        const auto failure = CaptureDiagnosticStatements([&] {
+            if (!EmitPrintAssertMask(linear)) {
+                return false;
+            }
+            const auto record = CaptureDiagnosticStatements([&] {
+                return EmitPrintAssertRecord(
+                    2u, 3u, x, y, z, linear, payload, *payload_info);
+            });
+            if (!record.has_value()) {
+                return false;
+            }
+            EmitIf(selected, AddBlock(std::move(*record)), GPU::IR::InvalidBlockId);
+            return true;
+        });
+        if (failed == GPU::IR::InvalidValueId || !failure.has_value()) {
+            return InvalidValue("GpuDebug assertion instrumentation could not be lowered");
+        }
+        EmitIf(failed, AddBlock(std::move(*failure)), GPU::IR::InvalidBlockId);
+        return condition;
+    }
+
     GPU::IR::ValueId BuildIntrinsic(const Expression& expression) {
         const auto* symbol = GetString(expression.name_id);
         const auto intrinsic = symbol == nullptr ? std::string{} : IntrinsicName(*symbol);
@@ -2887,6 +3273,10 @@ private:
         auto arguments = BuildArguments(expression);
         if (!arguments.has_value()) {
             return GPU::IR::InvalidValueId;
+        }
+
+        if (intrinsic == "feather_debug_print" || intrinsic == "feather_debug_assert") {
+            return BuildPrintAssertIntrinsic(expression, intrinsic, result_type, *arguments);
         }
 
         if (intrinsic == "matrix_multiply") {
@@ -3741,6 +4131,12 @@ private:
     }
 
     static std::string IntrinsicName(const std::string& symbol) {
+        if (symbol == "global::Feather.GpuDebug.Print") {
+            return "feather_debug_print";
+        }
+        if (symbol == "global::Feather.GpuDebug.Assert") {
+            return "feather_debug_assert";
+        }
         if (symbol == "global::Feather.Math.ShaderMath.Sin" || symbol == "global::Feather.Math.Hlsl.Sin") {
             return "sin";
         }

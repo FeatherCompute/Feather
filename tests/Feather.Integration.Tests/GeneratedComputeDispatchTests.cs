@@ -5872,6 +5872,160 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void PrintAssertCapturesTypedRecordsAndDispatchWideAssertionMask()
+    {
+        using var input = GPU.CreateBuffer<float>([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]);
+        using var output = GPU.CreateBuffer<float>(8);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<PrintAssertProbeKernel>();
+        Assert.DoesNotContain("__feather_print_assert", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+
+        using var capture = GPU.Context.BeginPrintAssertCapture(
+            typeof(PrintAssertProbeKernel).FullName!,
+            targetDispatchIndex: 0,
+            new GpuDispatchSize(8, 1, 1),
+            recordCapacity: 16,
+            GpuPrintAssertFilterMode.AllInvocations);
+        using (GpuFence preparation = capture.PrepareRecordLayout())
+        {
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
+        Assert.Throws<InvalidOperationException>(capture.PrepareRecordLayout);
+
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<PrintAssertProbeKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new PrintAssertProbeKernel(input.AsReadOnly(), output.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuPrintAssertResult result = capture.CompleteAndRead();
+        Assert.Equal(12u, result.AttemptedCount);
+        Assert.Equal(12u, result.CommittedCount);
+        Assert.Equal(0u, result.DroppedCount);
+        Assert.Equal(4u, result.AssertionFailureCount);
+        Assert.Equal(
+            [new int3(0, 0, 0), new int3(2, 0, 0), new int3(4, 0, 0), new int3(6, 0, 0)],
+            result.AssertedInvocations);
+        Assert.Equal(8, result.Records.Count(static record => record.Kind == GpuDebugRecordKind.Print));
+        Assert.Equal(4, result.Records.Count(static record => record.Kind == GpuDebugRecordKind.Assert));
+        Assert.All(result.Records, static record => Assert.Equal(2, record.ComponentCount));
+        Assert.All(
+            result.Records.Where(static record => record.Kind == GpuDebugRecordKind.Print),
+            static record => Assert.Equal(GpuDebugValueType.Float32, record.ValueType));
+        Assert.All(
+            result.Records.Where(static record => record.Kind == GpuDebugRecordKind.Assert),
+            static record => Assert.Equal(GpuDebugValueType.Int32, record.ValueType));
+        Assert.Equal([2f, 4f, 6f, 8f, 10f, 12f, 14f, 16f], output.ToArray());
+        Assert.Contains("feather_print_assert_slot", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.Contains("atomicAdd", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<PrintAssertProbeKernel>());
+    }
+
+    [Fact]
+    public void PrintAssertFiltersLogsBeforeAccountingButNeverFiltersAssertionMask()
+    {
+        using var input = GPU.CreateBuffer<float>([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]);
+        using var output = GPU.CreateBuffer<float>(8);
+        using var capture = GPU.Context.BeginPrintAssertCapture(
+            typeof(PrintAssertProbeKernel).FullName!,
+            targetDispatchIndex: 0,
+            new GpuDispatchSize(8, 1, 1),
+            recordCapacity: 8,
+            GpuPrintAssertFilterMode.SelectedInvocation,
+            new int3(2, 0, 0));
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new PrintAssertProbeKernel(input.AsReadOnly(), output.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuPrintAssertResult result = capture.CompleteAndRead();
+        Assert.Equal(2u, result.AttemptedCount);
+        Assert.Equal(2u, result.CommittedCount);
+        Assert.Equal(0u, result.DroppedCount);
+        Assert.All(result.Records, static record => Assert.Equal(new int3(2, 0, 0), record.Invocation));
+        Assert.Equal(4u, result.AssertionFailureCount);
+        Assert.Equal(4, result.AssertedInvocations.Count);
+        Assert.Equal([2f, 4f, 6f, 8f, 10f, 12f, 14f, 16f], output.ToArray());
+    }
+
+    [Fact]
+    public void PrintAssertAccountsForOverflowWithoutTruncatingAssertionMask()
+    {
+        using var input = GPU.CreateBuffer<float>([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]);
+        using var output = GPU.CreateBuffer<float>(8);
+        using var capture = GPU.Context.BeginPrintAssertCapture(
+            typeof(PrintAssertProbeKernel).FullName!,
+            targetDispatchIndex: 0,
+            new GpuDispatchSize(8, 1, 1),
+            recordCapacity: 4);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new PrintAssertProbeKernel(input.AsReadOnly(), output.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuPrintAssertResult result = capture.CompleteAndRead();
+        Assert.Equal(12u, result.AttemptedCount);
+        Assert.Equal(4u, result.CommittedCount);
+        Assert.Equal(8u, result.DroppedCount);
+        Assert.Equal(4, result.Records.Count);
+        Assert.Equal(4u, result.AssertionFailureCount);
+        Assert.Equal(4, result.AssertedInvocations.Count);
+        Assert.Equal([2f, 4f, 6f, 8f, 10f, 12f, 14f, 16f], output.ToArray());
+    }
+
+    [Fact]
+    public void PrintAssertTargetsOneDispatchAfterDifferentlySizedMatchingWork()
+    {
+        using var input = GPU.CreateBuffer<float>([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]);
+        using var firstOutput = GPU.CreateBuffer<float>(4);
+        using var targetOutput = GPU.CreateBuffer<float>(8);
+        using var capture = GPU.Context.BeginPrintAssertCapture(
+            typeof(PrintAssertProbeKernel).FullName!,
+            targetDispatchIndex: 1,
+            new GpuDispatchSize(8, 1, 1),
+            recordCapacity: 16);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new PrintAssertProbeKernel(input.AsReadOnly(), firstOutput.AsReadWrite()),
+                4);
+            commands.Dispatch(
+                new PrintAssertProbeKernel(input.AsReadOnly(), targetOutput.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuPrintAssertResult result = capture.CompleteAndRead();
+        Assert.Equal(2, result.MatchedDispatchCount);
+        Assert.Equal(1, result.Dispatch!.Value.DispatchIndex);
+        Assert.Equal(8, result.Dispatch.Value.LogicalSizeX);
+        Assert.Equal(12u, result.AttemptedCount);
+        Assert.Equal(4u, result.AssertionFailureCount);
+        Assert.Equal([2f, 4f, 6f, 8f], firstOutput.ToArray());
+        Assert.Equal([2f, 4f, 6f, 8f, 10f, 12f, 14f, 16f], targetOutput.ToArray());
+    }
+
+    [Fact]
     public void UbsanAccountsForOverflowWithoutWritingPastCapacity()
     {
         using var input = GPU.CreateBuffer<float>(
@@ -6120,7 +6274,7 @@ public readonly partial struct ConditionlessForBreakKernel(ReadOnlyBuffer<float>
     public void Execute()
     {
         int i = ThreadIds.X;
-        for (;;)
+        for (; ; )
         {
             output[i] = input[i] * 2.0f;
             break;
@@ -6809,5 +6963,20 @@ public readonly partial struct UbsanProbeKernel(
         }
 
         output[i] = result;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct PrintAssertProbeKernel(
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        GpuDebug.Print(new float2(i, input[i]));
+        GpuDebug.Assert((i & 1) == 1, new int2(i, i * 10));
+        output[i] = input[i] * 2f;
     }
 }

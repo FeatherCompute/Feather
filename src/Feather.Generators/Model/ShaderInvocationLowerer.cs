@@ -38,7 +38,7 @@ internal static class ShaderInvocationLowerer
                 "Loss" => LoweredShaderInstructionKind.AdLoss,
                 _ => LoweredShaderInstructionKind.KnownSymbolInvocation
             },
-            "global::Feather.Math.ShaderMath" or "global::Feather.Math.Hlsl" => LoweredShaderInstructionKind.KnownSymbolInvocation,
+            "global::Feather.Math.ShaderMath" or "global::Feather.Math.Hlsl" or "global::Feather.GpuDebug" => LoweredShaderInstructionKind.KnownSymbolInvocation,
             _ => default
         };
 

@@ -64,7 +64,8 @@ typedef enum FeKernelDiagnosticMode {
     FE_KERNEL_DIAGNOSTIC_NONE = 0,
     FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT = 1,
     FE_KERNEL_DIAGNOSTIC_LINE_VALUE = 2,
-    FE_KERNEL_DIAGNOSTIC_UBSAN = 3
+    FE_KERNEL_DIAGNOSTIC_UBSAN = 3,
+    FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT = 4
 } FeKernelDiagnosticMode;
 
 /** Versioned device-buffer ABI for one configured diagnostic kernel variant. */
@@ -130,6 +131,42 @@ typedef struct FeKernelDiagnosticLayoutV3 {
     uint32_t record_capacity;
     uint32_t flags;
 } FeKernelDiagnosticLayoutV3;
+
+/**
+ * Versioned configuration for the user-authored Print/Assert stream and dispatch-wide assertion
+ * mask. The logical extent is part of the immutable variant and is validated at dispatch.
+ */
+typedef struct FeKernelDiagnosticConfigV4 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t record_capacity;
+    uint32_t filter_mode;
+    uint32_t selected_x;
+    uint32_t selected_y;
+    uint32_t selected_z;
+    uint32_t flags;
+    uint32_t logical_x;
+    uint32_t logical_y;
+    uint32_t logical_z;
+    uint32_t reserved;
+} FeKernelDiagnosticConfigV4;
+
+/** Versioned device-buffer layout for one bounded Print/Assert capture. */
+typedef struct FeKernelDiagnosticLayoutV4 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t buffer_binding;
+    uint32_t site_count;
+    uint32_t header_stride_bytes;
+    uint32_t record_stride_bytes;
+    uint32_t record_capacity;
+    uint32_t filter_mode;
+    uint32_t mask_header_stride_bytes;
+    uint32_t mask_cell_stride_bytes;
+    uint32_t logical_x;
+    uint32_t logical_y;
+    uint32_t logical_z;
+} FeKernelDiagnosticLayoutV4;
 
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
@@ -528,6 +565,12 @@ FE_API FeResult fe_kernel_configure_diagnostics_v3(
 FE_API FeResult fe_kernel_get_diagnostic_layout_v3(
     FeKernelHandle kernel,
     FeKernelDiagnosticLayoutV3* out_layout);
+FE_API FeResult fe_kernel_configure_diagnostics_v4(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV4* config);
+FE_API FeResult fe_kernel_get_diagnostic_layout_v4(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV4* out_layout);
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);
