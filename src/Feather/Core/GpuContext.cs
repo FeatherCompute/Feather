@@ -455,6 +455,34 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Arms one bounded compiler-instrumented event trace for an exact selected compute
+    /// invocation and matching dispatch. Ordinary cached kernels remain uninstrumented.
+    /// </summary>
+    public GpuComputeTraceCapture BeginComputeTraceCapture(
+        string shaderTypeName,
+        int targetDispatchIndex,
+        int3 selectedInvocation,
+        int recordCapacity = 1_024)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuComputeTraceCapture(
+                this,
+                shaderTypeName,
+                targetDispatchIndex,
+                selectedInvocation,
+                recordCapacity);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
     internal void EndDiagnosticCapture(IGpuDiagnosticCapture capture)
     {
         lock (gate)

@@ -27,6 +27,14 @@ constexpr uint32_t kDiagnosticLineValue = 2;
 constexpr uint32_t kDiagnosticUbsan = 3;
 constexpr uint32_t kDiagnosticPrintAssert = 4;
 constexpr uint32_t kDiagnosticBranchDivergence = 5;
+constexpr uint32_t kDiagnosticComputeTrace = 6;
+
+constexpr uint32_t kTraceEventFunctionEnter = 1;
+constexpr uint32_t kTraceEventStatement = 2;
+constexpr uint32_t kTraceEventValue = 3;
+constexpr uint32_t kTraceEventBranchPredicate = 4;
+constexpr uint32_t kTraceEventFunctionExit = 5;
+constexpr uint32_t kTraceEventInvocationEnd = 6;
 constexpr uint32_t kUbsanCheckFloatDivideByZero = 1u << 0;
 constexpr uint32_t kUbsanCheckSqrtDomain = 1u << 1;
 constexpr uint32_t kUbsanCheckLogDomain = 1u << 2;
@@ -288,9 +296,13 @@ public:
             static_cast<uint32_t>(inputs_.group_z),
             DimensionFor(entry.kind));
 
+        current_function_id_ = typed_.entry_function;
+
         if (!RegisterResources() || !ResolveCallableResourceBindings() || !RegisterCallables() ||
             !EmitBoundsCheckGuard(entry.kind) ||
+            !EmitComputeTraceEntryStart(typed_.entry_function, entry.body_statement_index) ||
             !LowerStatement(entry.body_statement_index) ||
+            !EmitComputeTraceEntryEnd(typed_.entry_function, entry.body_statement_index) ||
             (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
              !branch_divergence_site_emitted_)) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
@@ -425,7 +437,8 @@ private:
             inputs_.diagnostic_mode == kDiagnosticLineValue ||
             inputs_.diagnostic_mode == kDiagnosticUbsan ||
             inputs_.diagnostic_mode == kDiagnosticPrintAssert ||
-            inputs_.diagnostic_mode == kDiagnosticBranchDivergence) {
+            inputs_.diagnostic_mode == kDiagnosticBranchDivergence ||
+            inputs_.diagnostic_mode == kDiagnosticComputeTrace) {
             const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
             if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
                 return Fail("diagnostic buffer is missing from the lowering inputs");
@@ -455,6 +468,10 @@ private:
                 (inputs_.diagnostic_source_site >= inputs_.diagnostic_site_count ||
                  inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags != 0x0fu)) {
                 return Fail("branch-divergence source site, capacity, or subgroup feature contract is invalid");
+            }
+            if (inputs_.diagnostic_mode == kDiagnosticComputeTrace &&
+                (inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags != 0u)) {
+                return Fail("compute-trace capacity or feature contract is invalid");
             }
         }
 
@@ -924,7 +941,10 @@ private:
                 local_glsl_names_[*parameter_name] = sanitized_parameter_name;
             }
 
-            auto body = LowerCallableStatementList(function.body_statement_index);
+            const auto previous_function_id = current_function_id_;
+            current_function_id_ = function_id;
+            auto body = LowerCallableStatementList(function.body_statement_index, function_id);
+            current_function_id_ = previous_function_id;
             local_values_ = std::move(previous_local_values);
             declared_locals_ = std::move(previous_declared_locals);
             local_glsl_names_ = std::move(previous_local_glsl_names);
@@ -1205,6 +1225,14 @@ private:
             !EmitDiagnosticSiteHit(statement_id)) {
             return false;
         }
+        if (statement.kind != kStatementBlock &&
+            !EmitComputeTraceEvent(
+                statement_id,
+                kTraceEventStatement,
+                current_function_id_,
+                ComputeTraceStatementSymbol(statement))) {
+            return false;
+        }
         switch (statement.kind) {
         case kStatementBlock:
             return LowerBlock(statement);
@@ -1258,7 +1286,14 @@ private:
                 EmitExpression(value);
             }
             return EmitLineValueRecord(
-                statement_id, value, typed_.expressions[statement.a].type_id);
+                       statement_id, value, typed_.expressions[statement.a].type_id) &&
+                   EmitComputeTraceEvent(
+                       statement_id,
+                       kTraceEventValue,
+                       current_function_id_,
+                       ComputeTraceStatementSymbol(statement),
+                       value,
+                       typed_.expressions[statement.a].type_id);
         }
         case kStatementBarrier:
             if (!EmitBarrier(statement.op)) {
@@ -1301,6 +1336,23 @@ private:
         }
         EmitExpression(increment);
         return true;
+    }
+
+    uint32_t ComputeTraceStatementSymbol(const Statement& statement) const {
+        if (statement.name_id != NoIndex) {
+            return statement.name_id;
+        }
+        if ((statement.kind == kStatementAssignment ||
+             statement.kind == kStatementCompoundAssignment ||
+             statement.kind == kStatementIncrementDecrement) &&
+            statement.a < typed_.lvalues.size()) {
+            return typed_.lvalues[statement.a].name_id;
+        }
+        if (statement.kind == kStatementExpression &&
+            statement.a < typed_.expressions.size()) {
+            return typed_.expressions[statement.a].name_id;
+        }
+        return NoIndex;
     }
 
     GPU::IR::ValueId MaterializeLineValueIfSelected(
@@ -1516,6 +1568,365 @@ private:
         }
         EmitLocalDeclaration(type, name, value);
         return local;
+    }
+
+    GPU::IR::ValueId ComputeTraceWord(uint32_t index) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(index) + "u");
+        return literal == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, literal);
+    }
+
+    GPU::IR::ValueId ComputeTraceWord(GPU::IR::ValueId base, uint32_t offset) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(offset) + "u");
+        const auto index = builder_.Binary(GPU::IR::BinaryOp::Add, base, literal);
+        return literal == GPU::IR::InvalidValueId || index == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, index);
+    }
+
+    GPU::IR::ValueId ComputeTraceSelectedPredicate() {
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto to_uint = [&](GPU::IR::ValueId value) {
+            const std::array arguments{value};
+            return value == GPU::IR::InvalidValueId
+                       ? GPU::IR::InvalidValueId
+                       : builder_.Intrinsic("uint", uint_type, arguments);
+        };
+        const auto x = to_uint(builder_.ThreadIndexX());
+        const auto y = to_uint(builder_.ThreadIndexY());
+        const auto z = to_uint(builder_.ThreadIndexZ());
+        const auto selected_x = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_x) + "u");
+        const auto selected_y = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_y) + "u");
+        const auto selected_z = builder_.Literal(
+            uint_type, std::to_string(inputs_.diagnostic_selected_z) + "u");
+        auto selected = builder_.Compare(GPU::IR::CompareOp::Equal, x, selected_x);
+        const auto y_selected = builder_.Compare(GPU::IR::CompareOp::Equal, y, selected_y);
+        const auto z_selected = builder_.Compare(GPU::IR::CompareOp::Equal, z, selected_z);
+        selected = builder_.Binary(GPU::IR::BinaryOp::LogicalAnd, selected, y_selected);
+        selected = builder_.Binary(GPU::IR::BinaryOp::LogicalAnd, selected, z_selected);
+        return x == GPU::IR::InvalidValueId || y == GPU::IR::InvalidValueId ||
+                       z == GPU::IR::InvalidValueId || selected == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : selected;
+    }
+
+    bool BuildComputeTracePayload(
+        GPU::IR::ValueId value,
+        uint32_t type_id,
+        uint32_t* type_tag,
+        uint32_t* component_count,
+        std::array<GPU::IR::ValueId, 4>* raw_components) {
+        if (type_tag == nullptr || component_count == nullptr || raw_components == nullptr) {
+            return false;
+        }
+        *type_tag = 0u;
+        *component_count = 0u;
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto zero = builder_.Literal(uint_type, "0u");
+        raw_components->fill(zero);
+        if (zero == GPU::IR::InvalidValueId) {
+            return false;
+        }
+        if (value == GPU::IR::InvalidValueId || type_id == NoIndex || type_id >= typed_.types.size()) {
+            return true;
+        }
+
+        const auto type = ToModuleType(type_id);
+        GPU::IR::Type scalar_type;
+        switch (type.kind) {
+        case GPU::IR::Type::Kind::Bool:
+            scalar_type = GPU::IR::Type::Bool(); *type_tag = 1u; *component_count = 1u; break;
+        case GPU::IR::Type::Kind::Int:
+            scalar_type = GPU::IR::Type::Int(); *type_tag = 2u; *component_count = 1u; break;
+        case GPU::IR::Type::Kind::UInt:
+            scalar_type = GPU::IR::Type::UInt(); *type_tag = 3u; *component_count = 1u; break;
+        case GPU::IR::Type::Kind::Float:
+            scalar_type = GPU::IR::Type::Float(); *type_tag = 4u; *component_count = 1u; break;
+        case GPU::IR::Type::Kind::Bool2:
+        case GPU::IR::Type::Kind::Bool3:
+        case GPU::IR::Type::Kind::Bool4:
+            scalar_type = GPU::IR::Type::Bool(); *type_tag = 1u;
+            *component_count = type.kind == GPU::IR::Type::Kind::Bool2 ? 2u :
+                               type.kind == GPU::IR::Type::Kind::Bool3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::Int2:
+        case GPU::IR::Type::Kind::Int3:
+        case GPU::IR::Type::Kind::Int4:
+            scalar_type = GPU::IR::Type::Int(); *type_tag = 2u;
+            *component_count = type.kind == GPU::IR::Type::Kind::Int2 ? 2u :
+                               type.kind == GPU::IR::Type::Kind::Int3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::UInt2:
+        case GPU::IR::Type::Kind::UInt3:
+        case GPU::IR::Type::Kind::UInt4:
+            scalar_type = GPU::IR::Type::UInt(); *type_tag = 3u;
+            *component_count = type.kind == GPU::IR::Type::Kind::UInt2 ? 2u :
+                               type.kind == GPU::IR::Type::Kind::UInt3 ? 3u : 4u;
+            break;
+        case GPU::IR::Type::Kind::Float2:
+        case GPU::IR::Type::Kind::Float3:
+        case GPU::IR::Type::Kind::Float4:
+            scalar_type = GPU::IR::Type::Float(); *type_tag = 4u;
+            *component_count = type.kind == GPU::IR::Type::Kind::Float2 ? 2u :
+                               type.kind == GPU::IR::Type::Kind::Float3 ? 3u : 4u;
+            break;
+        default:
+            return true;
+        }
+
+        const auto one = builder_.Literal(uint_type, "1u");
+        constexpr std::string_view components = "xyzw";
+        for (uint32_t index = 0; index < *component_count; ++index) {
+            auto component = value;
+            if (*component_count > 1u) {
+                component = builder_.Swizzle(
+                    value, scalar_type, std::string(1, components[index]));
+            }
+            GPU::IR::ValueId raw = GPU::IR::InvalidValueId;
+            if (*type_tag == 1u) {
+                raw = builder_.Ternary(component, one, zero);
+            } else if (*type_tag == 2u) {
+                const std::array arguments{component};
+                raw = builder_.Intrinsic("uint", uint_type, arguments);
+            } else if (*type_tag == 3u) {
+                raw = component;
+            } else {
+                const std::array arguments{component};
+                raw = builder_.Intrinsic("floatBitsToUint", uint_type, arguments);
+            }
+            if (raw == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            (*raw_components)[index] = raw;
+        }
+        return one != GPU::IR::InvalidValueId;
+    }
+
+    bool EmitComputeTraceEvent(
+        uint32_t source_site,
+        uint32_t event_kind,
+        uint32_t function_id,
+        uint32_t symbol_id,
+        GPU::IR::ValueId value = GPU::IR::InvalidValueId,
+        uint32_t type_id = NoIndex) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        if (diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+            source_site >= inputs_.diagnostic_site_count ||
+            function_id >= typed_.functions.size()) {
+            return Fail("compute-trace event identity is outside the configured FEIR ABI");
+        }
+
+        uint32_t type_tag = 0u;
+        uint32_t component_count = 0u;
+        std::array<GPU::IR::ValueId, 4> raw_components{};
+        if (!BuildComputeTracePayload(
+                value, type_id, &type_tag, &component_count, &raw_components)) {
+            return Fail("compute-trace value payload could not be encoded");
+        }
+        const auto selected = ComputeTraceSelectedPredicate();
+        if (selected == GPU::IR::InvalidValueId) {
+            return Fail("compute-trace invocation filter could not be lowered");
+        }
+
+        const auto selected_statements = CaptureDiagnosticStatements([&] {
+            const auto uint_type = GPU::IR::Type::UInt();
+            const auto one = builder_.Literal(uint_type, "1u");
+            const auto sixteen = builder_.Literal(uint_type, "16u");
+            const auto header_words = builder_.Literal(uint_type, "16u");
+            const std::array increment_arguments{one};
+            const auto attempted = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                ComputeTraceWord(3u),
+                increment_arguments);
+            const auto slot = MaterializeOnce(
+                attempted, uint_type, "__feather_compute_trace_slot");
+            const auto capacity = ComputeTraceWord(2u);
+            const auto has_capacity = builder_.Compare(
+                GPU::IR::CompareOp::Less, slot, capacity);
+            const auto record_offset = builder_.Binary(
+                GPU::IR::BinaryOp::Mul, slot, sixteen);
+            const auto record_base = builder_.Binary(
+                GPU::IR::BinaryOp::Add, header_words, record_offset);
+            if (one == GPU::IR::InvalidValueId || sixteen == GPU::IR::InvalidValueId ||
+                header_words == GPU::IR::InvalidValueId || attempted == GPU::IR::InvalidValueId ||
+                slot == GPU::IR::InvalidValueId || capacity == GPU::IR::InvalidValueId ||
+                has_capacity == GPU::IR::InvalidValueId || record_offset == GPU::IR::InvalidValueId ||
+                record_base == GPU::IR::InvalidValueId) {
+                return false;
+            }
+
+            const auto committed = CaptureDiagnosticStatements([&] {
+                const auto to_uint = [&](GPU::IR::ValueId input) {
+                    const std::array arguments{input};
+                    return builder_.Intrinsic("uint", uint_type, arguments);
+                };
+                const auto thread_x = to_uint(builder_.ThreadIndexX());
+                const auto thread_y = to_uint(builder_.ThreadIndexY());
+                const auto thread_z = to_uint(builder_.ThreadIndexZ());
+                const auto site = builder_.Literal(uint_type, std::to_string(source_site) + "u");
+                const auto kind = builder_.Literal(uint_type, std::to_string(event_kind) + "u");
+                const auto function = builder_.Literal(uint_type, std::to_string(function_id) + "u");
+                const auto symbol = builder_.Literal(uint_type, std::to_string(symbol_id) + "u");
+                const auto value_type = builder_.Literal(uint_type, std::to_string(type_tag) + "u");
+                const auto components = builder_.Literal(uint_type, std::to_string(component_count) + "u");
+                const auto zero = builder_.Literal(uint_type, "0u");
+                const auto depth = ComputeTraceWord(12u);
+                if (thread_x == GPU::IR::InvalidValueId || thread_y == GPU::IR::InvalidValueId ||
+                    thread_z == GPU::IR::InvalidValueId || site == GPU::IR::InvalidValueId ||
+                    kind == GPU::IR::InvalidValueId || function == GPU::IR::InvalidValueId ||
+                    symbol == GPU::IR::InvalidValueId || value_type == GPU::IR::InvalidValueId ||
+                    components == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId ||
+                    depth == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitStore(ComputeTraceWord(record_base, 0u), slot);
+                EmitStore(ComputeTraceWord(record_base, 1u), site);
+                EmitStore(ComputeTraceWord(record_base, 2u), kind);
+                EmitStore(ComputeTraceWord(record_base, 3u), depth);
+                EmitStore(ComputeTraceWord(record_base, 4u), function);
+                EmitStore(ComputeTraceWord(record_base, 5u), symbol);
+                EmitStore(ComputeTraceWord(record_base, 6u), value_type);
+                EmitStore(ComputeTraceWord(record_base, 7u), components);
+                for (uint32_t index = 0; index < raw_components.size(); ++index) {
+                    EmitStore(ComputeTraceWord(record_base, 8u + index), raw_components[index]);
+                }
+                EmitStore(ComputeTraceWord(record_base, 12u), thread_x);
+                EmitStore(ComputeTraceWord(record_base, 13u), thread_y);
+                EmitStore(ComputeTraceWord(record_base, 14u), thread_z);
+                EmitStore(ComputeTraceWord(record_base, 15u), zero);
+                const auto committed_increment = builder_.Atomic(
+                    GPU::IR::AtomicOp::Add,
+                    uint_type,
+                    ComputeTraceWord(4u),
+                    increment_arguments);
+                if (committed_increment == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitExpression(committed_increment);
+                return true;
+            });
+            const auto dropped = CaptureDiagnosticStatements([&] {
+                const auto dropped_increment = builder_.Atomic(
+                    GPU::IR::AtomicOp::Add,
+                    uint_type,
+                    ComputeTraceWord(5u),
+                    increment_arguments);
+                if (dropped_increment == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitExpression(dropped_increment);
+                return true;
+            });
+            if (!committed.has_value() || !dropped.has_value()) {
+                return false;
+            }
+            EmitIf(
+                has_capacity,
+                AddBlock(std::move(*committed)),
+                AddBlock(std::move(*dropped)));
+            return true;
+        });
+        if (!selected_statements.has_value()) {
+            return Fail("compute-trace bounded event write could not be lowered");
+        }
+        EmitIf(selected, AddBlock(std::move(*selected_statements)), GPU::IR::InvalidBlockId);
+        return true;
+    }
+
+    bool EmitComputeTraceSelectedStore(uint32_t word_index, uint32_t constant) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        const auto selected = ComputeTraceSelectedPredicate();
+        const auto statements = CaptureDiagnosticStatements([&] {
+            const auto value = builder_.Literal(
+                GPU::IR::Type::UInt(), std::to_string(constant) + "u");
+            if (value == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitStore(ComputeTraceWord(word_index), value);
+            return true;
+        });
+        if (selected == GPU::IR::InvalidValueId || !statements.has_value()) {
+            return Fail("compute-trace selected header store could not be lowered");
+        }
+        EmitIf(selected, AddBlock(std::move(*statements)), GPU::IR::InvalidBlockId);
+        return true;
+    }
+
+    bool EmitComputeTraceDepthDelta(bool increment) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        const auto selected = ComputeTraceSelectedPredicate();
+        const auto statements = CaptureDiagnosticStatements([&] {
+            const auto delta = builder_.Literal(
+                GPU::IR::Type::UInt(), increment ? "1u" : "4294967295u");
+            const std::array arguments{delta};
+            const auto changed = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                GPU::IR::Type::UInt(),
+                ComputeTraceWord(12u),
+                arguments);
+            if (delta == GPU::IR::InvalidValueId || changed == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitExpression(changed);
+            return true;
+        });
+        if (selected == GPU::IR::InvalidValueId || !statements.has_value()) {
+            return Fail("compute-trace call-depth transition could not be lowered");
+        }
+        EmitIf(selected, AddBlock(std::move(*statements)), GPU::IR::InvalidBlockId);
+        return true;
+    }
+
+    bool EmitComputeTraceEntryStart(uint32_t function_id, uint32_t source_site) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        return EmitComputeTraceSelectedStore(6u, 1u) &&
+               EmitComputeTraceSelectedStore(7u, 0u) &&
+               EmitComputeTraceSelectedStore(12u, 0u) &&
+               EmitComputeTraceEvent(
+                   source_site, kTraceEventFunctionEnter, function_id, NoIndex);
+    }
+
+    bool EmitComputeTraceEntryEnd(uint32_t function_id, uint32_t source_site) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        return EmitComputeTraceEvent(
+                   source_site, kTraceEventFunctionExit, function_id, NoIndex) &&
+               EmitComputeTraceEvent(
+                   source_site, kTraceEventInvocationEnd, function_id, NoIndex) &&
+               EmitComputeTraceSelectedStore(7u, 1u);
+    }
+
+    bool EmitComputeTraceCallableStart(uint32_t function_id, uint32_t source_site) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        return EmitComputeTraceDepthDelta(true) &&
+               EmitComputeTraceEvent(
+                   source_site, kTraceEventFunctionEnter, function_id, NoIndex);
+    }
+
+    bool EmitComputeTraceCallableEnd(uint32_t function_id, uint32_t source_site) {
+        if (inputs_.diagnostic_mode != kDiagnosticComputeTrace) {
+            return true;
+        }
+        return EmitComputeTraceEvent(
+                   source_site, kTraceEventFunctionExit, function_id, NoIndex) &&
+               EmitComputeTraceDepthDelta(false);
     }
 
     GPU::IR::ValueId UbsanWord(uint32_t index) {
@@ -2017,6 +2428,21 @@ private:
         if (value == GPU::IR::InvalidValueId) {
             return value;
         }
+        if (inputs_.diagnostic_mode == kDiagnosticComputeTrace) {
+            if (type_id >= typed_.types.size()) {
+                return GPU::IR::InvalidValueId;
+            }
+            const auto trace_type = ToModuleType(type_id);
+            if (trace_type.kind != GPU::IR::Type::Kind::Void) {
+                value = MaterializeOnce(
+                    value,
+                    trace_type,
+                    "__feather_compute_trace_value");
+                if (value == GPU::IR::InvalidValueId) {
+                    return value;
+                }
+            }
+        }
         return MaterializeLineValueIfSelected(statement_id, value, type_id);
     }
 
@@ -2224,7 +2650,14 @@ private:
         local_glsl_names_[*name] = glsl_name;
         EmitLocalDeclaration(type, glsl_name, value);
         return local_values_[*name] != GPU::IR::InvalidValueId &&
-               EmitLineValueRecord(current_statement_id_, local_values_[*name], statement.op);
+               EmitLineValueRecord(current_statement_id_, local_values_[*name], statement.op) &&
+               EmitComputeTraceEvent(
+                   current_statement_id_,
+                   kTraceEventValue,
+                   current_function_id_,
+                   statement.name_id,
+                   local_values_[*name],
+                   statement.op);
     }
 
     bool LowerSharedMemoryDeclaration(const Statement& statement) {
@@ -2269,7 +2702,14 @@ private:
 
             EmitStore(destination, value);
             return EmitLineValueRecord(
-                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                       current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+                   EmitComputeTraceEvent(
+                       current_statement_id_,
+                       kTraceEventValue,
+                       current_function_id_,
+                       target.name_id,
+                       value,
+                       target.type_id);
         }
 
         const auto destination = BuildLValueAddress(statement.a);
@@ -2279,7 +2719,14 @@ private:
 
         EmitStore(destination, value);
         return EmitLineValueRecord(
-            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                   current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+               EmitComputeTraceEvent(
+                   current_statement_id_,
+                   kTraceEventValue,
+                   current_function_id_,
+                   target.name_id,
+                   value,
+                   target.type_id);
     }
 
     bool LowerCompoundAssignment(const Statement& statement) {
@@ -2323,7 +2770,14 @@ private:
 
             EmitStore(destination, value);
             return EmitLineValueRecord(
-                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                       current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+                   EmitComputeTraceEvent(
+                       current_statement_id_,
+                       kTraceEventValue,
+                       current_function_id_,
+                       target.name_id,
+                       value,
+                       target.type_id);
         }
 
         const auto address = BuildLValueAddress(statement.a);
@@ -2333,7 +2787,14 @@ private:
 
         EmitStore(address, value);
         return EmitLineValueRecord(
-            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                   current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+               EmitComputeTraceEvent(
+                   current_statement_id_,
+                   kTraceEventValue,
+                   current_function_id_,
+                   target.name_id,
+                   value,
+                   target.type_id);
     }
 
     bool LowerIncrementDecrement(const Statement& statement) {
@@ -2373,7 +2834,14 @@ private:
 
             EmitStore(destination, value);
             return EmitLineValueRecord(
-                current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                       current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+                   EmitComputeTraceEvent(
+                       current_statement_id_,
+                       kTraceEventValue,
+                       current_function_id_,
+                       target.name_id,
+                       value,
+                       target.type_id);
         }
 
         const auto address = BuildLValueAddress(statement.a);
@@ -2383,7 +2851,14 @@ private:
 
         EmitStore(address, value);
         return EmitLineValueRecord(
-            current_statement_id_, value, typed_.lvalues[statement.a].type_id);
+                   current_statement_id_, value, typed_.lvalues[statement.a].type_id) &&
+               EmitComputeTraceEvent(
+                   current_statement_id_,
+                   kTraceEventValue,
+                   current_function_id_,
+                   target.name_id,
+                   value,
+                   target.type_id);
     }
 
     bool LowerIf(const Statement& statement) {
@@ -2403,6 +2878,22 @@ private:
                 "feather_branch_predicate");
             if (condition == GPU::IR::InvalidValueId ||
                 !EmitBranchDivergenceCapture(condition)) {
+                return false;
+            }
+        }
+        if (inputs_.diagnostic_mode == kDiagnosticComputeTrace) {
+            condition = MaterializeOnce(
+                condition,
+                GPU::IR::Type::Bool(),
+                "__feather_compute_trace_predicate");
+            if (condition == GPU::IR::InvalidValueId ||
+                !EmitComputeTraceEvent(
+                    current_statement_id_,
+                    kTraceEventBranchPredicate,
+                    current_function_id_,
+                    NoIndex,
+                    condition,
+                    typed_.expressions[statement.a].type_id)) {
                 return false;
             }
         }
@@ -2546,6 +3037,16 @@ private:
 
     bool LowerReturn(const Statement& statement) {
         if (statement.a == NoIndex) {
+            if (inputs_.diagnostic_mode == kDiagnosticComputeTrace) {
+                const bool ended = current_function_id_ == typed_.entry_function
+                                       ? EmitComputeTraceEntryEnd(
+                                             current_function_id_, current_statement_id_)
+                                       : EmitComputeTraceCallableEnd(
+                                             current_function_id_, current_statement_id_);
+                if (!ended) {
+                    return false;
+                }
+            }
             EmitReturn(GPU::IR::InvalidValueId);
             return true;
         }
@@ -2565,6 +3066,26 @@ private:
             !EmitLineValueRecord(
                 current_statement_id_, value, typed_.expressions[statement.a].type_id)) {
             return false;
+        }
+
+        if (!EmitComputeTraceEvent(
+                current_statement_id_,
+                kTraceEventValue,
+                current_function_id_,
+                NoIndex,
+                value,
+                typed_.expressions[statement.a].type_id)) {
+            return false;
+        }
+        if (inputs_.diagnostic_mode == kDiagnosticComputeTrace) {
+            const bool ended = current_function_id_ == typed_.entry_function
+                                   ? EmitComputeTraceEntryEnd(
+                                         current_function_id_, current_statement_id_)
+                                   : EmitComputeTraceCallableEnd(
+                                         current_function_id_, current_statement_id_);
+            if (!ended) {
+                return false;
+            }
         }
 
         EmitReturn(value);
@@ -2595,14 +3116,18 @@ private:
         return captured;
     }
 
-    std::optional<CallableBody> LowerCallableStatementList(uint32_t statement_id) {
+    std::optional<CallableBody> LowerCallableStatementList(
+        uint32_t statement_id,
+        uint32_t function_id) {
         const auto previous_capture = capture_;
         const auto previous_callable_blocks = callable_blocks_;
         std::vector<GPU::IR::Statement> captured;
         std::vector<GPU::IR::Block> blocks;
         capture_ = &captured;
         callable_blocks_ = &blocks;
-        const auto ok = LowerStatement(statement_id);
+        const auto ok = EmitComputeTraceCallableStart(function_id, statement_id) &&
+                        LowerStatement(statement_id) &&
+                        EmitComputeTraceCallableEnd(function_id, statement_id);
         capture_ = previous_capture;
         callable_blocks_ = previous_callable_blocks;
         if (!ok) {
@@ -4759,6 +5284,7 @@ private:
     uint32_t diagnostic_count_resource_count_ = 0;
     uint32_t diagnostic_site_suppression_depth_ = 0;
     uint32_t current_statement_id_ = NoIndex;
+    uint32_t current_function_id_ = NoIndex;
     bool branch_divergence_site_emitted_ = false;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;

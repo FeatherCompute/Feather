@@ -652,6 +652,22 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void ComputeTraceStreamV6HasStableSequentialLayout()
+    {
+        Assert.Equal(6u, (uint)FeKernelDiagnosticMode.ComputeTrace);
+        Assert.Equal(32, Marshal.SizeOf<FeKernelDiagnosticConfigV6>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticConfigV6>(nameof(FeKernelDiagnosticConfigV6.AbiVersion)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeKernelDiagnosticConfigV6>(nameof(FeKernelDiagnosticConfigV6.RecordCapacity)).ToInt32());
+        Assert.Equal(12, Marshal.OffsetOf<FeKernelDiagnosticConfigV6>(nameof(FeKernelDiagnosticConfigV6.SelectedX)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<FeKernelDiagnosticConfigV6>(nameof(FeKernelDiagnosticConfigV6.Reserved)).ToInt32());
+        Assert.Equal(40, Marshal.SizeOf<FeKernelDiagnosticLayoutV6>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticLayoutV6>(nameof(FeKernelDiagnosticLayoutV6.AbiVersion)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticLayoutV6>(nameof(FeKernelDiagnosticLayoutV6.HeaderStrideBytes)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<FeKernelDiagnosticLayoutV6>(nameof(FeKernelDiagnosticLayoutV6.EventSchemaVersion)).ToInt32());
+        Assert.Equal(36, Marshal.OffsetOf<FeKernelDiagnosticLayoutV6>(nameof(FeKernelDiagnosticLayoutV6.Reserved)).ToInt32());
+    }
+
+    [Fact]
     public void TextureDescriptorHasStableSequentialLayout()
     {
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());

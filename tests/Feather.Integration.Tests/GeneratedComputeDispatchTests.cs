@@ -6207,6 +6207,100 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void ComputeTraceCapturesSelectedInvocationCallStackValuesAndBranchPath()
+    {
+        using var input = GPU.CreateBuffer<float>([1f, 8f, -1f]);
+        using var output = GPU.CreateBuffer<float>(3);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<TypedCallableControlFlowKernel>();
+        Assert.DoesNotContain("__feather_compute_trace", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+
+        using var capture = GPU.Context.BeginComputeTraceCapture(
+            typeof(TypedCallableControlFlowKernel).FullName!,
+            targetDispatchIndex: 0,
+            selectedInvocation: new int3(1, 0, 0),
+            recordCapacity: 256);
+        using (GpuFence preparation = capture.PrepareRecordLayout())
+        {
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
+        Assert.Throws<InvalidOperationException>(capture.PrepareRecordLayout);
+
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<TypedCallableControlFlowKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        Assert.Contains("__feather_compute_trace", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new TypedCallableControlFlowKernel(input.AsReadOnly(), output.AsReadWrite()),
+                3);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuComputeTraceResult result = capture.CompleteAndRead();
+        Assert.True(result.SelectionMatched);
+        Assert.True(result.InvocationCompleted);
+        Assert.True(result.IsReplayable);
+        Assert.Equal(0u, result.DroppedCount);
+        Assert.Equal(result.AttemptedCount, result.CommittedCount);
+        Assert.Equal(new int3(1, 0, 0), result.SelectedInvocation);
+        Assert.Equal(new int3(1, 0, 0), result.SelectedWorkgroup);
+        Assert.Equal(new int3(0, 0, 0), result.SelectedLocalInvocation);
+        Assert.Equal(GpuComputeTraceEventKind.FunctionEnter, result.Events[0].Kind);
+        Assert.Equal(0u, result.Events[0].CallDepth);
+        Assert.Equal(GpuComputeTraceEventKind.InvocationEnd, result.Events[^1].Kind);
+        Assert.Contains(result.Events, static traceEvent =>
+            traceEvent.Kind == GpuComputeTraceEventKind.FunctionEnter && traceEvent.CallDepth == 1u);
+        Assert.Contains(result.Events, static traceEvent =>
+            traceEvent.Kind == GpuComputeTraceEventKind.FunctionExit && traceEvent.CallDepth == 1u);
+        Assert.Contains(result.Events, static traceEvent =>
+            traceEvent.Kind == GpuComputeTraceEventKind.BranchPredicate &&
+            traceEvent.ValueType == GpuLineValueType.Bool32 &&
+            traceEvent.RawComponents.SequenceEqual([1u]));
+        Assert.Contains(result.Events, static traceEvent =>
+            traceEvent.Kind == GpuComputeTraceEventKind.Value &&
+            traceEvent.ValueType == GpuLineValueType.Float32 &&
+            traceEvent.RawComponents.Any(bits => BitConverter.UInt32BitsToSingle(bits) == 24f));
+        Assert.Equal(Enumerable.Range(0, result.Events.Count).Select(static value => (uint)value),
+            result.Events.Select(static traceEvent => traceEvent.Sequence));
+        Assert.Equal([3f, 6f, -1f], output.ToArray());
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<TypedCallableControlFlowKernel>());
+    }
+
+    [Fact]
+    public void ComputeTraceOverflowIsExplicitlyNotReplayable()
+    {
+        using var input = GPU.CreateBuffer<float>([8f]);
+        using var output = GPU.CreateBuffer<float>(1);
+        using var capture = GPU.Context.BeginComputeTraceCapture(
+            typeof(TypedCallableControlFlowKernel).FullName!,
+            targetDispatchIndex: 0,
+            selectedInvocation: new int3(0, 0, 0),
+            recordCapacity: 2);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new TypedCallableControlFlowKernel(input.AsReadOnly(), output.AsReadWrite()),
+                1);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuComputeTraceResult result = capture.CompleteAndRead();
+        Assert.True(result.InvocationCompleted);
+        Assert.False(result.IsReplayable);
+        Assert.Equal(2u, result.CommittedCount);
+        Assert.True(result.DroppedCount > 0u);
+        Assert.Equal(result.AttemptedCount, result.CommittedCount + result.DroppedCount);
+        Assert.Equal(2, result.Events.Count);
+        Assert.Equal([6f], output.ToArray());
+    }
+
+    [Fact]
     public void ExecutionHeatRejectsOverlappingAndUnmatchedCaptures()
     {
         using var capture = GPU.Context.BeginExecutionHeatCapture("Missing.Generated.Kernel");

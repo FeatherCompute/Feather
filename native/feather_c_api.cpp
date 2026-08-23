@@ -4590,7 +4590,8 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE ||
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN ||
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT ||
-        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE) {
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE ||
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_COMPUTE_TRACE) {
         if (kernel.diagnostic_binding == UINT32_MAX || kernel.diagnostic_site_count == 0) {
             return false;
         }
@@ -4606,7 +4607,9 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                               ? "__feather_ubsan_stream"
                           : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT
                               ? "__feather_print_assert_stream"
-                              : "__feather_branch_divergence_stream";
+                          : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE
+                              ? "__feather_branch_divergence_stream"
+                              : "__feather_compute_trace_stream";
         diagnostic.element_type = "uint";
         inputs->resources.push_back(std::move(diagnostic));
     }
@@ -14183,6 +14186,80 @@ FE_API FeResult fe_kernel_configure_diagnostics_v5(
     });
 }
 
+FE_API FeResult fe_kernel_configure_diagnostics_v6(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV6* config) {
+    return protect([&] {
+        constexpr uint32_t kMaximumRecordCapacity = 4096u;
+        if (config == nullptr || config->abi_version != 6u ||
+            config->mode != FE_KERNEL_DIAGNOSTIC_COMPUTE_TRACE ||
+            config->record_capacity == 0u || config->record_capacity > kMaximumRecordCapacity ||
+            config->flags != 0u || config->reserved != 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Compute-trace diagnostic configuration is unsupported.");
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Compute-trace diagnostics do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536 ||
+            parsed.typed_module.functions.empty()) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Compute trace requires retained typed compute FEIR.");
+        }
+
+        uint32_t maximum_binding = 0;
+        bool has_binding = false;
+        for (const auto& resource : parsed.resources) {
+            maximum_binding = has_binding ? std::max(maximum_binding, resource.binding) : resource.binding;
+            has_binding = true;
+        }
+        if (has_binding && maximum_binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute-trace diagnostic binding space is exhausted.");
+        }
+        const uint32_t binding = has_binding ? maximum_binding + 1u : 0u;
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = config->mode;
+        state.diagnostic_binding = binding;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        state.diagnostic_source_site = UINT32_MAX;
+        state.diagnostic_selected_x = config->selected_x;
+        state.diagnostic_selected_y = config->selected_y;
+        state.diagnostic_selected_z = config->selected_z;
+        state.diagnostic_header_stride = 64u;
+        state.diagnostic_record_stride = 64u;
+        state.diagnostic_record_capacity = config->record_capacity;
+        state.diagnostic_flags = 0u;
+        state.diagnostic_filter_mode = 0u;
+        state.diagnostic_logical_x = 0u;
+        state.diagnostic_logical_y = 0u;
+        state.diagnostic_logical_z = 0u;
+        state.diagnostic_mask_header_stride = 0u;
+        state.diagnostic_mask_cell_stride = 0u;
+        state.diagnostic_value_type_tag = 0u;
+        state.diagnostic_component_count = 0u;
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_get_diagnostic_layout(FeKernelHandle kernel, FeKernelDiagnosticLayout* out_layout) {
     return protect([&] {
         if (out_layout == nullptr) {
@@ -14349,6 +14426,41 @@ FE_API FeResult fe_kernel_get_diagnostic_layout_v5(
             state.diagnostic_header_stride,
             state.diagnostic_record_stride,
             state.diagnostic_record_capacity,
+            state.diagnostic_flags,
+            0u};
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_get_diagnostic_layout_v6(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV6* out_layout) {
+    return protect([&] {
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Compute-trace diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_COMPUTE_TRACE ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0u ||
+            state.diagnostic_header_stride != 64u || state.diagnostic_record_stride != 64u ||
+            state.diagnostic_record_capacity == 0u || state.diagnostic_flags != 0u) {
+            return fail(FE_ERROR_UNSUPPORTED, "Compute-trace diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayoutV6{
+            6u,
+            state.diagnostic_mode,
+            state.diagnostic_binding,
+            state.diagnostic_site_count,
+            state.diagnostic_header_stride,
+            state.diagnostic_record_stride,
+            state.diagnostic_record_capacity,
+            1u,
             state.diagnostic_flags,
             0u};
         return ok();

@@ -37,7 +37,8 @@ public enum FeKernelDiagnosticMode : uint
     LineValue = 2,
     Ubsan = 3,
     PrintAssert = 4,
-    BranchDivergence = 5
+    BranchDivergence = 5,
+    ComputeTrace = 6
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -244,6 +245,54 @@ public readonly struct FeKernelDiagnosticLayoutV5
     public readonly uint RecordStrideBytes;
     public readonly uint RecordCapacity;
     public readonly uint RequiredSubgroupFeatures;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV6
+{
+    public FeKernelDiagnosticConfigV6(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint recordCapacity,
+        uint selectedX,
+        uint selectedY,
+        uint selectedZ,
+        uint flags,
+        uint reserved)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        RecordCapacity = recordCapacity;
+        SelectedX = selectedX;
+        SelectedY = selectedY;
+        SelectedZ = selectedZ;
+        Flags = flags;
+        Reserved = reserved;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint RecordCapacity;
+    public readonly uint SelectedX;
+    public readonly uint SelectedY;
+    public readonly uint SelectedZ;
+    public readonly uint Flags;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV6
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SiteCount;
+    public readonly uint HeaderStrideBytes;
+    public readonly uint RecordStrideBytes;
+    public readonly uint RecordCapacity;
+    public readonly uint EventSchemaVersion;
+    public readonly uint Flags;
     public readonly uint Reserved;
 }
 

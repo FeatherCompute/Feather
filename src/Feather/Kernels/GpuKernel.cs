@@ -288,6 +288,46 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel CreateComputeTrace<TKernel>(
+        GpuContext context,
+        GpuComputeTraceCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "GPU compute-trace diagnostics do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV6(
+                GpuComputeTraceCapture.AbiVersion,
+                FeKernelDiagnosticMode.ComputeTrace,
+                checked((uint)capture.RecordCapacity),
+                checked((uint)capture.SelectedInvocation.X),
+                checked((uint)capture.SelectedInvocation.Y),
+                checked((uint)capture.SelectedInvocation.Z),
+                flags: 0,
+                reserved: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v6(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v6(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {
