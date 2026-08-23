@@ -90,6 +90,68 @@ public sealed class GpuLineValueCapture : IDisposable, IGpuDiagnosticCapture
         get { lock (gate) { return matchedDispatchCount; } }
     }
 
+    /// <summary>
+    /// Allocates and queues zero-initialization of the fixed value and sink records before a
+    /// host opens timestamp intervals. The returned fence must complete before the matching
+    /// dispatch. Ordinary kernels never call this profile-only preparation path.
+    /// </summary>
+    public GpuFence PrepareRecordLayout()
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (completed || kernel is not null || record is not null || sink is not null)
+            {
+                throw new InvalidOperationException(
+                    "The line-value record layout can only be prepared once before dispatch.");
+            }
+        }
+
+        GpuBuffer<uint>? preparedRecord = GpuBuffer<uint>.Create(
+            context,
+            RecordWordCount,
+            BufferAccess.ReadWrite);
+        GpuBuffer<uint>? preparedSink = GpuBuffer<uint>.Create(
+            context,
+            RecordWordCount,
+            BufferAccess.ReadWrite);
+        using var zeroSource = GpuBuffer<uint>.Create(
+            context,
+            new uint[RecordWordCount],
+            BufferAccess.ReadOnly);
+        using var commands = context.Queue.CreateCommandList();
+        commands.CopyBuffer(zeroSource, preparedRecord);
+        commands.CopyBuffer(zeroSource, preparedSink);
+        commands.Close();
+        GpuFence? preparationFence = null;
+        try
+        {
+            preparationFence = context.Queue.Submit(commands);
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                if (completed || kernel is not null || record is not null || sink is not null)
+                {
+                    throw new InvalidOperationException(
+                        "The line-value record layout changed while it was being prepared.");
+                }
+                record = preparedRecord;
+                sink = preparedSink;
+                preparedRecord = null;
+                preparedSink = null;
+            }
+            GpuFence result = preparationFence;
+            preparationFence = null;
+            return result;
+        }
+        finally
+        {
+            preparationFence?.Dispose();
+            preparedRecord?.Dispose();
+            preparedSink?.Dispose();
+        }
+    }
+
     bool IGpuDiagnosticCapture.TryGetOrCreateKernel<TKernel>(
         bool autoDiff,
         out GpuKernel diagnosticKernel)
@@ -129,8 +191,16 @@ public sealed class GpuLineValueCapture : IDisposable, IGpuDiagnosticCapture
                 throw new InvalidDataException("The native line-value record ABI is unsupported.");
             }
 
-            record = GpuBuffer<uint>.Create(context, new uint[RecordWordCount], BufferAccess.ReadWrite);
-            sink = GpuBuffer<uint>.Create(context, new uint[RecordWordCount], BufferAccess.ReadWrite);
+            if ((record is null) != (sink is null))
+                throw new InvalidDataException("The prepared line-value record layout is incomplete.");
+            record ??= GpuBuffer<uint>.Create(
+                context,
+                new uint[RecordWordCount],
+                BufferAccess.ReadWrite);
+            sink ??= GpuBuffer<uint>.Create(
+                context,
+                new uint[RecordWordCount],
+                BufferAccess.ReadWrite);
             layout = resolvedLayout;
             kernel = attachedKernel;
         }

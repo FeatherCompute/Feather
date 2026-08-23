@@ -5745,6 +5745,11 @@ public class ControlFlowDispatchTests
             sourceSite,
             targetDispatchIndex: 0,
             new int3(2, 0, 0));
+        using (GpuFence preparation = capture.PrepareRecordLayout())
+        {
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
+        Assert.Throws<InvalidOperationException>(capture.PrepareRecordLayout);
         GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<DynamicForSumKernel>();
         Assert.NotSame(ordinaryKernel, diagnosticKernel);
         Assert.Contains("floatBitsToUint", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);

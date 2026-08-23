@@ -205,6 +205,11 @@ dynamic occurrence count, and the raw bits of the LAST bool/int/uint/float32 sca
 value. Unsupported sites and aggregate types fail closed. This is source-value evidence from an
 instrumented variant; it is not line timing, a PC sample, or a hardware Hot Path.
 
+Hosts that wrap diagnostic execution in GPU timestamp intervals call
+`GpuLineValueCapture.PrepareRecordLayout()` first and wait its exact fence. This initializes the
+private value and sink records before timestamp recording begins; it remains an explicit Profile
+operation and is never part of an ordinary dispatch.
+
 ## Errors
 
 Native failures throw `FeatherNativeException`. Generator failures appear as `FE0001`-style diagnostics. See [Diagnostics](../diagnostics.md).
