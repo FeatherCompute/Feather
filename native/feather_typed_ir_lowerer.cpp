@@ -22,6 +22,22 @@ constexpr uint8_t kAccessRead = 1;
 constexpr uint8_t kAccessWrite = 2;
 constexpr uint8_t kAccessSample = 4;
 
+constexpr uint32_t kDiagnosticExecutionHeat = 1;
+constexpr uint32_t kDiagnosticLineValue = 2;
+constexpr uint32_t kDiagnosticUbsan = 3;
+constexpr uint32_t kUbsanCheckFloatDivideByZero = 1u << 0;
+constexpr uint32_t kUbsanCheckSqrtDomain = 1u << 1;
+constexpr uint32_t kUbsanCheckLogDomain = 1u << 2;
+constexpr uint32_t kUbsanCheckNonFinite = 1u << 3;
+constexpr uint32_t kUbsanCheckBufferBounds = 1u << 4;
+
+constexpr uint32_t kUbsanIssueDivideByZero = 1;
+constexpr uint32_t kUbsanIssueSqrtDomain = 2;
+constexpr uint32_t kUbsanIssueLogDomain = 3;
+constexpr uint32_t kUbsanIssueNaN = 4;
+constexpr uint32_t kUbsanIssueInfinity = 5;
+constexpr uint32_t kUbsanIssueBufferOob = 6;
+
 constexpr uint8_t kFunctionCompute1D = 0;
 constexpr uint8_t kFunctionCompute2D = 1;
 constexpr uint8_t kFunctionCompute3D = 2;
@@ -107,6 +123,8 @@ struct RegisteredResource {
     GPU::IR::ResourceId id = GPU::IR::InvalidResourceId;
     uint8_t kind = 0;
     uint8_t access = 0;
+    GPU::IR::ResourceId element_count = GPU::IR::InvalidResourceId;
+    GPU::IR::Type element_type;
 };
 
 GPU::IR::ResourceAccess ToResourceAccess(uint8_t access) {
@@ -306,6 +324,8 @@ private:
     bool RegisterResources() {
         for (const auto& resource : inputs_.resources) {
             GPU::IR::ResourceId id = GPU::IR::InvalidResourceId;
+            GPU::IR::ResourceId element_count = GPU::IR::InvalidResourceId;
+            GPU::IR::Type registered_type;
             if (resource.kind == kResourceKindBuffer) {
                 const auto type = TypeFromName(resource.element_type);
                 if (!type.IsValid()) {
@@ -315,6 +335,26 @@ private:
 
                 id = builder_.AddBuffer(resource.binding, type, ToResourceAccess(resource.access),
                                         BufferName(resource.binding));
+                registered_type = type;
+                if (inputs_.diagnostic_mode == kDiagnosticUbsan &&
+                    (inputs_.diagnostic_flags & kUbsanCheckBufferBounds) != 0u &&
+                    resource.binding != inputs_.diagnostic_binding) {
+                    if (resource.element_count_data == nullptr || *resource.element_count_data == 0u) {
+                        return Fail("UBSan buffer resource '" + resource.name +
+                                    "' is missing its runtime element count");
+                    }
+                    const auto hidden_binding = UINT32_MAX - 16u - diagnostic_count_resource_count_++;
+                    element_count = builder_.AddPushConstant(
+                        hidden_binding,
+                        GPU::IR::Type::UInt(),
+                        "__feather_ubsan_buffer_count_" + std::to_string(resource.binding),
+                        resource.element_count_data,
+                        sizeof(uint32_t),
+                        alignof(uint32_t));
+                    if (element_count == GPU::IR::InvalidResourceId) {
+                        return Fail("EasyGPU rejected the UBSan buffer-length push constant");
+                    }
+                }
             } else if (resource.kind == kResourceKindTexture2D || resource.kind == kResourceKindTexture3D) {
                 const auto is_texture3d = resource.kind == kResourceKindTexture3D;
                 if (resource.width == 0 || resource.height == 0 ||
@@ -370,20 +410,28 @@ private:
             }
 
             resources_by_name_[resource.name] = id;
-            resource_infos_by_name_[resource.name] = RegisteredResource{id, resource.kind, resource.access};
+            resource_infos_by_name_[resource.name] =
+                RegisteredResource{id, resource.kind, resource.access, element_count, registered_type};
             resources_by_binding_[resource.binding] = id;
-            resource_infos_by_binding_[resource.binding] = RegisteredResource{id, resource.kind, resource.access};
+            resource_infos_by_binding_[resource.binding] =
+                RegisteredResource{id, resource.kind, resource.access, element_count, registered_type};
         }
 
-        if (inputs_.diagnostic_mode == 1 || inputs_.diagnostic_mode == 2) {
+        if (inputs_.diagnostic_mode == kDiagnosticExecutionHeat ||
+            inputs_.diagnostic_mode == kDiagnosticLineValue ||
+            inputs_.diagnostic_mode == kDiagnosticUbsan) {
             const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
             if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
                 return Fail("diagnostic buffer is missing from the lowering inputs");
             }
             diagnostic_sites_resource_ = diagnostic->second;
-            if (inputs_.diagnostic_mode == 2 &&
+            if (inputs_.diagnostic_mode == kDiagnosticLineValue &&
                 inputs_.diagnostic_source_site >= inputs_.diagnostic_site_count) {
                 return Fail("line-value source site is outside the configured diagnostic ABI");
+            }
+            if (inputs_.diagnostic_mode == kDiagnosticUbsan &&
+                (inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags == 0u)) {
+                return Fail("UBSan stream capacity or enabled-check mask is invalid");
             }
         }
 
@@ -1170,7 +1218,7 @@ private:
                 return false;
             }
 
-            value = MaterializeLineValueIfSelected(
+            value = MaterializeDiagnosticValue(
                 statement_id, value, typed_.expressions[statement.a].type_id);
             if (value == GPU::IR::InvalidValueId) {
                 return false;
@@ -1404,6 +1452,413 @@ private:
         return true;
     }
 
+    bool UbsanEnabled(uint32_t flag) const {
+        return inputs_.diagnostic_mode == kDiagnosticUbsan &&
+               (inputs_.diagnostic_flags & flag) != 0u;
+    }
+
+    std::optional<std::vector<GPU::IR::Statement>> CaptureDiagnosticStatements(
+        const std::function<bool()>& emit) {
+        const auto previous_capture = capture_;
+        std::vector<GPU::IR::Statement> statements;
+        capture_ = &statements;
+        const auto succeeded = emit();
+        capture_ = previous_capture;
+        if (!succeeded) {
+            return std::nullopt;
+        }
+        return statements;
+    }
+
+    GPU::IR::ValueId MaterializeOnce(
+        GPU::IR::ValueId value,
+        GPU::IR::Type type,
+        std::string_view prefix) {
+        if (value == GPU::IR::InvalidValueId || !type.IsValid()) {
+            return GPU::IR::InvalidValueId;
+        }
+        const auto name = UniqueGlslName(std::string(prefix));
+        const auto local = builder_.LocalVariable(type, name);
+        if (name.empty() || local == GPU::IR::InvalidValueId) {
+            return GPU::IR::InvalidValueId;
+        }
+        EmitLocalDeclaration(type, name, value);
+        return local;
+    }
+
+    GPU::IR::ValueId UbsanWord(uint32_t index) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(index) + "u");
+        return literal == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, literal);
+    }
+
+    GPU::IR::ValueId UbsanWord(GPU::IR::ValueId base, uint32_t offset) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(offset) + "u");
+        const auto index = builder_.Binary(GPU::IR::BinaryOp::Add, base, literal);
+        return literal == GPU::IR::InvalidValueId || index == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, index);
+    }
+
+    GPU::IR::ValueId UbsanUInt(GPU::IR::ValueId value) {
+        const std::array arguments{value};
+        return value == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.Intrinsic("uint", GPU::IR::Type::UInt(), arguments);
+    }
+
+    GPU::IR::ValueId UbsanFloatBits(GPU::IR::ValueId value) {
+        const std::array arguments{value};
+        return value == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.Intrinsic("floatBitsToUint", GPU::IR::Type::UInt(), arguments);
+    }
+
+    bool EmitUbsanIssue(
+        uint32_t code,
+        uint32_t source_site,
+        GPU::IR::ValueId detail0,
+        GPU::IR::ValueId detail1,
+        GPU::IR::ValueId detail2) {
+        if (inputs_.diagnostic_mode != kDiagnosticUbsan ||
+            diagnostic_sites_resource_ == GPU::IR::InvalidResourceId ||
+            source_site >= inputs_.diagnostic_site_count ||
+            detail0 == GPU::IR::InvalidValueId ||
+            detail1 == GPU::IR::InvalidValueId ||
+            detail2 == GPU::IR::InvalidValueId) {
+            return Fail("UBSan issue identity or payload is unavailable");
+        }
+
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto one = builder_.Literal(uint_type, "1u");
+        const auto eight = builder_.Literal(uint_type, "8u");
+        const auto four = builder_.Literal(uint_type, "4u");
+        const auto attempted_target = UbsanWord(0u);
+        const std::array increment_arguments{one};
+        const auto attempted = builder_.Atomic(
+            GPU::IR::AtomicOp::Add,
+            uint_type,
+            attempted_target,
+            increment_arguments);
+        const auto slot = MaterializeOnce(attempted, uint_type, "__feather_ubsan_slot");
+        const auto capacity = UbsanWord(3u);
+        const auto has_capacity = builder_.Compare(GPU::IR::CompareOp::Less, slot, capacity);
+        const auto record_offset = builder_.Binary(GPU::IR::BinaryOp::Mul, slot, eight);
+        const auto record_base = builder_.Binary(GPU::IR::BinaryOp::Add, four, record_offset);
+        if (one == GPU::IR::InvalidValueId || eight == GPU::IR::InvalidValueId ||
+            four == GPU::IR::InvalidValueId || attempted == GPU::IR::InvalidValueId ||
+            slot == GPU::IR::InvalidValueId || capacity == GPU::IR::InvalidValueId ||
+            has_capacity == GPU::IR::InvalidValueId || record_offset == GPU::IR::InvalidValueId ||
+            record_base == GPU::IR::InvalidValueId) {
+            return Fail("UBSan bounded record reservation could not be lowered");
+        }
+
+        const auto committed = CaptureDiagnosticStatements([&] {
+            const auto thread_x = UbsanUInt(builder_.ThreadIndexX());
+            const auto thread_y = UbsanUInt(builder_.ThreadIndexY());
+            const auto thread_z = UbsanUInt(builder_.ThreadIndexZ());
+            const auto code_value = builder_.Literal(uint_type, std::to_string(code) + "u");
+            const auto site_value = builder_.Literal(uint_type, std::to_string(source_site) + "u");
+            if (thread_x == GPU::IR::InvalidValueId || thread_y == GPU::IR::InvalidValueId ||
+                thread_z == GPU::IR::InvalidValueId || code_value == GPU::IR::InvalidValueId ||
+                site_value == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitStore(UbsanWord(record_base, 0u), code_value);
+            EmitStore(UbsanWord(record_base, 1u), site_value);
+            EmitStore(UbsanWord(record_base, 2u), thread_x);
+            EmitStore(UbsanWord(record_base, 3u), thread_y);
+            EmitStore(UbsanWord(record_base, 4u), thread_z);
+            EmitStore(UbsanWord(record_base, 5u), detail0);
+            EmitStore(UbsanWord(record_base, 6u), detail1);
+            EmitStore(UbsanWord(record_base, 7u), detail2);
+            const auto committed_increment = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                UbsanWord(1u),
+                increment_arguments);
+            if (committed_increment == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitExpression(committed_increment);
+            return true;
+        });
+        const auto dropped = CaptureDiagnosticStatements([&] {
+            const auto dropped_increment = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                UbsanWord(2u),
+                increment_arguments);
+            if (dropped_increment == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitExpression(dropped_increment);
+            return true;
+        });
+        if (!committed.has_value() || !dropped.has_value()) {
+            return Fail("UBSan record commit or overflow accounting could not be lowered");
+        }
+        EmitIf(
+            has_capacity,
+            AddBlock(std::move(*committed)),
+            AddBlock(std::move(*dropped)));
+        return true;
+    }
+
+    GPU::IR::ValueId BuildUbsanSafeDivision(
+        GPU::IR::ValueId left,
+        GPU::IR::ValueId right,
+        uint32_t source_site) {
+        const auto float_type = GPU::IR::Type::Float();
+        left = MaterializeOnce(left, float_type, "__feather_ubsan_div_left");
+        right = MaterializeOnce(right, float_type, "__feather_ubsan_div_right");
+        const auto zero = builder_.Literal(float_type, "0.0");
+        const auto zero_uint = builder_.Literal(GPU::IR::Type::UInt(), "0u");
+        const auto result_name = UniqueGlslName("__feather_ubsan_div_result");
+        const auto result = builder_.LocalVariable(float_type, result_name);
+        const auto denominator_is_zero = builder_.Compare(GPU::IR::CompareOp::Equal, right, zero);
+        if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId ||
+            zero == GPU::IR::InvalidValueId || zero_uint == GPU::IR::InvalidValueId ||
+            result_name.empty() || result == GPU::IR::InvalidValueId ||
+            denominator_is_zero == GPU::IR::InvalidValueId) {
+            return InvalidValue("UBSan division guard could not be lowered");
+        }
+        EmitLocalDeclaration(float_type, result_name, zero);
+
+        const auto invalid = CaptureDiagnosticStatements([&] {
+            return EmitUbsanIssue(
+                kUbsanIssueDivideByZero,
+                source_site,
+                UbsanFloatBits(left),
+                UbsanFloatBits(right),
+                zero_uint);
+        });
+        const auto valid = CaptureDiagnosticStatements([&] {
+            const auto raw = builder_.Binary(GPU::IR::BinaryOp::Div, left, right);
+            if (raw == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitStore(result, raw);
+            return true;
+        });
+        if (!invalid.has_value() || !valid.has_value()) {
+            return InvalidValue("UBSan division branches could not be lowered");
+        }
+        EmitIf(
+            denominator_is_zero,
+            AddBlock(std::move(*invalid)),
+            AddBlock(std::move(*valid)));
+        return result;
+    }
+
+    GPU::IR::ValueId BuildUbsanSafeDomainIntrinsic(
+        std::string_view intrinsic,
+        uint32_t issue_code,
+        GPU::IR::CompareOp comparison,
+        GPU::IR::ValueId argument,
+        uint32_t source_site) {
+        const auto float_type = GPU::IR::Type::Float();
+        argument = MaterializeOnce(argument, float_type, "__feather_ubsan_domain_input");
+        const auto zero = builder_.Literal(float_type, "0.0");
+        const auto zero_uint = builder_.Literal(GPU::IR::Type::UInt(), "0u");
+        const auto invalid_domain = builder_.Compare(comparison, argument, zero);
+        const auto result_name = UniqueGlslName("__feather_ubsan_domain_result");
+        const auto result = builder_.LocalVariable(float_type, result_name);
+        if (argument == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId ||
+            zero_uint == GPU::IR::InvalidValueId || invalid_domain == GPU::IR::InvalidValueId ||
+            result_name.empty() || result == GPU::IR::InvalidValueId) {
+            return InvalidValue("UBSan domain guard could not be lowered");
+        }
+        EmitLocalDeclaration(float_type, result_name, zero);
+
+        const auto invalid = CaptureDiagnosticStatements([&] {
+            return EmitUbsanIssue(
+                issue_code,
+                source_site,
+                UbsanFloatBits(argument),
+                zero_uint,
+                zero_uint);
+        });
+        const auto valid = CaptureDiagnosticStatements([&] {
+            const std::array arguments{argument};
+            const auto raw = builder_.Intrinsic(std::string(intrinsic), float_type, arguments);
+            if (raw == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitStore(result, raw);
+            return true;
+        });
+        if (!invalid.has_value() || !valid.has_value()) {
+            return InvalidValue("UBSan domain branches could not be lowered");
+        }
+        EmitIf(
+            invalid_domain,
+            AddBlock(std::move(*invalid)),
+            AddBlock(std::move(*valid)));
+        return result;
+    }
+
+    GPU::IR::ValueId SanitizeUbsanFiniteValue(
+        uint32_t source_site,
+        GPU::IR::ValueId value,
+        uint32_t type_id) {
+        if (!UbsanEnabled(kUbsanCheckNonFinite) || type_id >= typed_.types.size() ||
+            ToModuleType(type_id).kind != GPU::IR::Type::Kind::Float) {
+            return value;
+        }
+        const auto float_type = GPU::IR::Type::Float();
+        value = MaterializeOnce(value, float_type, "__feather_ubsan_finite_input");
+        const auto result_name = UniqueGlslName("__feather_ubsan_finite_result");
+        const auto result = builder_.LocalVariable(float_type, result_name);
+        const auto zero = builder_.Literal(float_type, "0.0");
+        const auto zero_uint = builder_.Literal(GPU::IR::Type::UInt(), "0u");
+        const std::array arguments{value};
+        const auto is_nan = builder_.Intrinsic("isnan", GPU::IR::Type::Bool(), arguments);
+        const auto is_inf = builder_.Intrinsic("isinf", GPU::IR::Type::Bool(), arguments);
+        if (value == GPU::IR::InvalidValueId || result_name.empty() ||
+            result == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId ||
+            zero_uint == GPU::IR::InvalidValueId || is_nan == GPU::IR::InvalidValueId ||
+            is_inf == GPU::IR::InvalidValueId) {
+            return InvalidValue("UBSan finite-value observation could not be lowered");
+        }
+        EmitLocalDeclaration(float_type, result_name, zero);
+
+        const auto nan_branch = CaptureDiagnosticStatements([&] {
+            return EmitUbsanIssue(
+                kUbsanIssueNaN,
+                source_site,
+                UbsanFloatBits(value),
+                zero_uint,
+                zero_uint);
+        });
+        const auto inf_branch = CaptureDiagnosticStatements([&] {
+            return EmitUbsanIssue(
+                kUbsanIssueInfinity,
+                source_site,
+                UbsanFloatBits(value),
+                zero_uint,
+                zero_uint);
+        });
+        const auto finite_branch = CaptureDiagnosticStatements([&] {
+            EmitStore(result, value);
+            return true;
+        });
+        if (!nan_branch.has_value() || !inf_branch.has_value() || !finite_branch.has_value()) {
+            return InvalidValue("UBSan finite-value branches could not be lowered");
+        }
+        const auto inf_or_finite = CaptureDiagnosticStatements([&] {
+            EmitIf(
+                is_inf,
+                AddBlock(std::move(*inf_branch)),
+                AddBlock(std::move(*finite_branch)));
+            return true;
+        });
+        if (!inf_or_finite.has_value()) {
+            return InvalidValue("UBSan finite-value fallback could not be lowered");
+        }
+        EmitIf(
+            is_nan,
+            AddBlock(std::move(*nan_branch)),
+            AddBlock(std::move(*inf_or_finite)));
+        return result;
+    }
+
+    GPU::IR::ValueId MaterializeDiagnosticValue(
+        uint32_t statement_id,
+        GPU::IR::ValueId value,
+        uint32_t type_id) {
+        value = SanitizeUbsanFiniteValue(statement_id, value, type_id);
+        if (value == GPU::IR::InvalidValueId) {
+            return value;
+        }
+        return MaterializeLineValueIfSelected(statement_id, value, type_id);
+    }
+
+    GPU::IR::ValueId BuildUbsanCheckedResourceRead(
+        const RegisteredResource& resource,
+        GPU::IR::ValueId index,
+        uint32_t index_type_id,
+        uint32_t source_site) {
+        if (!UbsanEnabled(kUbsanCheckBufferBounds) ||
+            resource.kind != kResourceKindBuffer ||
+            resource.element_count == GPU::IR::InvalidResourceId ||
+            index_type_id >= typed_.types.size()) {
+            return builder_.ResourceElement(resource.id, index);
+        }
+
+        const auto result_type = resource.element_type;
+        const auto supported_result =
+            result_type.kind == GPU::IR::Type::Kind::Bool ||
+            result_type.kind == GPU::IR::Type::Kind::Int ||
+            result_type.kind == GPU::IR::Type::Kind::UInt ||
+            result_type.kind == GPU::IR::Type::Kind::Float;
+        const auto index_type = ToModuleType(index_type_id);
+        if (!supported_result ||
+            (index_type.kind != GPU::IR::Type::Kind::Int &&
+             index_type.kind != GPU::IR::Type::Kind::UInt)) {
+            return builder_.ResourceElement(resource.id, index);
+        }
+
+        index = MaterializeOnce(index, index_type, "__feather_ubsan_buffer_index");
+        const auto count = builder_.PushConstant(resource.element_count);
+        GPU::IR::ValueId raw_index = index;
+        GPU::IR::ValueId below_zero = GPU::IR::InvalidValueId;
+        if (index_type.kind == GPU::IR::Type::Kind::Int) {
+            raw_index = UbsanUInt(index);
+            const auto signed_zero = builder_.Literal(GPU::IR::Type::Int(), "0");
+            below_zero = builder_.Compare(GPU::IR::CompareOp::Less, index, signed_zero);
+        }
+        const auto beyond_end = builder_.Compare(GPU::IR::CompareOp::GreaterEqual, raw_index, count);
+        auto invalid_index = beyond_end;
+        if (below_zero != GPU::IR::InvalidValueId) {
+            invalid_index = builder_.Binary(
+                GPU::IR::BinaryOp::LogicalOr,
+                below_zero,
+                beyond_end);
+        }
+        const auto fallback_literal = result_type.kind == GPU::IR::Type::Kind::Bool ? "false" : "0";
+        const auto fallback = builder_.Literal(result_type, fallback_literal);
+        const auto zero_uint = builder_.Literal(GPU::IR::Type::UInt(), "0u");
+        const auto result_name = UniqueGlslName("__feather_ubsan_buffer_value");
+        const auto result = builder_.LocalVariable(result_type, result_name);
+        if (index == GPU::IR::InvalidValueId || count == GPU::IR::InvalidValueId ||
+            raw_index == GPU::IR::InvalidValueId || beyond_end == GPU::IR::InvalidValueId ||
+            invalid_index == GPU::IR::InvalidValueId || fallback == GPU::IR::InvalidValueId ||
+            zero_uint == GPU::IR::InvalidValueId || result_name.empty() ||
+            result == GPU::IR::InvalidValueId) {
+            return InvalidValue("UBSan buffer bounds guard could not be lowered");
+        }
+        EmitLocalDeclaration(result_type, result_name, fallback);
+
+        const auto invalid = CaptureDiagnosticStatements([&] {
+            return EmitUbsanIssue(
+                kUbsanIssueBufferOob,
+                source_site,
+                raw_index,
+                count,
+                zero_uint);
+        });
+        const auto valid = CaptureDiagnosticStatements([&] {
+            const auto loaded = builder_.ResourceElement(resource.id, index);
+            if (loaded == GPU::IR::InvalidValueId) {
+                return false;
+            }
+            EmitStore(result, loaded);
+            return true;
+        });
+        if (!invalid.has_value() || !valid.has_value()) {
+            return InvalidValue("UBSan buffer bounds branches could not be lowered");
+        }
+        EmitIf(
+            invalid_index,
+            AddBlock(std::move(*invalid)),
+            AddBlock(std::move(*valid)));
+        return result;
+    }
+
     bool EmitDiagnosticSiteHitsForSequence(uint32_t statement_id) {
         if (statement_id >= typed_.statements.size()) {
             return Fail("diagnostic statement sequence is outside the section 7 statement table");
@@ -1511,7 +1966,12 @@ private:
             return local_values_[*name] != GPU::IR::InvalidValueId;
         }
 
-        const auto value = BuildExpression(statement.a);
+        auto value = BuildExpression(statement.a);
+        if (value == GPU::IR::InvalidValueId) {
+            return false;
+        }
+
+        value = MaterializeDiagnosticValue(current_statement_id_, value, statement.op);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1551,8 +2011,8 @@ private:
             return false;
         }
 
-        value = MaterializeLineValueIfSelected(current_statement_id_, value,
-                                               typed_.lvalues[statement.a].type_id);
+        value = MaterializeDiagnosticValue(current_statement_id_, value,
+                                           typed_.lvalues[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1595,13 +2055,18 @@ private:
             return false;
         }
 
-        auto value = builder_.Binary(op, left, right);
+        const auto target_type_id = typed_.lvalues[statement.a].type_id;
+        const auto target_type = ToModuleType(target_type_id);
+        auto value = op == GPU::IR::BinaryOp::Div &&
+                             UbsanEnabled(kUbsanCheckFloatDivideByZero) &&
+                             target_type.kind == GPU::IR::Type::Kind::Float
+                         ? BuildUbsanSafeDivision(left, right, current_statement_id_)
+                         : builder_.Binary(op, left, right);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
 
-        value = MaterializeLineValueIfSelected(current_statement_id_, value,
-                                               typed_.lvalues[statement.a].type_id);
+        value = MaterializeDiagnosticValue(current_statement_id_, value, target_type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1650,8 +2115,8 @@ private:
             return false;
         }
 
-        value = MaterializeLineValueIfSelected(current_statement_id_, value,
-                                               typed_.lvalues[statement.a].type_id);
+        value = MaterializeDiagnosticValue(current_statement_id_, value,
+                                           typed_.lvalues[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId) {
             return false;
         }
@@ -1840,7 +2305,7 @@ private:
             return false;
         }
 
-        value = MaterializeLineValueIfSelected(
+        value = MaterializeDiagnosticValue(
             current_statement_id_, value, typed_.expressions[statement.a].type_id);
         if (value == GPU::IR::InvalidValueId ||
             !EmitLineValueRecord(
@@ -2203,7 +2668,13 @@ private:
             return BuildTextureElement(info->id, index);
         }
 
-        return builder_.ResourceElement(info->id, index);
+        return BuildUbsanCheckedResourceRead(
+            *info,
+            index,
+            expression.a < typed_.expressions.size()
+                ? typed_.expressions[expression.a].type_id
+                : NoIndex,
+            current_statement_id_);
     }
 
     GPU::IR::ValueId BuildFieldReference(const Expression& expression) {
@@ -2266,6 +2737,16 @@ private:
         const auto right = BuildExpression(expression.b);
         if (left == GPU::IR::InvalidValueId || right == GPU::IR::InvalidValueId) {
             return GPU::IR::InvalidValueId;
+        }
+
+        if (op == GPU::IR::BinaryOp::Div &&
+            UbsanEnabled(kUbsanCheckFloatDivideByZero) &&
+            result_type.kind == GPU::IR::Type::Kind::Float &&
+            expression.a < typed_.expressions.size() &&
+            expression.b < typed_.expressions.size() &&
+            ToModuleType(typed_.expressions[expression.a].type_id).kind == GPU::IR::Type::Kind::Float &&
+            ToModuleType(typed_.expressions[expression.b].type_id).kind == GPU::IR::Type::Kind::Float) {
+            return BuildUbsanSafeDivision(left, right, current_statement_id_);
         }
 
         return builder_.Binary(op, left, right);
@@ -2414,6 +2895,25 @@ private:
             }
 
             return builder_.Binary(GPU::IR::BinaryOp::Mul, (*arguments)[0], (*arguments)[1]);
+        }
+
+        if (result_type.kind == GPU::IR::Type::Kind::Float && arguments->size() == 1) {
+            if (intrinsic == "sqrt" && UbsanEnabled(kUbsanCheckSqrtDomain)) {
+                return BuildUbsanSafeDomainIntrinsic(
+                    intrinsic,
+                    kUbsanIssueSqrtDomain,
+                    GPU::IR::CompareOp::Less,
+                    (*arguments)[0],
+                    current_statement_id_);
+            }
+            if (intrinsic == "log" && UbsanEnabled(kUbsanCheckLogDomain)) {
+                return BuildUbsanSafeDomainIntrinsic(
+                    intrinsic,
+                    kUbsanIssueLogDomain,
+                    GPU::IR::CompareOp::LessEqual,
+                    (*arguments)[0],
+                    current_statement_id_);
+            }
         }
 
         if (intrinsic == "clamp01") {
@@ -3629,6 +4129,7 @@ private:
     std::array<GPU::IR::ResourceId, 3> logical_size_resource_{GPU::IR::InvalidResourceId, GPU::IR::InvalidResourceId,
                                                               GPU::IR::InvalidResourceId};
     GPU::IR::ResourceId diagnostic_sites_resource_ = GPU::IR::InvalidResourceId;
+    uint32_t diagnostic_count_resource_count_ = 0;
     uint32_t diagnostic_site_suppression_depth_ = 0;
     uint32_t current_statement_id_ = NoIndex;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;

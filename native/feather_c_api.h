@@ -63,7 +63,8 @@ typedef enum FeShaderBinaryFormat {
 typedef enum FeKernelDiagnosticMode {
     FE_KERNEL_DIAGNOSTIC_NONE = 0,
     FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT = 1,
-    FE_KERNEL_DIAGNOSTIC_LINE_VALUE = 2
+    FE_KERNEL_DIAGNOSTIC_LINE_VALUE = 2,
+    FE_KERNEL_DIAGNOSTIC_UBSAN = 3
 } FeKernelDiagnosticMode;
 
 /** Versioned device-buffer ABI for one configured diagnostic kernel variant. */
@@ -102,6 +103,33 @@ typedef struct FeKernelDiagnosticLayoutV2 {
     uint32_t value_type_tag;
     uint32_t component_count;
 } FeKernelDiagnosticLayoutV2;
+
+/**
+ * Versioned configuration for a bounded structured diagnostic stream. Stream modes own their
+ * record schema, but share the attempted/committed/dropped/capacity header contract.
+ */
+typedef struct FeKernelDiagnosticConfigV3 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t record_capacity;
+    uint32_t flags;
+    uint32_t source_site_index;
+    uint32_t selected_x;
+    uint32_t selected_y;
+    uint32_t selected_z;
+} FeKernelDiagnosticConfigV3;
+
+/** Versioned device-buffer layout for one bounded structured diagnostic stream. */
+typedef struct FeKernelDiagnosticLayoutV3 {
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t buffer_binding;
+    uint32_t site_count;
+    uint32_t header_stride_bytes;
+    uint32_t record_stride_bytes;
+    uint32_t record_capacity;
+    uint32_t flags;
+} FeKernelDiagnosticLayoutV3;
 
 typedef enum FeMemoryBarrierFlags {
     FE_MEMORY_BARRIER_NONE = 0,
@@ -494,6 +522,12 @@ FE_API FeResult fe_kernel_configure_diagnostics_v2(
 FE_API FeResult fe_kernel_get_diagnostic_layout_v2(
     FeKernelHandle kernel,
     FeKernelDiagnosticLayoutV2* out_layout);
+FE_API FeResult fe_kernel_configure_diagnostics_v3(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV3* config);
+FE_API FeResult fe_kernel_get_diagnostic_layout_v3(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV3* out_layout);
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer);
 FE_API FeResult fe_kernel_compile(FeKernelHandle kernel);
 FE_API FeResult fe_kernel_destroy(FeKernelHandle kernel);

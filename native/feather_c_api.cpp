@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -357,8 +358,11 @@ struct KernelState {
     uint32_t diagnostic_selected_z = 0;
     uint32_t diagnostic_record_stride = 0;
     uint32_t diagnostic_record_capacity = 0;
+    uint32_t diagnostic_header_stride = 0;
+    uint32_t diagnostic_flags = 0;
     uint32_t diagnostic_value_type_tag = 0;
     uint32_t diagnostic_component_count = 0;
+    std::map<uint32_t, uint32_t> buffer_element_counts;
     int32_t logical_x = 0;
     int32_t logical_y = 0;
     int32_t logical_z = 0;
@@ -4507,6 +4511,8 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     inputs->diagnostic_selected_x = kernel.diagnostic_selected_x;
     inputs->diagnostic_selected_y = kernel.diagnostic_selected_y;
     inputs->diagnostic_selected_z = kernel.diagnostic_selected_z;
+    inputs->diagnostic_record_capacity = kernel.diagnostic_record_capacity;
+    inputs->diagnostic_flags = kernel.diagnostic_flags;
     inputs->resources.clear();
     inputs->push_constants.clear();
 
@@ -4523,6 +4529,13 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         resource_info.access = resource.access;
         resource_info.name = *name;
         resource_info.element_type = *element_type;
+
+        if (resource.kind == kIrResourceKindBuffer) {
+            const auto count = kernel.buffer_element_counts.find(resource.binding);
+            if (count != kernel.buffer_element_counts.end()) {
+                resource_info.element_count_data = const_cast<uint32_t*>(&count->second);
+            }
+        }
 
         if (resource.kind == kIrResourceKindPushConstant) {
             size_t offset = 0;
@@ -4564,7 +4577,8 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     }
 
     if (kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT ||
-        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE) {
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE ||
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN) {
         if (kernel.diagnostic_binding == UINT32_MAX || kernel.diagnostic_site_count == 0) {
             return false;
         }
@@ -4574,7 +4588,9 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
         diagnostic.access = 3; // read-write
         diagnostic.name = kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT
                               ? "__feather_execution_heat_sites"
-                              : "__feather_line_value_record";
+                          : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE
+                              ? "__feather_line_value_record"
+                              : "__feather_ubsan_stream";
         diagnostic.element_type = "uint";
         inputs->resources.push_back(std::move(diagnostic));
     }
@@ -13641,8 +13657,13 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
             state.diagnostic_binding = UINT32_MAX;
             state.diagnostic_site_count = 0;
             state.diagnostic_source_site = UINT32_MAX;
+            state.diagnostic_selected_x = 0;
+            state.diagnostic_selected_y = 0;
+            state.diagnostic_selected_z = 0;
+            state.diagnostic_header_stride = 0;
             state.diagnostic_record_stride = 0;
             state.diagnostic_record_capacity = 0;
+            state.diagnostic_flags = 0;
             state.diagnostic_value_type_tag = 0;
             state.diagnostic_component_count = 0;
             return ok();
@@ -13678,8 +13699,13 @@ FE_API FeResult fe_kernel_configure_diagnostics(FeKernelHandle kernel, uint32_t 
         state.diagnostic_binding = binding;
         state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
         state.diagnostic_source_site = UINT32_MAX;
+        state.diagnostic_selected_x = 0;
+        state.diagnostic_selected_y = 0;
+        state.diagnostic_selected_z = 0;
+        state.diagnostic_header_stride = 0;
         state.diagnostic_record_stride = sizeof(uint32_t);
         state.diagnostic_record_capacity = state.diagnostic_site_count;
+        state.diagnostic_flags = 0;
         state.diagnostic_value_type_tag = 0;
         state.diagnostic_component_count = 0;
         return ok();
@@ -13786,10 +13812,81 @@ FE_API FeResult fe_kernel_configure_diagnostics_v2(
         state.diagnostic_selected_x = config->selected_x;
         state.diagnostic_selected_y = config->selected_y;
         state.diagnostic_selected_z = config->selected_z;
+        state.diagnostic_header_stride = 0u;
         state.diagnostic_record_stride = 64u;
         state.diagnostic_record_capacity = 1u;
+        state.diagnostic_flags = 0u;
         state.diagnostic_value_type_tag = primitive->a + 1u;
         state.diagnostic_component_count = component_count;
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_configure_diagnostics_v3(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV3* config) {
+    return protect([&] {
+        constexpr uint32_t kUbsanSupportedFlags = 0x1fu;
+        constexpr uint32_t kMaximumRecordCapacity = 4096u;
+        if (config == nullptr || config->abi_version != 3u ||
+            config->mode != FE_KERNEL_DIAGNOSTIC_UBSAN ||
+            config->record_capacity == 0u || config->record_capacity > kMaximumRecordCapacity ||
+            config->flags == 0u || (config->flags & ~kUbsanSupportedFlags) != 0u ||
+            config->source_site_index != UINT32_MAX ||
+            config->selected_x != 0u || config->selected_y != 0u || config->selected_z != 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Structured diagnostic configuration is unsupported.");
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Structured diagnostics do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Structured diagnostics require bounded compute section-7 typed IR.");
+        }
+
+        uint32_t maximum_binding = 0;
+        bool has_binding = false;
+        for (const auto& resource : parsed.resources) {
+            maximum_binding = has_binding ? std::max(maximum_binding, resource.binding) : resource.binding;
+            has_binding = true;
+        }
+        if (has_binding && maximum_binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Structured diagnostic binding space is exhausted.");
+        }
+        const uint32_t binding = has_binding ? maximum_binding + 1u : 0u;
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = config->mode;
+        state.diagnostic_binding = binding;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        state.diagnostic_source_site = UINT32_MAX;
+        state.diagnostic_selected_x = 0u;
+        state.diagnostic_selected_y = 0u;
+        state.diagnostic_selected_z = 0u;
+        state.diagnostic_header_stride = 16u;
+        state.diagnostic_record_stride = 32u;
+        state.diagnostic_record_capacity = config->record_capacity;
+        state.diagnostic_flags = config->flags;
+        state.diagnostic_value_type_tag = 0u;
+        state.diagnostic_component_count = 0u;
         return ok();
     });
 }
@@ -13852,6 +13949,38 @@ FE_API FeResult fe_kernel_get_diagnostic_layout_v2(
     });
 }
 
+FE_API FeResult fe_kernel_get_diagnostic_layout_v3(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV3* out_layout) {
+    return protect([&] {
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT, "Structured diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_UBSAN ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0 ||
+            state.diagnostic_header_stride != 16u || state.diagnostic_record_stride != 32u ||
+            state.diagnostic_record_capacity == 0u || state.diagnostic_flags == 0u) {
+            return fail(FE_ERROR_UNSUPPORTED, "Structured diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayoutV3{
+            3u,
+            state.diagnostic_mode,
+            state.diagnostic_binding,
+            state.diagnostic_site_count,
+            state.diagnostic_header_stride,
+            state.diagnostic_record_stride,
+            state.diagnostic_record_capacity,
+            state.diagnostic_flags};
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBufferHandle buffer) {
     return protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -13867,8 +13996,12 @@ FE_API FeResult fe_kernel_bind_diagnostic_buffer(FeKernelHandle kernel, FeBuffer
         }
         const uint64_t required = state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT
                                       ? static_cast<uint64_t>(state.diagnostic_site_count) * sizeof(uint32_t)
-                                      : static_cast<uint64_t>(state.diagnostic_record_stride) *
-                                            state.diagnostic_record_capacity;
+                                  : state.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE
+                                      ? static_cast<uint64_t>(state.diagnostic_record_stride) *
+                                            state.diagnostic_record_capacity
+                                      : static_cast<uint64_t>(state.diagnostic_header_stride) +
+                                            static_cast<uint64_t>(state.diagnostic_record_stride) *
+                                                state.diagnostic_record_capacity;
         if (buffer_it->second.mode != 3u || buffer_it->second.stride != sizeof(uint32_t) ||
             buffer_it->second.byte_size < required) {
             return fail(FE_ERROR_INVALID_ARGUMENT,
@@ -13937,10 +14070,19 @@ FE_API FeResult fe_kernel_bind_buffer(FeKernelHandle kernel, uint32_t binding, F
     return protect([&] {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_kernels.find(kernel);
-        if (it == g_kernels.end() || g_buffers.find(buffer) == g_buffers.end()) {
+        const auto buffer_it = g_buffers.find(buffer);
+        if (it == g_kernels.end() || buffer_it == g_buffers.end()) {
             return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel or buffer handle.");
         }
         it->second.buffers[binding] = buffer;
+        if (buffer_it->second.stride != 0u &&
+            buffer_it->second.byte_size % buffer_it->second.stride == 0u &&
+            buffer_it->second.byte_size / buffer_it->second.stride <= UINT32_MAX) {
+            it->second.buffer_element_counts[binding] = static_cast<uint32_t>(
+                buffer_it->second.byte_size / buffer_it->second.stride);
+        } else {
+            it->second.buffer_element_counts[binding] = 0u;
+        }
         return ok();
     });
 }

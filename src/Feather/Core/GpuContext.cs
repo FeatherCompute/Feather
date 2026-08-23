@@ -354,6 +354,34 @@ public sealed class GpuContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// Arms one bounded compiler-instrumented GPU UBSan variant for an exact matching compute
+    /// dispatch. Ordinary cached kernels and non-diagnostic dispatches remain untouched.
+    /// </summary>
+    public GpuUbsanCapture BeginUbsanCapture(
+        string shaderTypeName,
+        int targetDispatchIndex,
+        int recordCapacity = 256,
+        GpuUbsanChecks enabledChecks = GpuUbsanChecks.All)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuUbsanCapture(
+                this,
+                shaderTypeName,
+                targetDispatchIndex,
+                recordCapacity,
+                enabledChecks);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
     internal void EndDiagnosticCapture(IGpuDiagnosticCapture capture)
     {
         lock (gate)

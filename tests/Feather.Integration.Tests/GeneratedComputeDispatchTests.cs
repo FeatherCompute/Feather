@@ -5813,6 +5813,96 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void UbsanCapturesBoundedStructuredIssuesAndSkipsInvalidOperations()
+    {
+        using var input = GPU.CreateBuffer<float>(
+            [2f, 0f, -4f, 0f, float.NaN, float.PositiveInfinity]);
+        using var output = GPU.CreateBuffer<float>(8);
+        using GpuKernel ordinaryKernel = GpuKernel.Create<UbsanProbeKernel>(GPU.Context);
+        Assert.DoesNotContain("__feather_ubsan", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+
+        using var capture = GPU.Context.BeginUbsanCapture(
+            typeof(UbsanProbeKernel).FullName!,
+            targetDispatchIndex: 0,
+            recordCapacity: 16,
+            GpuUbsanChecks.All);
+        using (GpuFence preparation = capture.PrepareRecordLayout())
+        {
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
+        Assert.Throws<InvalidOperationException>(capture.PrepareRecordLayout);
+
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<UbsanProbeKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new UbsanProbeKernel(input.AsReadOnly(), output.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuUbsanResult result = capture.CompleteAndRead();
+        Assert.Equal(7u, result.AttemptedCount);
+        Assert.Equal(7u, result.CommittedCount);
+        Assert.Equal(0u, result.DroppedCount);
+        Assert.Equal(16, result.RecordCapacity);
+        Assert.Equal(1, result.MatchedDispatchCount);
+        Assert.Equal(8, result.Dispatch!.Value.LogicalSizeX);
+        Assert.Equal(
+            new Dictionary<GpuUbsanIssueKind, int>
+            {
+                [GpuUbsanIssueKind.FloatDivideByZero] = 1,
+                [GpuUbsanIssueKind.SqrtDomain] = 1,
+                [GpuUbsanIssueKind.LogDomain] = 1,
+                [GpuUbsanIssueKind.NaNValue] = 1,
+                [GpuUbsanIssueKind.InfinityValue] = 1,
+                [GpuUbsanIssueKind.BufferOutOfBounds] = 2,
+            },
+            result.Issues
+                .GroupBy(static issue => issue.Kind)
+                .ToDictionary(static group => group.Key, static group => group.Count()));
+        Assert.Equal(
+            [9f, 0f, 0f, 0f, 0f, 0f, 0f, 0f],
+            output.ToArray());
+        Assert.Contains("__feather_ubsan_slot", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.Contains("atomicAdd", diagnosticKernel.GetGLSL(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UbsanAccountsForOverflowWithoutWritingPastCapacity()
+    {
+        using var input = GPU.CreateBuffer<float>(
+            [2f, 0f, -4f, 0f, float.NaN, float.NegativeInfinity]);
+        using var output = GPU.CreateBuffer<float>(8);
+        using var capture = GPU.Context.BeginUbsanCapture(
+            typeof(UbsanProbeKernel).FullName!,
+            targetDispatchIndex: 0,
+            recordCapacity: 3,
+            GpuUbsanChecks.All);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(
+                new UbsanProbeKernel(input.AsReadOnly(), output.AsReadWrite()),
+                8);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuUbsanResult result = capture.CompleteAndRead();
+        Assert.Equal(7u, result.AttemptedCount);
+        Assert.Equal(3u, result.CommittedCount);
+        Assert.Equal(4u, result.DroppedCount);
+        Assert.Equal(3, result.Issues.Count);
+        Assert.All(result.Issues, static issue =>
+            Assert.InRange(issue.Kind, GpuUbsanIssueKind.FloatDivideByZero, GpuUbsanIssueKind.BufferOutOfBounds));
+    }
+
+    [Fact]
     public void ExecutionHeatRejectsOverlappingAndUnmatchedCaptures()
     {
         using var capture = GPU.Context.BeginExecutionHeatCapture("Missing.Generated.Kernel");
@@ -6670,5 +6760,54 @@ public readonly partial struct DotProductKernel(
     {
         int i = ThreadIds.X;
         output[i] = left[i] * right[i] * count.Value;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(1, 1, 1)]
+public readonly partial struct UbsanProbeKernel(
+    ReadOnlyBuffer<float> input,
+    ReadWriteBuffer<float> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        float result = 0f;
+        if (i == 0)
+        {
+            result = (8f / input[0]) + ShaderMath.Sqrt(9f) + ShaderMath.Log(1f) + input[0];
+        }
+        else if (i == 1)
+        {
+            result = 10f / input[1];
+        }
+        else if (i == 2)
+        {
+            result = ShaderMath.Sqrt(input[2]);
+        }
+        else if (i == 3)
+        {
+            result = ShaderMath.Log(input[3]);
+        }
+        else if (i == 4)
+        {
+            result = input[4];
+        }
+        else if (i == 5)
+        {
+            result = input[5];
+        }
+        else if (i == 6)
+        {
+            int positiveOob = 9;
+            result = input[positiveOob];
+        }
+        else
+        {
+            int negativeOob = -1;
+            result = input[negativeOob];
+        }
+
+        output[i] = result;
     }
 }

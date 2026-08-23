@@ -605,6 +605,21 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void DiagnosticStreamV3HasStableSequentialLayout()
+    {
+        Assert.Equal(3u, (uint)FeKernelDiagnosticMode.Ubsan);
+        Assert.Equal(32, Marshal.SizeOf<FeKernelDiagnosticConfigV3>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticConfigV3>(nameof(FeKernelDiagnosticConfigV3.AbiVersion)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeKernelDiagnosticConfigV3>(nameof(FeKernelDiagnosticConfigV3.RecordCapacity)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticConfigV3>(nameof(FeKernelDiagnosticConfigV3.SourceSiteIndex)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<FeKernelDiagnosticConfigV3>(nameof(FeKernelDiagnosticConfigV3.SelectedZ)).ToInt32());
+        Assert.Equal(32, Marshal.SizeOf<FeKernelDiagnosticLayoutV3>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticLayoutV3>(nameof(FeKernelDiagnosticLayoutV3.AbiVersion)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticLayoutV3>(nameof(FeKernelDiagnosticLayoutV3.HeaderStrideBytes)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<FeKernelDiagnosticLayoutV3>(nameof(FeKernelDiagnosticLayoutV3.Flags)).ToInt32());
+    }
+
+    [Fact]
     public void TextureDescriptorHasStableSequentialLayout()
     {
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());

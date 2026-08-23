@@ -34,7 +34,8 @@ public enum FeKernelDiagnosticMode : uint
 {
     None = 0,
     ExecutionHeat = 1,
-    LineValue = 2
+    LineValue = 2,
+    Ubsan = 3
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -91,6 +92,52 @@ public readonly struct FeKernelDiagnosticLayoutV2
     public readonly uint RecordCapacity;
     public readonly uint ValueTypeTag;
     public readonly uint ComponentCount;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV3
+{
+    public FeKernelDiagnosticConfigV3(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint recordCapacity,
+        uint flags,
+        uint sourceSiteIndex,
+        uint selectedX,
+        uint selectedY,
+        uint selectedZ)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        RecordCapacity = recordCapacity;
+        Flags = flags;
+        SourceSiteIndex = sourceSiteIndex;
+        SelectedX = selectedX;
+        SelectedY = selectedY;
+        SelectedZ = selectedZ;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint RecordCapacity;
+    public readonly uint Flags;
+    public readonly uint SourceSiteIndex;
+    public readonly uint SelectedX;
+    public readonly uint SelectedY;
+    public readonly uint SelectedZ;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV3
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SiteCount;
+    public readonly uint HeaderStrideBytes;
+    public readonly uint RecordStrideBytes;
+    public readonly uint RecordCapacity;
+    public readonly uint Flags;
 }
 
 [StructLayout(LayoutKind.Sequential)]

@@ -166,6 +166,46 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel CreateUbsan<TKernel>(
+        GpuContext context,
+        GpuUbsanCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "GPU UBSan diagnostics do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV3(
+                GpuUbsanCapture.AbiVersion,
+                FeKernelDiagnosticMode.Ubsan,
+                checked((uint)capture.RecordCapacity),
+                (uint)capture.EnabledChecks,
+                sourceSiteIndex: uint.MaxValue,
+                selectedX: 0,
+                selectedY: 0,
+                selectedZ: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v3(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v3(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {

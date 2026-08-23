@@ -23,6 +23,7 @@ struct ResourceInfo {
     uint32_t height = 0;
     uint32_t depth = 1;
     bool sampled = false;
+    uint32_t* element_count_data = nullptr;
 };
 
 struct PushConstantInfo {
@@ -49,6 +50,8 @@ struct LoweringInputs {
     uint32_t diagnostic_selected_x = 0;
     uint32_t diagnostic_selected_y = 0;
     uint32_t diagnostic_selected_z = 0;
+    uint32_t diagnostic_record_capacity = 0;
+    uint32_t diagnostic_flags = 0;
     int32_t* logical_x_data = nullptr;
     int32_t* logical_y_data = nullptr;
     int32_t* logical_z_data = nullptr;
