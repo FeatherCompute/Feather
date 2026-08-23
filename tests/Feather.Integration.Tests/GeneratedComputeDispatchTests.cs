@@ -5681,6 +5681,7 @@ public class ControlFlowDispatchTests
         {
             fence.Wait();
         }
+        Assert.Equal(1, capture.MatchedDispatchCount);
         GpuExecutionHeatResult result = capture.CompleteAndRead();
 
         Assert.Equal(typeof(DynamicForSumKernel).FullName, result.ShaderTypeName);

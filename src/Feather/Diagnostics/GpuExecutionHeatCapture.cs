@@ -77,6 +77,15 @@ public sealed class GpuExecutionHeatCapture : IDisposable
         get { lock (gate) { return matchedDispatchCount > 0; } }
     }
 
+    /// <summary>
+    /// Number of matching dispatches observed so far. Diagnostic hosts may sample this only at
+    /// their own serialized pass boundaries to bind retained dispatch geometry to a pass.
+    /// </summary>
+    public int MatchedDispatchCount
+    {
+        get { lock (gate) { return matchedDispatchCount; } }
+    }
+
     public int SiteCount
     {
         get { lock (gate) { return siteCount; } }
