@@ -56,6 +56,7 @@ internal static class FeatherIrSourceMapWriter
         json.Append("\"start\":").Append(span.Start).Append(',');
         json.Append("\"length\":").Append(span.Length);
         json.Append("}},");
+        json.Append("\"diagnosticSiteCount\":").Append(emission.DiagnosticSiteCount).Append(',');
         json.Append("\"instructions\":[");
         for (int index = 0; index < emission.Instructions.Count; index++)
         {
@@ -149,6 +150,7 @@ internal static class FeatherIrSourceMapWriter
 
 internal sealed record FeatherIrEmission(
     byte[] Module,
+    int DiagnosticSiteCount,
     IReadOnlyList<FeatherIrInstructionOrigin> Instructions,
     IReadOnlyList<FeatherIrStatementOrigin> TypedStatements);
 

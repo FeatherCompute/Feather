@@ -28,6 +28,7 @@ internal static class ShaderModelFactory
         {
             LoweredInstructions = lowered,
             TypedIrSection = typedIr?.Module,
+            TypedIrDiagnosticSiteCount = typedIr?.StatementCount ?? 0,
             TypedIrStatementOrigins = new EquatableArray<TypedIrStatementOriginModel>(
                 typedIr?.StatementOrigins
                     .Select(static origin => new TypedIrStatementOriginModel(

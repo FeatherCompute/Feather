@@ -28,6 +28,7 @@ internal sealed record ShaderModel(
     EquatableArray<LoweredShaderInstructionModel> LoweredInstructions,
     EquatableArray<CallableMethodModel> Callables = default,
     byte[]? TypedIrSection = null,
+    int TypedIrDiagnosticSiteCount = 0,
     EquatableArray<TypedIrStatementOriginModel> TypedIrStatementOrigins = default,
     EquatableArray<TypedIrDiagnosticModel> TypedIrDiagnostics = default,
     EquatableArray<ShaderBodyDiagnosticModel> BodyDiagnostics = default);

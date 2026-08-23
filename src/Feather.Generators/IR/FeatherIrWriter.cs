@@ -116,6 +116,7 @@ internal static class FeatherIrWriter
         var module = stream.ToArray();
         return new FeatherIrEmission(
             module,
+            model.TypedIrDiagnosticSiteCount,
             instructions.Select(static (instruction, index) => new FeatherIrInstructionOrigin(
                 checked((uint)index),
                 instruction.SyntaxStart,

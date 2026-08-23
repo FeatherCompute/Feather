@@ -211,6 +211,7 @@ internal static class ShaderIrModuleWriter
 
         return new ShaderIrModuleEmission(
             stream.ToArray(),
+            statements.Count,
             statementOrigins
                 .OrderBy(static origin => origin.StatementIndex)
                 .ToArray());
@@ -1003,6 +1004,7 @@ internal static class ShaderIrModuleWriter
 
 internal sealed record ShaderIrModuleEmission(
     byte[] Module,
+    int StatementCount,
     IReadOnlyList<ShaderIrStatementOrigin> StatementOrigins);
 
 internal readonly record struct ShaderIrStatementOrigin(

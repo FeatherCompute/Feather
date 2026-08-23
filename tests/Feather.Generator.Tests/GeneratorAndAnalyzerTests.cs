@@ -133,6 +133,12 @@ public class GeneratorAndAnalyzerTests
         });
         JsonElement[] typedStatements = root.GetProperty("typedStatements").EnumerateArray().ToArray();
         Assert.NotEmpty(typedStatements);
+        int diagnosticSiteCount = root.GetProperty("diagnosticSiteCount").GetInt32();
+        Assert.True(diagnosticSiteCount > typedStatements.Length);
+        Assert.All(typedStatements, statement => Assert.InRange(
+            statement.GetProperty("statementIndex").GetInt32(),
+            0,
+            diagnosticSiteCount - 1));
         Assert.Equal(
             typedStatements.Select(statement => statement.GetProperty("statementIndex").GetUInt32()).Distinct(),
             typedStatements.Select(statement => statement.GetProperty("statementIndex").GetUInt32()));
