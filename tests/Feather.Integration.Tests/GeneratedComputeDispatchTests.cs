@@ -6060,6 +6060,153 @@ public class ControlFlowDispatchTests
     }
 
     [Fact]
+    public void BranchDivergenceCapturesActiveMasksAndPreservesBranchResults()
+    {
+        const int InvocationCount = 384;
+        using var output = GPU.CreateBuffer<int>(InvocationCount);
+        GpuKernel ordinaryKernel = GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>();
+        Assert.DoesNotContain("GL_KHR_shader_subgroup", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.DoesNotContain("subgroupBallot", ordinaryKernel.GetGLSL(), StringComparison.Ordinal);
+        Assert.True(GPU.Context.DeviceInfo.Subgroups.SupportsBranchDivergence);
+
+        uint sourceSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if ((LocalIds.X & 1) == 0)");
+        using var capture = GPU.Context.BeginBranchDivergenceCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            sourceSite,
+            targetDispatchIndex: 0,
+            recordCapacity: 64);
+        using (GpuFence preparation = capture.PrepareRecordLayout())
+        {
+            Assert.True(preparation.Wait(TimeSpan.FromSeconds(5)));
+        }
+        Assert.Throws<InvalidOperationException>(capture.PrepareRecordLayout);
+
+        GpuKernel diagnosticKernel = GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>();
+        Assert.NotSame(ordinaryKernel, diagnosticKernel);
+        string diagnosticGlsl = diagnosticKernel.GetGLSL();
+        Assert.Contains("#extension GL_KHR_shader_subgroup_basic : require", diagnosticGlsl, StringComparison.Ordinal);
+        Assert.Contains("#extension GL_KHR_shader_subgroup_vote : require", diagnosticGlsl, StringComparison.Ordinal);
+        Assert.Contains("#extension GL_KHR_shader_subgroup_ballot : require", diagnosticGlsl, StringComparison.Ordinal);
+        Assert.Contains("subgroupBallot", diagnosticGlsl, StringComparison.Ordinal);
+        Assert.Contains("feather_branch_predicate", diagnosticGlsl, StringComparison.Ordinal);
+
+        using (var commands = GPU.Queue.CreateCommandList())
+        {
+            commands.Dispatch(new BranchDivergenceProbeKernel(output.AsReadWrite()), InvocationCount);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        GpuBranchDivergenceResult result = capture.CompleteAndRead();
+        Assert.Equal(sourceSite, result.SourceSiteIndex);
+        Assert.Equal(1, result.MatchedDispatchCount);
+        Assert.Equal(result.SubgroupCount, result.AttemptedCount);
+        Assert.Equal(result.AttemptedCount, result.CommittedCount);
+        Assert.Equal(0u, result.DroppedCount);
+        Assert.Equal(result.SubgroupCount, (uint)result.Records.Count);
+        Assert.Equal(result.SubgroupCount, result.MixedSubgroupCount);
+        Assert.Equal(0u, result.UniformTrueSubgroupCount);
+        Assert.Equal(0u, result.UniformFalseSubgroupCount);
+        Assert.All(result.Records, static record =>
+        {
+            Assert.True(record.IsMixed);
+            Assert.Equal(record.ActiveLaneCount, record.TrueLaneCount + record.FalseLaneCount);
+            Assert.Equal(record.TrueLaneCount, record.FalseLaneCount);
+            Assert.Equal((int)record.ActiveLaneCount, record.ActiveMask.SetBitCount);
+            Assert.Equal((int)record.TrueLaneCount, record.TrueMask.SetBitCount);
+        });
+        if (result.BackendSubgroups.ReportedSize == 32u)
+        {
+            Assert.Equal(16u, result.SubgroupCount);
+            Assert.Equal(8, result.Records.Count(static record => record.ActiveLaneCount == 32u));
+            Assert.Equal(8, result.Records.Count(static record => record.ActiveLaneCount == 16u));
+        }
+
+        int[] values = output.ToArray();
+        Assert.Equal(InvocationCount, values.Length);
+        for (int i = 0; i < values.Length; ++i)
+        {
+            int branchValue = (i % 48 & 1) == 0 ? 10 : 20;
+            int workgroupValue = ((i / 48) & 1) == 0 ? 1 : 2;
+            int nestedValue = i % 48 < 4 ? 100 : 0;
+            Assert.Equal(branchValue + workgroupValue + nestedValue, values[i]);
+        }
+        Assert.Same(ordinaryKernel, GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
+    }
+
+    [Fact]
+    public void BranchDivergenceDistinguishesUniformPredicatesAndAccountsForOverflow()
+    {
+        const int InvocationCount = 384;
+        using var output = GPU.CreateBuffer<int>(InvocationCount);
+        uint uniformSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if (((i / 48) & 1) == 0)");
+        using (var capture = GPU.Context.BeginBranchDivergenceCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            uniformSite,
+            targetDispatchIndex: 0,
+            recordCapacity: 64))
+        {
+            using var commands = GPU.Queue.CreateCommandList();
+            commands.Dispatch(new BranchDivergenceProbeKernel(output.AsReadWrite()), InvocationCount);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+
+            GpuBranchDivergenceResult result = capture.CompleteAndRead();
+            Assert.Equal(0u, result.MixedSubgroupCount);
+            Assert.Equal(result.SubgroupCount, result.UniformTrueSubgroupCount + result.UniformFalseSubgroupCount);
+            Assert.Equal(result.UniformTrueSubgroupCount, result.UniformFalseSubgroupCount);
+            Assert.All(result.Records, static record =>
+            {
+                Assert.False(record.IsMixed);
+                Assert.True(record.TrueLaneCount == 0u || record.TrueLaneCount == record.ActiveLaneCount);
+            });
+        }
+
+        uint mixedSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if ((LocalIds.X & 1) == 0)");
+        using (var capture = GPU.Context.BeginBranchDivergenceCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            mixedSite,
+            targetDispatchIndex: 0,
+            recordCapacity: 1))
+        {
+            using var commands = GPU.Queue.CreateCommandList();
+            commands.Dispatch(new BranchDivergenceProbeKernel(output.AsReadWrite()), InvocationCount);
+            commands.Close();
+            using var fence = GPU.Queue.Submit(commands);
+            Assert.True(fence.Wait(TimeSpan.FromSeconds(5)));
+
+            GpuBranchDivergenceResult result = capture.CompleteAndRead();
+            Assert.True(result.AttemptedCount > 1u);
+            Assert.Equal(1u, result.CommittedCount);
+            Assert.Equal(result.AttemptedCount - 1u, result.DroppedCount);
+            Assert.Single(result.Records);
+            Assert.Equal(result.SubgroupCount, result.MixedSubgroupCount);
+        }
+    }
+
+    [Fact]
+    public void BranchDivergenceRejectsNonConvergedNestedSites()
+    {
+        uint nestedSite = FindTypedStatementSite<BranchDivergenceProbeKernel>(
+            "if (LocalIds.X < 4)");
+        using var capture = GPU.Context.BeginBranchDivergenceCapture(
+            typeof(BranchDivergenceProbeKernel).FullName!,
+            nestedSite,
+            targetDispatchIndex: 0,
+            recordCapacity: 8);
+
+        FeatherNativeException error = Assert.Throws<FeatherNativeException>(
+            () => GPU.Context.GetOrCreateKernel<BranchDivergenceProbeKernel>());
+        Assert.Equal(FeResult.ErrorUnsupported, error.Result);
+        Assert.Contains("converged", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void ExecutionHeatRejectsOverlappingAndUnmatchedCaptures()
     {
         using var capture = GPU.Context.BeginExecutionHeatCapture("Missing.Generated.Kernel");
@@ -6981,5 +7128,41 @@ public readonly partial struct PrintAssertProbeKernel(
         GpuDebug.Print(new float2(i, input[i]));
         GpuDebug.Assert((i & 1) == 1, new int2(i, i * 10));
         output[i] = input[i] * 2f;
+    }
+}
+
+[Kernel]
+[ThreadGroupSize(48, 1, 1)]
+public readonly partial struct BranchDivergenceProbeKernel(
+    ReadWriteBuffer<int> output) : IKernel1D
+{
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        if ((LocalIds.X & 1) == 0)
+        {
+            output[i] = 10;
+        }
+        else
+        {
+            output[i] = 20;
+        }
+
+        if (((i / 48) & 1) == 0)
+        {
+            output[i] += 1;
+        }
+        else
+        {
+            output[i] += 2;
+        }
+
+        if (i >= 0)
+        {
+            if (LocalIds.X < 4)
+            {
+                output[i] += 100;
+            }
+        }
     }
 }

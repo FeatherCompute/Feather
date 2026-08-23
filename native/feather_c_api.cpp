@@ -4589,7 +4589,8 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
     if (kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_EXECUTION_HEAT ||
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_LINE_VALUE ||
         kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN ||
-        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT) {
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT ||
+        kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE) {
         if (kernel.diagnostic_binding == UINT32_MAX || kernel.diagnostic_site_count == 0) {
             return false;
         }
@@ -4603,7 +4604,9 @@ bool build_typed_ir_lowering_inputs(const ParsedIr& ir, const KernelState& kerne
                               ? "__feather_line_value_record"
                           : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_UBSAN
                               ? "__feather_ubsan_stream"
-                              : "__feather_print_assert_stream";
+                          : kernel.diagnostic_mode == FE_KERNEL_DIAGNOSTIC_PRINT_ASSERT
+                              ? "__feather_print_assert_stream"
+                              : "__feather_branch_divergence_stream";
         diagnostic.element_type = "uint";
         inputs->resources.push_back(std::move(diagnostic));
     }
@@ -12065,6 +12068,12 @@ FE_API FeResult fe_context_get_device_info(FeContextHandle context, FeBackendDev
         out_info->native_abi_version = 1u;
         out_info->max_texture_dimension_2d = caps.maxTextureDimension2D;
         out_info->supports_timestamp_queries = caps.supportsTimestampQueries ? 1u : 0u;
+        uint32_t subgroup_features = 0u;
+        if (caps.supportsComputeSubgroups) subgroup_features |= FE_SUBGROUP_FEATURE_COMPUTE_STAGE;
+        if (caps.supportsSubgroupBasic) subgroup_features |= FE_SUBGROUP_FEATURE_BASIC;
+        if (caps.supportsSubgroupVote) subgroup_features |= FE_SUBGROUP_FEATURE_VOTE;
+        if (caps.supportsSubgroupBallot) subgroup_features |= FE_SUBGROUP_FEATURE_BALLOT;
+        out_info->reserved = (std::min(caps.subgroupSize, 0xffffu) << 16u) | subgroup_features;
         copy_fixed_c_string(out_info->adapter_name, sizeof(out_info->adapter_name), caps.adapterName);
         copy_fixed_c_string(out_info->driver_version, sizeof(out_info->driver_version), caps.driverVersion);
         copy_fixed_c_string(out_info->backend_version, sizeof(out_info->backend_version), caps.versionString);
@@ -13620,6 +13629,72 @@ FE_API FeResult fe_sampler_destroy(FeSamplerHandle sampler) {
     });
 }
 
+bool is_converged_entry_if_site(const Feather::TypedIR::Module& module, uint32_t target_site) {
+    if (module.entry_function >= module.functions.size() || target_site >= module.statements.size()) {
+        return false;
+    }
+
+    bool found = false;
+    bool converged = true;
+    bool malformed = false;
+    std::function<void(uint32_t, uint32_t)> visit = [&](uint32_t statement_id, uint32_t control_depth) {
+        if (statement_id == Feather::TypedIR::NoIndex || malformed) {
+            return;
+        }
+        if (statement_id >= module.statements.size()) {
+            malformed = true;
+            return;
+        }
+        const auto& statement = module.statements[statement_id];
+        if (statement_id == target_site) {
+            found = true;
+            converged = converged && statement.kind == kTypedStatementIf && control_depth == 0u;
+            return;
+        }
+
+        if (statement.kind == kTypedStatementBlock) {
+            if (statement.child_count == 0u) {
+                malformed = statement.first_child != Feather::TypedIR::NoIndex;
+                return;
+            }
+            if (statement.first_child == Feather::TypedIR::NoIndex ||
+                statement.first_child > module.children.size() ||
+                statement.child_count > module.children.size() - statement.first_child) {
+                malformed = true;
+                return;
+            }
+            for (uint32_t i = 0; i < statement.child_count; ++i) {
+                visit(module.children[statement.first_child + i], control_depth);
+            }
+            return;
+        }
+
+        const uint32_t nested_depth = control_depth + 1u;
+        switch (statement.kind) {
+        case kTypedStatementIf:
+            visit(statement.b, nested_depth);
+            visit(statement.c, nested_depth);
+            break;
+        case kTypedStatementFor:
+            visit(statement.a, nested_depth);
+            visit(statement.c, nested_depth);
+            visit(statement.op, nested_depth);
+            break;
+        case kTypedStatementWhile:
+            visit(statement.b, nested_depth);
+            break;
+        case kTypedStatementDoWhile:
+            visit(statement.a, nested_depth);
+            break;
+        default:
+            break;
+        }
+    };
+
+    visit(module.functions[module.entry_function].body_statement_index, 0u);
+    return found && converged && !malformed;
+}
+
 FE_API FeResult fe_kernel_create_from_ir(FeContextHandle context, const FeKernelCreateDesc* desc,
                                          FeKernelHandle* out_kernel) {
     return protect([&] {
@@ -14013,6 +14088,101 @@ FE_API FeResult fe_kernel_configure_diagnostics_v4(
     });
 }
 
+FE_API FeResult fe_kernel_configure_diagnostics_v5(
+    FeKernelHandle kernel,
+    const FeKernelDiagnosticConfigV5* config) {
+    return protect([&] {
+        constexpr uint32_t kMaximumRecordCapacity = 4096u;
+        constexpr uint32_t kRequiredSubgroupFeatures =
+            FE_SUBGROUP_FEATURE_COMPUTE_STAGE |
+            FE_SUBGROUP_FEATURE_BASIC |
+            FE_SUBGROUP_FEATURE_VOTE |
+            FE_SUBGROUP_FEATURE_BALLOT;
+        if (config == nullptr || config->abi_version != 5u ||
+            config->mode != FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE ||
+            config->source_site_index == UINT32_MAX ||
+            config->record_capacity == 0u || config->record_capacity > kMaximumRecordCapacity ||
+            config->flags != 0u || config->reserved != 0u) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Branch-divergence diagnostic configuration is unsupported.");
+        }
+
+        {
+            std::lock_guard<std::mutex> backend_lock(g_backend_mutex);
+            auto* backend = GPU::Runtime::Context::GetBackend();
+            if (backend == nullptr) {
+                return fail(FE_ERROR_BACKEND_UNAVAILABLE, "EasyGPU backend is unavailable.");
+            }
+            const auto& caps = backend->GetCaps();
+            if (!caps.supportsComputeSubgroups || !caps.supportsSubgroupBasic ||
+                !caps.supportsSubgroupVote || !caps.supportsSubgroupBallot || caps.subgroupSize == 0u) {
+                return fail(FE_ERROR_UNSUPPORTED,
+                            "Branch divergence requires compute basic/vote/ballot subgroup support.");
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        auto& state = it->second;
+        if (state.compile_count != 0 || g_compute_kernel_caches.find(kernel) != g_compute_kernel_caches.end()) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Kernel diagnostics must be configured before compilation or dispatch.");
+        }
+        if (state.auto_diff) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Branch-divergence diagnostics do not yet support differentiable kernels.");
+        }
+
+        ParsedIr parsed;
+        if (!parse_feather_ir(state.ir, &parsed) || !parsed.has_section7 ||
+            parsed.shader_kind < 1 || parsed.shader_kind > 3 ||
+            parsed.typed_module.statements.empty() ||
+            parsed.typed_module.statements.size() > 65536 ||
+            config->source_site_index >= parsed.typed_module.statements.size() ||
+            !is_converged_entry_if_site(parsed.typed_module, config->source_site_index)) {
+            return fail(FE_ERROR_UNSUPPORTED,
+                        "Branch divergence requires a retained top-level compute if statement at a converged point.");
+        }
+
+        uint32_t maximum_binding = 0;
+        bool has_binding = false;
+        for (const auto& resource : parsed.resources) {
+            maximum_binding = has_binding ? std::max(maximum_binding, resource.binding) : resource.binding;
+            has_binding = true;
+        }
+        if (has_binding && maximum_binding == UINT32_MAX) {
+            return fail(FE_ERROR_UNSUPPORTED, "Branch-divergence diagnostic binding space is exhausted.");
+        }
+        const uint32_t binding = has_binding ? maximum_binding + 1u : 0u;
+        if (state.diagnostic_binding != UINT32_MAX) {
+            state.buffers.erase(state.diagnostic_binding);
+        }
+        state.diagnostic_mode = config->mode;
+        state.diagnostic_binding = binding;
+        state.diagnostic_site_count = static_cast<uint32_t>(parsed.typed_module.statements.size());
+        state.diagnostic_source_site = config->source_site_index;
+        state.diagnostic_selected_x = 0u;
+        state.diagnostic_selected_y = 0u;
+        state.diagnostic_selected_z = 0u;
+        state.diagnostic_header_stride = 64u;
+        state.diagnostic_record_stride = 80u;
+        state.diagnostic_record_capacity = config->record_capacity;
+        state.diagnostic_flags = kRequiredSubgroupFeatures;
+        state.diagnostic_filter_mode = 0u;
+        state.diagnostic_logical_x = 0u;
+        state.diagnostic_logical_y = 0u;
+        state.diagnostic_logical_z = 0u;
+        state.diagnostic_mask_header_stride = 0u;
+        state.diagnostic_mask_cell_stride = 0u;
+        state.diagnostic_value_type_tag = 0u;
+        state.diagnostic_component_count = 0u;
+        return ok();
+    });
+}
+
 FE_API FeResult fe_kernel_get_diagnostic_layout(FeKernelHandle kernel, FeKernelDiagnosticLayout* out_layout) {
     return protect([&] {
         if (out_layout == nullptr) {
@@ -14139,6 +14309,48 @@ FE_API FeResult fe_kernel_get_diagnostic_layout_v4(
             state.diagnostic_logical_x,
             state.diagnostic_logical_y,
             state.diagnostic_logical_z};
+        return ok();
+    });
+}
+
+FE_API FeResult fe_kernel_get_diagnostic_layout_v5(
+    FeKernelHandle kernel,
+    FeKernelDiagnosticLayoutV5* out_layout) {
+    return protect([&] {
+        constexpr uint32_t kRequiredSubgroupFeatures =
+            FE_SUBGROUP_FEATURE_COMPUTE_STAGE |
+            FE_SUBGROUP_FEATURE_BASIC |
+            FE_SUBGROUP_FEATURE_VOTE |
+            FE_SUBGROUP_FEATURE_BALLOT;
+        if (out_layout == nullptr) {
+            return fail(FE_ERROR_INVALID_ARGUMENT,
+                        "Branch-divergence diagnostic layout output is required.");
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto it = g_kernels.find(kernel);
+        if (it == g_kernels.end()) {
+            return fail(FE_ERROR_INVALID_HANDLE, "Invalid kernel handle.");
+        }
+        const auto& state = it->second;
+        if (state.diagnostic_mode != FE_KERNEL_DIAGNOSTIC_BRANCH_DIVERGENCE ||
+            state.diagnostic_binding == UINT32_MAX || state.diagnostic_site_count == 0u ||
+            state.diagnostic_source_site == UINT32_MAX ||
+            state.diagnostic_header_stride != 64u || state.diagnostic_record_stride != 80u ||
+            state.diagnostic_record_capacity == 0u ||
+            state.diagnostic_flags != kRequiredSubgroupFeatures) {
+            return fail(FE_ERROR_UNSUPPORTED, "Branch-divergence diagnostics are not configured.");
+        }
+        *out_layout = FeKernelDiagnosticLayoutV5{
+            5u,
+            state.diagnostic_mode,
+            state.diagnostic_binding,
+            state.diagnostic_site_count,
+            state.diagnostic_source_site,
+            state.diagnostic_header_stride,
+            state.diagnostic_record_stride,
+            state.diagnostic_record_capacity,
+            state.diagnostic_flags,
+            0u};
         return ok();
     });
 }

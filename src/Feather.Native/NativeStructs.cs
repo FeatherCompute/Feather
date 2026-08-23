@@ -36,7 +36,8 @@ public enum FeKernelDiagnosticMode : uint
     ExecutionHeat = 1,
     LineValue = 2,
     Ubsan = 3,
-    PrintAssert = 4
+    PrintAssert = 4,
+    BranchDivergence = 5
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -202,6 +203,48 @@ public readonly struct FeKernelDiagnosticLayoutV4
     public readonly uint LogicalX;
     public readonly uint LogicalY;
     public readonly uint LogicalZ;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticConfigV5
+{
+    public FeKernelDiagnosticConfigV5(
+        uint abiVersion,
+        FeKernelDiagnosticMode mode,
+        uint sourceSiteIndex,
+        uint recordCapacity,
+        uint flags,
+        uint reserved)
+    {
+        AbiVersion = abiVersion;
+        Mode = (uint)mode;
+        SourceSiteIndex = sourceSiteIndex;
+        RecordCapacity = recordCapacity;
+        Flags = flags;
+        Reserved = reserved;
+    }
+
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint SourceSiteIndex;
+    public readonly uint RecordCapacity;
+    public readonly uint Flags;
+    public readonly uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct FeKernelDiagnosticLayoutV5
+{
+    public readonly uint AbiVersion;
+    public readonly uint Mode;
+    public readonly uint BufferBinding;
+    public readonly uint SiteCount;
+    public readonly uint SourceSiteIndex;
+    public readonly uint HeaderStrideBytes;
+    public readonly uint RecordStrideBytes;
+    public readonly uint RecordCapacity;
+    public readonly uint RequiredSubgroupFeatures;
+    public readonly uint Reserved;
 }
 
 [StructLayout(LayoutKind.Sequential)]

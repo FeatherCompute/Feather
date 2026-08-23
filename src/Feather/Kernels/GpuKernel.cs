@@ -250,6 +250,44 @@ public sealed class GpuKernel : IDisposable
         }
     }
 
+    internal static GpuKernel CreateBranchDivergence<TKernel>(
+        GpuContext context,
+        GpuBranchDivergenceCapture capture,
+        bool autoDiff)
+        where TKernel : struct, IGeneratedKernel<TKernel>
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (autoDiff)
+            throw new NotSupportedException(
+                "GPU branch-divergence diagnostics do not yet support differentiable kernels.");
+
+        var kernel = Create<TKernel>(context, autoDiff: false);
+        try
+        {
+            var config = new FeKernelDiagnosticConfigV5(
+                GpuBranchDivergenceCapture.AbiVersion,
+                FeKernelDiagnosticMode.BranchDivergence,
+                capture.SourceSiteIndex,
+                checked((uint)capture.RecordCapacity),
+                flags: 0,
+                reserved: 0);
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_configure_diagnostics_v5(
+                kernel.Handle,
+                in config));
+            NativeMethods.ThrowIfFailed(NativeMethods.fe_kernel_get_diagnostic_layout_v5(
+                kernel.Handle,
+                out var layout));
+            capture.AttachKernel(kernel, layout);
+            kernel.diagnosticCapture = capture;
+            return kernel;
+        }
+        catch
+        {
+            kernel.Dispose();
+            throw;
+        }
+    }
+
     public static void Dispatch<TKernel>(GpuContext context, TKernel kernel, GpuDispatchSize size, bool wait)
         where TKernel : struct, IGeneratedKernel<TKernel>
     {

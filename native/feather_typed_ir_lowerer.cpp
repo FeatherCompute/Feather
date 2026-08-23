@@ -26,6 +26,7 @@ constexpr uint32_t kDiagnosticExecutionHeat = 1;
 constexpr uint32_t kDiagnosticLineValue = 2;
 constexpr uint32_t kDiagnosticUbsan = 3;
 constexpr uint32_t kDiagnosticPrintAssert = 4;
+constexpr uint32_t kDiagnosticBranchDivergence = 5;
 constexpr uint32_t kUbsanCheckFloatDivideByZero = 1u << 0;
 constexpr uint32_t kUbsanCheckSqrtDomain = 1u << 1;
 constexpr uint32_t kUbsanCheckLogDomain = 1u << 2;
@@ -289,7 +290,9 @@ public:
 
         if (!RegisterResources() || !ResolveCallableResourceBindings() || !RegisterCallables() ||
             !EmitBoundsCheckGuard(entry.kind) ||
-            !LowerStatement(entry.body_statement_index)) {
+            !LowerStatement(entry.body_statement_index) ||
+            (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
+             !branch_divergence_site_emitted_)) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
             return nullptr;
         }
@@ -421,7 +424,8 @@ private:
         if (inputs_.diagnostic_mode == kDiagnosticExecutionHeat ||
             inputs_.diagnostic_mode == kDiagnosticLineValue ||
             inputs_.diagnostic_mode == kDiagnosticUbsan ||
-            inputs_.diagnostic_mode == kDiagnosticPrintAssert) {
+            inputs_.diagnostic_mode == kDiagnosticPrintAssert ||
+            inputs_.diagnostic_mode == kDiagnosticBranchDivergence) {
             const auto diagnostic = resources_by_binding_.find(inputs_.diagnostic_binding);
             if (diagnostic == resources_by_binding_.end() || inputs_.diagnostic_site_count == 0) {
                 return Fail("diagnostic buffer is missing from the lowering inputs");
@@ -446,6 +450,11 @@ private:
                    inputs_.diagnostic_selected_y >= inputs_.diagnostic_logical_y ||
                    inputs_.diagnostic_selected_z >= inputs_.diagnostic_logical_z)))) {
                 return Fail("Print/Assert stream filter or immutable logical extent is invalid");
+            }
+            if (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
+                (inputs_.diagnostic_source_site >= inputs_.diagnostic_site_count ||
+                 inputs_.diagnostic_record_capacity == 0u || inputs_.diagnostic_flags != 0x0fu)) {
+                return Fail("branch-divergence source site, capacity, or subgroup feature contract is invalid");
             }
         }
 
@@ -1533,6 +1542,217 @@ private:
                    : builder_.Intrinsic("uint", GPU::IR::Type::UInt(), arguments);
     }
 
+    GPU::IR::ValueId BranchDivergenceWord(uint32_t index) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(index) + "u");
+        return literal == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, literal);
+    }
+
+    GPU::IR::ValueId BranchDivergenceWord(GPU::IR::ValueId base, uint32_t offset) {
+        const auto literal = builder_.Literal(
+            GPU::IR::Type::UInt(), std::to_string(offset) + "u");
+        const auto index = builder_.Binary(GPU::IR::BinaryOp::Add, base, literal);
+        return literal == GPU::IR::InvalidValueId || index == GPU::IR::InvalidValueId
+                   ? GPU::IR::InvalidValueId
+                   : builder_.ResourceElement(diagnostic_sites_resource_, index);
+    }
+
+    bool EmitBranchDivergenceCapture(GPU::IR::ValueId predicate) {
+        if (inputs_.diagnostic_mode != kDiagnosticBranchDivergence ||
+            current_statement_id_ != inputs_.diagnostic_source_site) {
+            return true;
+        }
+        if (branch_divergence_site_emitted_ ||
+            diagnostic_sites_resource_ == GPU::IR::InvalidResourceId) {
+            return Fail("branch-divergence source site was emitted more than once or has no stream");
+        }
+
+        const auto uint_type = GPU::IR::Type::UInt();
+        const auto bool_type = GPU::IR::Type::Bool();
+        const auto uint4_type = GPU::IR::Type::UInt4();
+        const auto one = builder_.Literal(uint_type, "1u");
+        const auto zero = builder_.Literal(uint_type, "0u");
+        const auto always = builder_.Literal(bool_type, "true");
+        const auto not_predicate = builder_.Unary(GPU::IR::UnaryOp::LogicalNot, predicate);
+        auto active_mask = MaterializeOnce(
+            builder_.SubgroupBallot(always), uint4_type, "feather_branch_active_mask");
+        auto true_mask = MaterializeOnce(
+            builder_.SubgroupBallot(predicate), uint4_type, "feather_branch_true_mask");
+        auto active_count = MaterializeOnce(
+            builder_.SubgroupBallotBitCount(active_mask), uint_type, "feather_branch_active_count");
+        auto true_count = MaterializeOnce(
+            builder_.SubgroupBallotBitCount(true_mask), uint_type, "feather_branch_true_count");
+        auto false_count = MaterializeOnce(
+            builder_.Binary(GPU::IR::BinaryOp::Sub, active_count, true_count),
+            uint_type,
+            "feather_branch_false_count");
+        auto any_true = MaterializeOnce(
+            builder_.SubgroupAny(predicate), bool_type, "feather_branch_any_true");
+        auto any_false = MaterializeOnce(
+            builder_.SubgroupAny(not_predicate), bool_type, "feather_branch_any_false");
+        auto all_true = MaterializeOnce(
+            builder_.SubgroupAll(predicate), bool_type, "feather_branch_all_true");
+        auto all_false = MaterializeOnce(
+            builder_.SubgroupAll(not_predicate), bool_type, "feather_branch_all_false");
+        auto mixed = MaterializeOnce(
+            builder_.Binary(GPU::IR::BinaryOp::LogicalAnd, any_true, any_false),
+            bool_type,
+            "feather_branch_mixed");
+        auto elected = MaterializeOnce(
+            builder_.SubgroupElect(), bool_type, "feather_branch_elected");
+        auto subgroup_id = MaterializeOnce(
+            builder_.SubgroupId(), uint_type, "feather_branch_subgroup_id");
+        auto subgroup_size = MaterializeOnce(
+            builder_.SubgroupSize(), uint_type, "feather_branch_subgroup_size");
+        auto num_subgroups = MaterializeOnce(
+            builder_.NumSubgroups(), uint_type, "feather_branch_num_subgroups");
+        auto elected_lane = MaterializeOnce(
+            builder_.SubgroupInvocationId(), uint_type, "feather_branch_elected_lane");
+        const auto group_x = UbsanUInt(builder_.GroupIdX());
+        const auto group_y = UbsanUInt(builder_.GroupIdY());
+        const auto group_z = UbsanUInt(builder_.GroupIdZ());
+        const auto mixed_u32 = builder_.Ternary(mixed, one, zero);
+        const auto uniform_true_u32 = builder_.Ternary(all_true, one, zero);
+        const auto uniform_false_u32 = builder_.Ternary(all_false, one, zero);
+        if (one == GPU::IR::InvalidValueId || zero == GPU::IR::InvalidValueId ||
+            always == GPU::IR::InvalidValueId || not_predicate == GPU::IR::InvalidValueId ||
+            active_mask == GPU::IR::InvalidValueId || true_mask == GPU::IR::InvalidValueId ||
+            active_count == GPU::IR::InvalidValueId || true_count == GPU::IR::InvalidValueId ||
+            false_count == GPU::IR::InvalidValueId || any_true == GPU::IR::InvalidValueId ||
+            any_false == GPU::IR::InvalidValueId || all_true == GPU::IR::InvalidValueId ||
+            all_false == GPU::IR::InvalidValueId || mixed == GPU::IR::InvalidValueId ||
+            elected == GPU::IR::InvalidValueId || subgroup_id == GPU::IR::InvalidValueId ||
+            subgroup_size == GPU::IR::InvalidValueId || num_subgroups == GPU::IR::InvalidValueId ||
+            elected_lane == GPU::IR::InvalidValueId || group_x == GPU::IR::InvalidValueId ||
+            group_y == GPU::IR::InvalidValueId || group_z == GPU::IR::InvalidValueId ||
+            mixed_u32 == GPU::IR::InvalidValueId || uniform_true_u32 == GPU::IR::InvalidValueId ||
+            uniform_false_u32 == GPU::IR::InvalidValueId) {
+            return Fail("branch-divergence subgroup predicate facts could not be lowered");
+        }
+
+        const auto elected_statements = CaptureDiagnosticStatements([&] {
+            const std::array one_argument{one};
+            const auto attempted = builder_.Atomic(
+                GPU::IR::AtomicOp::Add,
+                uint_type,
+                BranchDivergenceWord(3u),
+                one_argument);
+            const auto slot = MaterializeOnce(
+                attempted, uint_type, "feather_branch_record_slot");
+            const auto capacity = BranchDivergenceWord(2u);
+            const auto has_capacity = builder_.Compare(
+                GPU::IR::CompareOp::Less, slot, capacity);
+            const auto twenty = builder_.Literal(uint_type, "20u");
+            const auto sixteen = builder_.Literal(uint_type, "16u");
+            const auto record_offset = builder_.Binary(
+                GPU::IR::BinaryOp::Mul, slot, twenty);
+            const auto record_base = builder_.Binary(
+                GPU::IR::BinaryOp::Add, sixteen, record_offset);
+            if (attempted == GPU::IR::InvalidValueId || slot == GPU::IR::InvalidValueId ||
+                capacity == GPU::IR::InvalidValueId || has_capacity == GPU::IR::InvalidValueId ||
+                twenty == GPU::IR::InvalidValueId || sixteen == GPU::IR::InvalidValueId ||
+                record_offset == GPU::IR::InvalidValueId || record_base == GPU::IR::InvalidValueId) {
+                return false;
+            }
+
+            const std::array<std::pair<uint32_t, GPU::IR::ValueId>, 7> aggregates{{
+                {6u, one},
+                {7u, mixed_u32},
+                {8u, active_count},
+                {9u, true_count},
+                {10u, false_count},
+                {11u, uniform_true_u32},
+                {12u, uniform_false_u32}
+            }};
+            for (const auto& [word, amount] : aggregates) {
+                const std::array arguments{amount};
+                const auto increment = builder_.Atomic(
+                    GPU::IR::AtomicOp::Add,
+                    uint_type,
+                    BranchDivergenceWord(word),
+                    arguments);
+                if (increment == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitExpression(increment);
+            }
+
+            const auto committed = CaptureDiagnosticStatements([&] {
+                const std::array<GPU::IR::ValueId, 12> fixed_values{
+                    builder_.Literal(uint_type, std::to_string(current_statement_id_) + "u"),
+                    group_x,
+                    group_y,
+                    group_z,
+                    subgroup_id,
+                    subgroup_size,
+                    num_subgroups,
+                    elected_lane,
+                    active_count,
+                    true_count,
+                    false_count,
+                    mixed_u32
+                };
+                for (uint32_t offset = 0; offset < fixed_values.size(); ++offset) {
+                    if (fixed_values[offset] == GPU::IR::InvalidValueId) {
+                        return false;
+                    }
+                    EmitStore(BranchDivergenceWord(record_base, offset), fixed_values[offset]);
+                }
+                constexpr std::string_view components = "xyzw";
+                for (uint32_t component = 0; component < 4u; ++component) {
+                    const auto active_component = builder_.Swizzle(
+                        active_mask, uint_type, std::string(1, components[component]));
+                    const auto true_component = builder_.Swizzle(
+                        true_mask, uint_type, std::string(1, components[component]));
+                    if (active_component == GPU::IR::InvalidValueId ||
+                        true_component == GPU::IR::InvalidValueId) {
+                        return false;
+                    }
+                    EmitStore(BranchDivergenceWord(record_base, 12u + component), active_component);
+                    EmitStore(BranchDivergenceWord(record_base, 16u + component), true_component);
+                }
+                const auto increment = builder_.Atomic(
+                    GPU::IR::AtomicOp::Add,
+                    uint_type,
+                    BranchDivergenceWord(4u),
+                    one_argument);
+                if (increment == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitExpression(increment);
+                return true;
+            });
+            const auto dropped = CaptureDiagnosticStatements([&] {
+                const auto increment = builder_.Atomic(
+                    GPU::IR::AtomicOp::Add,
+                    uint_type,
+                    BranchDivergenceWord(5u),
+                    one_argument);
+                if (increment == GPU::IR::InvalidValueId) {
+                    return false;
+                }
+                EmitExpression(increment);
+                return true;
+            });
+            if (!committed.has_value() || !dropped.has_value()) {
+                return false;
+            }
+            EmitIf(
+                has_capacity,
+                AddBlock(std::move(*committed)),
+                AddBlock(std::move(*dropped)));
+            return true;
+        });
+        if (!elected_statements.has_value()) {
+            return Fail("branch-divergence record and aggregate writes could not be lowered");
+        }
+        EmitIf(elected, AddBlock(std::move(*elected_statements)), GPU::IR::InvalidBlockId);
+        branch_divergence_site_emitted_ = true;
+        return true;
+    }
+
     GPU::IR::ValueId UbsanFloatBits(GPU::IR::ValueId value) {
         const std::array arguments{value};
         return value == GPU::IR::InvalidValueId
@@ -2171,9 +2391,20 @@ private:
             return false;
         }
 
-        const auto condition = BuildExpression(statement.a);
+        auto condition = BuildExpression(statement.a);
         if (condition == GPU::IR::InvalidValueId) {
             return false;
+        }
+        if (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
+            current_statement_id_ == inputs_.diagnostic_source_site) {
+            condition = MaterializeOnce(
+                condition,
+                GPU::IR::Type::Bool(),
+                "feather_branch_predicate");
+            if (condition == GPU::IR::InvalidValueId ||
+                !EmitBranchDivergenceCapture(condition)) {
+                return false;
+            }
         }
 
         auto then_statements = LowerStatementList(statement.b);
@@ -4528,6 +4759,7 @@ private:
     uint32_t diagnostic_count_resource_count_ = 0;
     uint32_t diagnostic_site_suppression_depth_ = 0;
     uint32_t current_statement_id_ = NoIndex;
+    bool branch_divergence_site_emitted_ = false;
     std::vector<GPU::IR::Statement>* capture_ = nullptr;
     std::vector<GPU::IR::Block>* callable_blocks_ = nullptr;
 };

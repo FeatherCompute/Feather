@@ -636,6 +636,22 @@ public class NativeContractTests
     }
 
     [Fact]
+    public void BranchDivergenceStreamV5HasStableSequentialLayout()
+    {
+        Assert.Equal(5u, (uint)FeKernelDiagnosticMode.BranchDivergence);
+        Assert.Equal(24, Marshal.SizeOf<FeKernelDiagnosticConfigV5>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticConfigV5>(nameof(FeKernelDiagnosticConfigV5.AbiVersion)).ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<FeKernelDiagnosticConfigV5>(nameof(FeKernelDiagnosticConfigV5.SourceSiteIndex)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticConfigV5>(nameof(FeKernelDiagnosticConfigV5.Flags)).ToInt32());
+        Assert.Equal(20, Marshal.OffsetOf<FeKernelDiagnosticConfigV5>(nameof(FeKernelDiagnosticConfigV5.Reserved)).ToInt32());
+        Assert.Equal(40, Marshal.SizeOf<FeKernelDiagnosticLayoutV5>());
+        Assert.Equal(0, Marshal.OffsetOf<FeKernelDiagnosticLayoutV5>(nameof(FeKernelDiagnosticLayoutV5.AbiVersion)).ToInt32());
+        Assert.Equal(16, Marshal.OffsetOf<FeKernelDiagnosticLayoutV5>(nameof(FeKernelDiagnosticLayoutV5.SourceSiteIndex)).ToInt32());
+        Assert.Equal(32, Marshal.OffsetOf<FeKernelDiagnosticLayoutV5>(nameof(FeKernelDiagnosticLayoutV5.RequiredSubgroupFeatures)).ToInt32());
+        Assert.Equal(36, Marshal.OffsetOf<FeKernelDiagnosticLayoutV5>(nameof(FeKernelDiagnosticLayoutV5.Reserved)).ToInt32());
+    }
+
+    [Fact]
     public void TextureDescriptorHasStableSequentialLayout()
     {
         Assert.Equal(20, Marshal.SizeOf<FeTexture2DDesc>());
@@ -860,6 +876,7 @@ public class NativeContractTests
         Assert.Equal(0, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.NativeAbiVersion)).ToInt32());
         Assert.Equal(4, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.MaxTextureDimension2D)).ToInt32());
         Assert.Equal(8, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.SupportsTimestampQueries)).ToInt32());
+        Assert.Equal(12, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.Reserved)).ToInt32());
         Assert.Equal(16, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.AdapterName)).ToInt32());
         Assert.Equal(272, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.DriverVersion)).ToInt32());
         Assert.Equal(400, Marshal.OffsetOf<FeBackendDeviceInfo>(nameof(FeBackendDeviceInfo.BackendVersion)).ToInt32());

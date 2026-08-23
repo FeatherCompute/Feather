@@ -124,7 +124,13 @@ public sealed class GpuContext : IDisposable
             info.SupportsTimestampQueries != 0,
             FixedUtf8(info.AdapterName, 256),
             FixedUtf8(info.DriverVersion, 128),
-            FixedUtf8(info.BackendVersion, 64));
+            FixedUtf8(info.BackendVersion, 64),
+            new BackendSubgroupInfo(
+                ReportedSize: info.Reserved >> 16,
+                SupportsComputeStage: (info.Reserved & (1u << 0)) != 0,
+                SupportsBasic: (info.Reserved & (1u << 1)) != 0,
+                SupportsVote: (info.Reserved & (1u << 2)) != 0,
+                SupportsBallot: (info.Reserved & (1u << 3)) != 0));
 
         static string FixedUtf8(byte* value, int capacity)
         {
@@ -409,6 +415,41 @@ public sealed class GpuContext : IDisposable
                 recordCapacity,
                 filterMode,
                 selectedInvocation);
+            activeDiagnosticCapture = capture;
+            return capture;
+        }
+    }
+
+    /// <summary>
+    /// Arms one profile-only subgroup predicate capture at a retained, converged top-level compute
+    /// branch. Ordinary cached kernels and non-diagnostic dispatches remain uninstrumented.
+    /// </summary>
+    public GpuBranchDivergenceCapture BeginBranchDivergenceCapture(
+        string shaderTypeName,
+        uint sourceSiteIndex,
+        int targetDispatchIndex,
+        int recordCapacity = 256)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderTypeName);
+        BackendSubgroupInfo subgroups = DeviceInfo.Subgroups;
+        if (!subgroups.SupportsBranchDivergence)
+        {
+            throw new NotSupportedException(
+                "Branch-divergence capture requires compute basic/vote/ballot subgroup support.");
+        }
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (activeDiagnosticCapture is not null)
+                throw new InvalidOperationException(
+                    "A GPU diagnostic capture is already active on this context.");
+            var capture = new GpuBranchDivergenceCapture(
+                this,
+                shaderTypeName,
+                sourceSiteIndex,
+                targetDispatchIndex,
+                recordCapacity,
+                subgroups);
             activeDiagnosticCapture = capture;
             return capture;
         }
@@ -702,7 +743,21 @@ public readonly record struct BackendDeviceInfo(
     bool SupportsTimestampQueries,
     string AdapterName,
     string DriverVersion,
-    string BackendVersion);
+    string BackendVersion,
+    BackendSubgroupInfo Subgroups = default);
+
+/// <summary>Explicit compute subgroup capability retained from the initialized backend.</summary>
+public readonly record struct BackendSubgroupInfo(
+    uint ReportedSize,
+    bool SupportsComputeStage,
+    bool SupportsBasic,
+    bool SupportsVote,
+    bool SupportsBallot)
+{
+    /// <summary>Whether branch-divergence ballot instrumentation can run on this backend.</summary>
+    public bool SupportsBranchDivergence =>
+        ReportedSize > 0 && SupportsComputeStage && SupportsBasic && SupportsVote && SupportsBallot;
+}
 
 /// <summary>
 /// Backend counters used to prove that asynchronous paths avoid global drains and blocking downloads.
