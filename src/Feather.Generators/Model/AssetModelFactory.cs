@@ -267,7 +267,10 @@ internal static class AssetModelFactory
 
     private static AssetInputModel CreateInput(ISymbol member, ITypeSymbol type, AttributeData attribute)
     {
-        var valueKind = ValueKind(type, out var referencedAssetType);
+        var valueKind = ValueKind(
+            type,
+            out var referencedAssetType,
+            out var referencedAssetTypeGuid);
         var immutable = member switch
         {
             IPropertySymbol property => property.SetMethod is null || property.SetMethod.IsInitOnly,
@@ -286,6 +289,7 @@ internal static class AssetModelFactory
             valueKind,
             TypeName(type),
             referencedAssetType,
+            referencedAssetTypeGuid,
             FiniteDouble(attribute, "Min"),
             FiniteDouble(attribute, "Max"),
             FiniteDouble(attribute, "Step"),
@@ -296,16 +300,27 @@ internal static class AssetModelFactory
             member.Locations.FirstOrDefault() ?? Location.None);
     }
 
-    private static string ValueKind(ITypeSymbol type, out string? referencedAssetType)
+    private static string ValueKind(
+        ITypeSymbol type,
+        out string? referencedAssetType,
+        out string? referencedAssetTypeGuid)
     {
         referencedAssetType = null;
+        referencedAssetTypeGuid = null;
         if (type is INamedTypeSymbol { IsGenericType: true } named &&
             named.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ==
             "Feather.Assets.AssetRef<TAsset>" &&
             named.TypeArguments.Length == 1 &&
             DerivesFromAsset(named.TypeArguments[0]))
         {
-            referencedAssetType = TypeName(named.TypeArguments[0]);
+            ITypeSymbol assetType = named.TypeArguments[0];
+            referencedAssetType = TypeName(assetType);
+            AttributeData? assetTypeAttribute = FindAttribute(
+                assetType.GetAttributes(),
+                "Feather.Assets.FeatherAssetTypeAttribute");
+            referencedAssetTypeGuid = assetTypeAttribute is null
+                ? null
+                : ConstructorString(assetTypeAttribute);
             return "ASSET_REFERENCE";
         }
 

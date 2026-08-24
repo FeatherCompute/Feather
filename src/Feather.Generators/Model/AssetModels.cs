@@ -15,6 +15,7 @@ internal sealed record AssetInputModel(
     string ValueKind,
     string TypeName,
     string? ReferencedAssetTypeName,
+    string? ReferencedAssetTypeGuid,
     double? Minimum,
     double? Maximum,
     double? Step,

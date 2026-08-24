@@ -35,7 +35,7 @@ public sealed class AssetGeneratorTests
 
         using var document = JsonDocument.Parse(first.Manifest);
         var root = document.RootElement;
-        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("Feather.AssetAssemblyManifest", root.GetProperty("kind").GetString());
         Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("buildId").GetString());
 
@@ -61,6 +61,7 @@ public sealed class AssetGeneratorTests
         Assert.Equal(64, inputs[LabelGuid].GetProperty("maximumLength").GetInt32());
         Assert.Equal("ASSET_REFERENCE", inputs[ReferenceGuid].GetProperty("valueKind").GetString());
         Assert.Equal("Scratch.FieldAsset", inputs[ReferenceGuid].GetProperty("referencedAssetType").GetString());
+        Assert.Equal(BaseTypeGuid, inputs[ReferenceGuid].GetProperty("referencedAssetTypeId").GetString());
 
         var capabilityUse = Assert.Single(gradient.GetProperty("capabilities").EnumerateArray());
         Assert.Equal(CapabilityGuid, capabilityUse.GetProperty("capabilityId").GetString());

@@ -217,6 +217,8 @@ internal static class AssetManifestWriter
                                 input.Step is <= 0 ||
                                 input.MinimumItems is not null && input.MaximumItems is not null && input.MinimumItems > input.MaximumItems;
             if (input.ValueKind == "UNSUPPORTED" ||
+                (input.ValueKind == "ASSET_REFERENCE" &&
+                 !TryCanonicalGuid(input.ReferencedAssetTypeGuid, out _)) ||
                 !input.IsImmutable ||
                 input.Role is <= 0 or > 31 ||
                 boundsInvalid ||
@@ -232,7 +234,13 @@ internal static class AssetManifestWriter
                 continue;
             }
 
-            result.Add(input with { Guid = id });
+            result.Add(input with
+            {
+                Guid = id,
+                ReferencedAssetTypeGuid = input.ReferencedAssetTypeGuid is null
+                    ? null
+                    : CanonicalGuid(input.ReferencedAssetTypeGuid),
+            });
         }
 
         return valid
@@ -343,7 +351,7 @@ internal static class AssetManifestWriter
     {
         var builder = new StringBuilder();
         builder.AppendLine("{");
-        builder.AppendLine("  \"schemaVersion\": 1,");
+        builder.AppendLine("  \"schemaVersion\": 2,");
         JsonProperty(builder, "kind", "Feather.AssetAssemblyManifest", 2, trailingComma: true);
         JsonProperty(builder, "buildId", buildId, 2, trailingComma: true);
         AppendContracts(builder, "capabilityContracts", capabilities, trailingComma: true);
@@ -454,6 +462,7 @@ internal static class AssetManifestWriter
             JsonProperty(builder, "valueKind", input.ValueKind, 10, trailingComma: true);
             JsonProperty(builder, "typeName", input.TypeName, 10, trailingComma: true);
             NullableJsonProperty(builder, "referencedAssetType", input.ReferencedAssetTypeName, 10, trailingComma: true);
+            NullableJsonProperty(builder, "referencedAssetTypeId", input.ReferencedAssetTypeGuid, 10, trailingComma: true);
             NullableNumberProperty(builder, "minimum", input.Minimum, 10, trailingComma: true);
             NullableNumberProperty(builder, "maximum", input.Maximum, 10, trailingComma: true);
             NullableNumberProperty(builder, "step", input.Step, 10, trailingComma: true);
