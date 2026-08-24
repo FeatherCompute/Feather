@@ -16,6 +16,12 @@ internal static class PassModelFactory
     private const string FeatherEnumMemberAttributeName = "Feather.RenderGraph.FeatherEnumMemberAttribute";
     private const string FlagsAttributeName = "System.FlagsAttribute";
     private const string RenderPassInterfaceName = "Feather.RenderGraph.IRenderPass";
+    private const string AssetTypeAttributeName = "Feather.Assets.FeatherAssetTypeAttribute";
+    private const string AssetCapabilityAttributeName = "Feather.Assets.FeatherAssetCapabilityAttribute";
+    private const string AssetOutputContractAttributeName = "Feather.Assets.FeatherAssetOutputContractAttribute";
+    private const string AssetCapabilityAttributeMetadataName = "AssetCapabilityAttribute`1";
+    private const string AssetOutputAttributeMetadataName = "AssetOutputAttribute`1";
+    private const string AssetProductBindingAttributeName = "Feather.RenderGraph.AssetProductBindingAttribute";
     private const string RelativePathOption = "build_metadata.Compile.FeatherProjectRelativePath";
 
     public static PassModel? Create(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
@@ -125,6 +131,7 @@ internal static class PassModelFactory
         AttributeData attribute,
         string access)
     {
+        var contract = CreateSocketContract(member, memberType);
         return new PassSocketModel(
             GetConstructorString(attribute) ?? string.Empty,
             GetNamedString(attribute, "Name") ?? member.Name,
@@ -132,8 +139,115 @@ internal static class PassModelFactory
             BufferElementType(memberType),
             GetTextureFormat(attribute),
             access,
+            contract,
             member.Locations.FirstOrDefault() ?? Location.None);
     }
+
+    private static PassSocketContractModel CreateSocketContract(ISymbol member, ITypeSymbol memberType)
+    {
+        if (memberType is INamedTypeSymbol { IsGenericType: true } named &&
+            named.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ==
+            "Feather.Assets.AssetRef<TAsset>")
+        {
+            var assetType = named.TypeArguments[0];
+            var typeAttribute = FindAttribute(assetType.GetAttributes(), AssetTypeAttributeName);
+            return new PassSocketContractModel(
+                "ASSET_REFERENCE",
+                typeAttribute is null ? null : GetConstructorString(typeAttribute),
+                typeAttribute is null ? (ushort)0 : GetNamedUInt16(typeAttribute, "ContractMajor") ?? 1,
+                typeAttribute is null ? (ushort)0 : GetNamedUInt16(typeAttribute, "ContractMinor") ?? 0,
+                AssetCapabilities(assetType),
+                null,
+                null,
+                0,
+                0,
+                AdapterRequired: false);
+        }
+
+        if (memberType is INamedTypeSymbol { IsGenericType: true } product &&
+            product.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ==
+            "Feather.RenderGraph.AssetOutputHandle<TOutput>")
+        {
+            var outputType = product.TypeArguments[0];
+            var binding = FindAttribute(member.GetAttributes(), AssetProductBindingAttributeName);
+            var assetType = binding?.ConstructorArguments.Length > 0 &&
+                            binding.ConstructorArguments[0].Value is ITypeSymbol boundType
+                ? boundType
+                : null;
+            var slotGuid = binding?.ConstructorArguments.Length > 1
+                ? binding.ConstructorArguments[1].Value as string
+                : null;
+            var typeAttribute = assetType is null
+                ? null
+                : FindAttribute(assetType.GetAttributes(), AssetTypeAttributeName);
+            var outputContract = FindAttribute(outputType.GetAttributes(), AssetOutputContractAttributeName);
+            var outputSlot = assetType is null
+                ? null
+                : FindAssetOutput(assetType, outputType, slotGuid);
+            return new PassSocketContractModel(
+                "ASSET_PRODUCT",
+                typeAttribute is null ? null : GetConstructorString(typeAttribute),
+                typeAttribute is null ? (ushort)0 : GetNamedUInt16(typeAttribute, "ContractMajor") ?? 1,
+                typeAttribute is null ? (ushort)0 : GetNamedUInt16(typeAttribute, "ContractMinor") ?? 0,
+                assetType is null ? [] : AssetCapabilities(assetType),
+                outputSlot is null ? null : GetConstructorString(outputSlot),
+                outputContract is null ? null : GetConstructorString(outputContract),
+                outputContract is null ? (ushort)0 : GetNamedUInt16(outputContract, "ContractMajor") ?? 1,
+                outputContract is null ? (ushort)0 : GetNamedUInt16(outputContract, "ContractMinor") ?? 0,
+                AdapterRequired: true);
+        }
+
+        return new PassSocketContractModel(
+            "GPU_RESOURCE",
+            null,
+            0,
+            0,
+            [],
+            null,
+            null,
+            0,
+            0,
+            AdapterRequired: false);
+    }
+
+    private static ImmutableArray<PassSocketCapabilityModel> AssetCapabilities(ITypeSymbol assetType)
+    {
+        var result = ImmutableArray.CreateBuilder<PassSocketCapabilityModel>();
+        foreach (var attribute in assetType.GetAttributes())
+        {
+            if (!IsGenericAssetAttribute(attribute, AssetCapabilityAttributeMetadataName) ||
+                attribute.AttributeClass is not { TypeArguments.Length: 1 } capabilityClass)
+            {
+                continue;
+            }
+
+            var contract = FindAttribute(
+                capabilityClass.TypeArguments[0].GetAttributes(),
+                AssetCapabilityAttributeName);
+            result.Add(new PassSocketCapabilityModel(
+                contract is null ? string.Empty : GetConstructorString(contract) ?? string.Empty,
+                GetNamedUInt16(attribute, "MinimumMajor") ?? 1,
+                GetNamedUInt16(attribute, "MinimumMinor") ?? 0,
+                !GetNamedArgument(attribute, "Required", out var required) || required.Value is not false));
+        }
+
+        return result.OrderBy(static capability => capability.CapabilityId, StringComparer.Ordinal)
+            .ToImmutableArray();
+    }
+
+    private static AttributeData? FindAssetOutput(
+        ITypeSymbol assetType,
+        ITypeSymbol outputType,
+        string? slotGuid)
+        => assetType.GetAttributes().FirstOrDefault(attribute =>
+            IsGenericAssetAttribute(attribute, AssetOutputAttributeMetadataName) &&
+            attribute.AttributeClass is { TypeArguments.Length: 1 } outputClass &&
+            SymbolEqualityComparer.Default.Equals(outputClass.TypeArguments[0], outputType) &&
+            GetConstructorString(attribute) == slotGuid);
+
+    private static bool IsGenericAssetAttribute(AttributeData attribute, string metadataName)
+        => attribute.AttributeClass?.OriginalDefinition.MetadataName == metadataName &&
+           attribute.AttributeClass.ContainingNamespace.ToDisplayString() == "Feather.Assets";
 
     private static PassParameterModel CreateParameter(
         Compilation compilation,
@@ -246,6 +360,11 @@ internal static class PassModelFactory
 
     private static int? GetNamedInt32(AttributeData attribute, string name)
         => GetNamedArgument(attribute, name, out var value) && value.Value is int result
+            ? result
+            : null;
+
+    private static ushort? GetNamedUInt16(AttributeData attribute, string name)
+        => GetNamedArgument(attribute, name, out var value) && value.Value is ushort result
             ? result
             : null;
 

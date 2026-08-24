@@ -342,9 +342,105 @@ internal static class PassManifestWriter
                 valid = false;
                 continue;
             }
-            result.Add(socket with { Guid = socketGuid });
+            var contract = NormalizeSocketContract(context, model, socket, ref valid);
+            if (contract is not null)
+            {
+                result.Add(socket with { Guid = socketGuid, Contract = contract });
+            }
         }
         return result.ToImmutable();
+    }
+
+    private static PassSocketContractModel? NormalizeSocketContract(
+        SourceProductionContext context,
+        PassModel model,
+        PassSocketModel socket,
+        ref bool valid)
+    {
+        if (socket.Contract.Kind == "GPU_RESOURCE")
+        {
+            return socket.Contract;
+        }
+
+        if (!TryCanonicalAssetGuid(socket.Contract.RequiredAssetTypeId, out var typeId) ||
+            socket.Contract.RequiredAssetTypeMajor == 0)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.AssetTypeShapeInvalid,
+                socket.Location,
+                model.TypeName + "." + socket.Name,
+                "Asset pass socket requires an annotated Asset Type with a canonical identity and positive contract version"));
+            valid = false;
+            return null;
+        }
+
+        var capabilities = ImmutableArray.CreateBuilder<PassSocketCapabilityModel>();
+        var capabilityIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var capability in socket.Contract.RequiredCapabilities)
+        {
+            if (!TryCanonicalAssetGuid(capability.CapabilityId, out var capabilityId) ||
+                !capabilityIds.Add(capabilityId) ||
+                capability.MinimumMajor == 0)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    FeatherDiagnostics.AssetCapabilityContractInvalid,
+                    socket.Location,
+                    capability.CapabilityId,
+                    model.TypeName + "." + socket.Name,
+                    "required capability identity/version must be canonical, positive, and unique"));
+                valid = false;
+                return null;
+            }
+            capabilities.Add(capability with { CapabilityId = capabilityId });
+        }
+
+        if (socket.Contract.Kind == "ASSET_REFERENCE")
+        {
+            return socket.Contract with
+            {
+                RequiredAssetTypeId = typeId,
+                RequiredCapabilities = capabilities.ToImmutable(),
+            };
+        }
+
+        if (socket.Contract.Kind != "ASSET_PRODUCT" ||
+            !TryCanonicalAssetGuid(socket.Contract.ProductSlotId, out var slotId) ||
+            !TryCanonicalAssetGuid(socket.Contract.OutputContractId, out var outputContractId) ||
+            socket.Contract.OutputContractMajor == 0 ||
+            !socket.Contract.AdapterRequired)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                FeatherDiagnostics.AssetOutputContractInvalid,
+                socket.Location,
+                socket.Name,
+                model.TypeName,
+                "prepared product socket requires a matching [AssetProductBinding], stable slot, output contract/version, and runtime adapter boundary"));
+            valid = false;
+            return null;
+        }
+
+        return socket.Contract with
+        {
+            RequiredAssetTypeId = typeId,
+            RequiredCapabilities = capabilities.ToImmutable(),
+            ProductSlotId = slotId,
+            OutputContractId = outputContractId,
+        };
+    }
+
+    private static bool TryCanonicalAssetGuid(string? value, out string canonical)
+    {
+        if (value is not null &&
+            Guid.TryParseExact(value, "D", out var guid) &&
+            guid != Guid.Empty &&
+            value == guid.ToString("D"))
+        {
+            canonical = value;
+            return true;
+        }
+
+        canonical = string.Empty;
+        return false;
     }
 
     private static bool TryNormalizeGuid(
@@ -469,10 +565,66 @@ internal static class PassManifestWriter
                 AppendJsonString(builder, "elementType", socket.ElementType, 10, trailingComma: true);
             }
             AppendJsonString(builder, "format", socket.Format, 10, trailingComma: true);
-            AppendJsonString(builder, "access", socket.Access, 10, trailingComma: false);
+            AppendJsonString(builder, "access", socket.Access, 10, trailingComma: true);
+            AppendJsonString(
+                builder,
+                "contractKind",
+                socket.Contract.Kind,
+                10,
+                trailingComma: socket.Contract.Kind != "GPU_RESOURCE");
+            if (socket.Contract.Kind != "GPU_RESOURCE")
+            {
+                AppendAssetSocketContract(builder, socket.Contract);
+            }
             builder.Append("        }").AppendLine(index + 1 < sockets.Length ? "," : string.Empty);
         }
         builder.Append("      ]").AppendLine(trailingComma ? "," : string.Empty);
+    }
+
+    private static void AppendAssetSocketContract(
+        StringBuilder builder,
+        PassSocketContractModel contract)
+    {
+        builder.AppendLine("          \"assetContract\": {");
+        AppendJsonString(builder, "requiredTypeId", contract.RequiredAssetTypeId!, 12, trailingComma: true);
+        builder.AppendLine("            \"requiredTypeVersion\": {");
+        builder.Append("              \"major\": ").Append(contract.RequiredAssetTypeMajor).AppendLine(",");
+        builder.Append("              \"minor\": ").Append(contract.RequiredAssetTypeMinor).AppendLine();
+        builder.AppendLine("            },");
+        builder.AppendLine("            \"requiredCapabilities\": [");
+        for (var index = 0; index < contract.RequiredCapabilities.Length; index++)
+        {
+            var capability = contract.RequiredCapabilities[index];
+            builder.AppendLine("              {");
+            AppendJsonString(builder, "capabilityId", capability.CapabilityId, 16, trailingComma: true);
+            builder.AppendLine("                \"minimumVersion\": {");
+            builder.Append("                  \"major\": ").Append(capability.MinimumMajor).AppendLine(",");
+            builder.Append("                  \"minor\": ").Append(capability.MinimumMinor).AppendLine();
+            builder.AppendLine("                },");
+            builder.Append("                \"required\": ")
+                .Append(capability.Required ? "true" : "false").AppendLine();
+            builder.Append("              }").AppendLine(
+                index + 1 < contract.RequiredCapabilities.Length ? "," : string.Empty);
+        }
+        builder.AppendLine("            ],");
+        builder.Append("            \"productSlotId\": ")
+            .Append(JsonNullableString(contract.ProductSlotId)).AppendLine(",");
+        builder.Append("            \"outputContractId\": ")
+            .Append(JsonNullableString(contract.OutputContractId)).AppendLine(",");
+        if (contract.OutputContractId is null)
+        {
+            builder.AppendLine("            \"outputContractVersion\": null,");
+        }
+        else
+        {
+            builder.AppendLine("            \"outputContractVersion\": {");
+            builder.Append("              \"major\": ").Append(contract.OutputContractMajor).AppendLine(",");
+            builder.Append("              \"minor\": ").Append(contract.OutputContractMinor).AppendLine();
+            builder.AppendLine("            },");
+        }
+        builder.Append("            \"adapterRequired\": ")
+            .Append(contract.AdapterRequired ? "true" : "false").AppendLine();
+        builder.AppendLine("          }");
     }
 
     private static void AppendParameters(

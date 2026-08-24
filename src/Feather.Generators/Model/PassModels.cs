@@ -10,7 +10,26 @@ internal sealed record PassSocketModel(
     string? ElementType,
     string Format,
     string Access,
+    PassSocketContractModel Contract,
     Location Location);
+
+internal sealed record PassSocketContractModel(
+    string Kind,
+    string? RequiredAssetTypeId,
+    ushort RequiredAssetTypeMajor,
+    ushort RequiredAssetTypeMinor,
+    ImmutableArray<PassSocketCapabilityModel> RequiredCapabilities,
+    string? ProductSlotId,
+    string? OutputContractId,
+    ushort OutputContractMajor,
+    ushort OutputContractMinor,
+    bool AdapterRequired);
+
+internal sealed record PassSocketCapabilityModel(
+    string CapabilityId,
+    ushort MinimumMajor,
+    ushort MinimumMinor,
+    bool Required);
 
 internal sealed record PassParameterModel(
     string Guid,

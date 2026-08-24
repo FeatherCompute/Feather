@@ -18,6 +18,10 @@ public sealed class AssetGeneratorTests
     private const string ReferenceGuid = "5b2fd1cb-0a91-421a-8858-21f153547e3a";
     private const string SlotGuid = "32087aaa-22f8-4033-95f3-f86a4654614b";
     private const string ProviderGuid = "aa4c24ec-750a-4c1d-aab1-4fbb66d6e474";
+    private const string ReferenceSocketGuid = "34fda284-f00f-4a18-8174-8ce93d353d67";
+    private const string ProductInputSocketGuid = "62265a65-a9b4-401c-bf79-3dd70386ad8b";
+    private const string ProductOutputSocketGuid = "86dc808c-1a63-4af9-a950-cdc477d80109";
+    private const string TextureSocketGuid = "b1acfd3b-9521-47dd-a975-c23f0ca12c57";
 
     [Fact]
     public void GeneratorEmitsDeterministicAssetContractsProvidersAndCompanion()
@@ -73,6 +77,32 @@ public sealed class AssetGeneratorTests
         Assert.Equal("BUILD", provider.GetProperty("operation").GetString());
         Assert.Equal("ISOLATED_WORKER", provider.GetProperty("owner").GetString());
         Assert.Equal("Scratch.GradientFieldAsset", Assert.Single(provider.GetProperty("assetTypes").EnumerateArray()).GetString());
+
+        using var passDocument = JsonDocument.Parse(first.PassManifest);
+        var pass = Assert.Single(passDocument.RootElement.GetProperty("passes").EnumerateArray());
+        var sockets = pass.GetProperty("inputs").EnumerateArray()
+            .Concat(pass.GetProperty("outputs").EnumerateArray())
+            .ToDictionary(socket => socket.GetProperty("socketGuid").GetString()!);
+        var referenceSocket = sockets[ReferenceSocketGuid];
+        Assert.Equal("ASSET_REFERENCE", referenceSocket.GetProperty("contractKind").GetString());
+        Assert.Equal(
+            TypeGuid,
+            referenceSocket.GetProperty("assetContract").GetProperty("requiredTypeId").GetString());
+        Assert.Equal(
+            CapabilityGuid,
+            Assert.Single(referenceSocket.GetProperty("assetContract").GetProperty("requiredCapabilities").EnumerateArray())
+                .GetProperty("capabilityId").GetString());
+        Assert.False(referenceSocket.GetProperty("assetContract").GetProperty("adapterRequired").GetBoolean());
+
+        foreach (var socketGuid in new[] { ProductInputSocketGuid, ProductOutputSocketGuid })
+        {
+            var productSocket = sockets[socketGuid];
+            Assert.Equal("ASSET_PRODUCT", productSocket.GetProperty("contractKind").GetString());
+            Assert.Equal(SlotGuid, productSocket.GetProperty("assetContract").GetProperty("productSlotId").GetString());
+            Assert.Equal(OutputContractGuid, productSocket.GetProperty("assetContract").GetProperty("outputContractId").GetString());
+            Assert.True(productSocket.GetProperty("assetContract").GetProperty("adapterRequired").GetBoolean());
+        }
+        Assert.Equal("GPU_RESOURCE", sockets[TextureSocketGuid].GetProperty("contractKind").GetString());
 
         var companion = first.Output.SyntaxTrees.Single(tree =>
             tree.FilePath.EndsWith("Scratch_GradientFieldAsset.Feather.AssetContract.g.cs", StringComparison.Ordinal));
@@ -159,6 +189,42 @@ public sealed class AssetGeneratorTests
             tree.FilePath.EndsWith("InvalidMembers.Feather.AssetContract.g.cs", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void GeneratorRejectsPreparedProductSocketWhoseBindingDoesNotMatchDeclaredSlot()
+    {
+        var result = Generate(
+            """
+            using Feather.Assets;
+            using Feather.RenderGraph;
+
+            [FeatherAssetOutputContract("81b8755c-a712-4c21-9e76-0e13a48eda43")]
+            public sealed class Product : IAssetOutputContract { }
+
+            [FeatherAssetType("878827ac-7fe1-4990-acad-554923b696c8")]
+            [AssetOutput<Product>(
+                "32087aaa-22f8-4033-95f3-f86a4654614b",
+                Symbol = "Product")]
+            public sealed partial class ProductAsset : Asset { }
+
+            [FeatherPass("c9176c1c-54f0-4d5d-aa0f-3a1e35846b67")]
+            public sealed class InvalidProductPass : IComputePass
+            {
+                [Input("62265a65-a9b4-401c-bf79-3dd70386ad8b")]
+                [AssetProductBinding(
+                    typeof(ProductAsset),
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")]
+                public AssetOutputHandle<Product> Product { get; init; }
+
+                public void Execute(RenderContext context) { }
+            }
+            """,
+            "Assets/InvalidProductPass.cs");
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "FSA020");
+        using var manifest = JsonDocument.Parse(result.PassManifest);
+        Assert.Empty(manifest.RootElement.GetProperty("passes").EnumerateArray());
+    }
+
     private static GeneratorResult Generate(string source, string sourcePath)
     {
         var compilation = CreateCompilation(source, sourcePath);
@@ -170,7 +236,12 @@ public sealed class AssetGeneratorTests
         var generated = outputCompilation.SyntaxTrees.SingleOrDefault(tree =>
             tree.FilePath.EndsWith("Feather.AssetManifest.g.cs", StringComparison.Ordinal));
         var manifest = generated is null ? string.Empty : ReadManifest(outputCompilation, generated);
-        return new GeneratorResult(outputCompilation, diagnostics, manifest);
+        var passGenerated = outputCompilation.SyntaxTrees.SingleOrDefault(tree =>
+            tree.FilePath.EndsWith("Feather.PassManifest.g.cs", StringComparison.Ordinal));
+        var passManifest = passGenerated is null
+            ? string.Empty
+            : ReadManifest(outputCompilation, passGenerated);
+        return new GeneratorResult(outputCompilation, diagnostics, manifest, passManifest);
     }
 
     private static string ReadManifest(Compilation compilation, SyntaxTree generated)
@@ -205,7 +276,8 @@ public sealed class AssetGeneratorTests
     private sealed record GeneratorResult(
         Compilation Output,
         IReadOnlyList<Diagnostic> Diagnostics,
-        string Manifest);
+        string Manifest,
+        string PassManifest);
 
     private sealed class MetadataReferenceComparer : IEqualityComparer<MetadataReference>
     {
@@ -222,6 +294,7 @@ public sealed class AssetGeneratorTests
         using System.Threading;
         using System.Threading.Tasks;
         using Feather.Assets;
+        using Feather.RenderGraph;
 
         namespace Scratch;
 
@@ -293,6 +366,30 @@ public sealed class AssetGeneratorTests
                 AssetBuildContext<GradientFieldAsset> context,
                 CancellationToken cancellationToken)
                 => ValueTask.CompletedTask;
+        }
+
+        [FeatherPass("c9176c1c-54f0-4d5d-aa0f-3a1e35846b67", Name = "Gradient Field Consumer")]
+        public sealed class GradientFieldConsumer : IComputePass
+        {
+            [Input("{{ReferenceSocketGuid}}", Name = "Field")]
+            public AssetRef<GradientFieldAsset> Field { get; init; }
+
+            [Input("{{ProductInputSocketGuid}}", Name = "Prepared Field")]
+            [AssetProductBinding(
+                typeof(GradientFieldAsset),
+                "{{SlotGuid}}")] // exact stable product slot
+            public AssetOutputHandle<DenseFieldOutput> PreparedField { get; init; }
+
+            [Output("{{ProductOutputSocketGuid}}", Name = "Published Field")]
+            [AssetProductBinding(
+                typeof(GradientFieldAsset),
+                "{{SlotGuid}}")] // exact stable product slot
+            public AssetOutputHandle<DenseFieldOutput> PublishedField { get; init; }
+
+            [Input("{{TextureSocketGuid}}", Name = "Texture")]
+            public TextureHandle Texture { get; init; }
+
+            public void Execute(RenderContext context) { }
         }
         """;
 }

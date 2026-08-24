@@ -1,4 +1,5 @@
 using Feather.Assets;
+using Feather.RenderGraph;
 
 namespace Feather.Tests;
 
@@ -123,6 +124,21 @@ public sealed class AssetContractTests
             property => property.Name.Contains("Service", StringComparison.Ordinal) ||
                         property.Name.Contains("Path", StringComparison.Ordinal) ||
                         property.Name.Contains("Handle", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PreparedOutputHandleExposesNoPublicTokenOrConstructor()
+    {
+        var handleType = typeof(AssetOutputHandle<TestOutput>);
+
+        Assert.Empty(handleType.GetConstructors());
+        Assert.DoesNotContain(
+            handleType.GetProperties(),
+            property => property.PropertyType is { } type &&
+                        (type == typeof(ulong) || type == typeof(nint) || type == typeof(string)));
+        var binding = new AssetProductBindingAttribute(typeof(TestAsset), SlotGuid);
+        Assert.Equal(typeof(TestAsset), binding.AssetType);
+        Assert.Equal(SlotGuid, binding.ProductSlotGuid);
     }
 
     private sealed class TestAsset : Asset;
