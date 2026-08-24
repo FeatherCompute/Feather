@@ -185,6 +185,33 @@ public sealed class AssetGeneratorTests
     }
 
     [Fact]
+    public void ManifestSealsEveryDeclarationToItsExactUtf8SourceText()
+    {
+        const string sourcePath = "Assets/GradientField.cs";
+        GeneratorResult result = Generate(ValidSource, sourcePath);
+        string expectedHash = "sha256:" + Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(ValidSource)))
+            .ToLowerInvariant();
+        using JsonDocument document = JsonDocument.Parse(result.Manifest);
+
+        JsonElement[] declarations =
+        [
+            .. document.RootElement.GetProperty("capabilityContracts").EnumerateArray(),
+            .. document.RootElement.GetProperty("outputContracts").EnumerateArray(),
+            .. document.RootElement.GetProperty("providers").EnumerateArray(),
+            .. document.RootElement.GetProperty("assetTypes").EnumerateArray(),
+        ];
+
+        Assert.NotEmpty(declarations);
+        Assert.All(declarations, declaration =>
+        {
+            JsonElement source = declaration.GetProperty("source");
+            Assert.Equal(sourcePath, source.GetProperty("path").GetString());
+            Assert.Equal(expectedHash, source.GetProperty("documentHash").GetString());
+        });
+    }
+
+    [Fact]
     public void GeneratorRejectsInvalidIdentityMutabilityCapabilityOutputAndProviderContracts()
     {
         var result = Generate(

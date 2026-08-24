@@ -134,8 +134,15 @@ static void ExportAssetManifest(
             var sourcePath = source["path"]?.GetValue<string>()
                 ?? throw new InvalidDataException($"Asset manifest {collectionName} source is missing path.");
             var normalizedPath = NormalizeSourcePath(projectRoot, sourcePath);
+            var documentHash = HashText(File.ReadAllText(Path.Combine(projectRoot, normalizedPath)));
+            if (source["documentHash"]?.GetValue<string>() is { } declaredHash &&
+                !string.Equals(declaredHash, documentHash, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Asset manifest {collectionName} source hash does not match '{normalizedPath}'.");
+            }
             source["path"] = normalizedPath;
-            source["documentHash"] = HashFile(Path.Combine(projectRoot, normalizedPath));
+            source["documentHash"] = documentHash;
         }
     }
 

@@ -120,6 +120,8 @@ public sealed class StandardAssetContractTests
         Assert.Contains(ActorAsset.Contract.TypeId.ToString(), typeIds);
         Assert.DoesNotContain("/Users/", manifest, StringComparison.Ordinal);
         Assert.DoesNotContain("\\Users\\", manifest, StringComparison.Ordinal);
+        Assert.All(root.GetProperty("assetTypes").EnumerateArray(), type =>
+            Assert.StartsWith("sha256:", type.GetProperty("source").GetProperty("documentHash").GetString(), StringComparison.Ordinal));
         Assert.Contains("three-dimensional", manifest, StringComparison.Ordinal);
         Assert.Contains("never a learned or inference model", manifest, StringComparison.Ordinal);
     }

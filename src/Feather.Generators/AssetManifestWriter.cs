@@ -369,7 +369,7 @@ internal static class AssetManifestWriter
             JsonProperty(builder, "typeName", contract.TypeName, 6, trailingComma: true);
             JsonProperty(builder, "name", contract.Name, 6, trailingComma: true);
             VersionProperty(builder, "contractVersion", contract.ContractMajor, contract.ContractMinor, 6, trailingComma: true);
-            SourceProperty(builder, contract.SourcePath, contract.SourceLine, contract.SourceColumn, 6);
+            SourceProperty(builder, contract.SourcePath, contract.SourceHash, contract.SourceLine, contract.SourceColumn, 6);
             builder.Append("    }").AppendLine(index + 1 < contracts.Length ? "," : string.Empty);
         }
         builder.Append("  ]").AppendLine(trailingComma ? "," : string.Empty);
@@ -394,7 +394,7 @@ internal static class AssetManifestWriter
             JsonProperty(builder, "determinism", provider.Determinism, 6, trailingComma: true);
             StringArrayProperty(builder, "assetTypes", provider.AssetTypeNames, 6, trailingComma: true);
             StringArrayProperty(builder, "outputContracts", provider.OutputContractTypeNames, 6, trailingComma: true);
-            SourceProperty(builder, provider.SourcePath, provider.SourceLine, provider.SourceColumn, 6);
+            SourceProperty(builder, provider.SourcePath, provider.SourceHash, provider.SourceLine, provider.SourceColumn, 6);
             builder.Append("    }").AppendLine(index + 1 < providers.Length ? "," : string.Empty);
         }
         builder.Append("  ]").AppendLine(trailingComma ? "," : string.Empty);
@@ -427,7 +427,7 @@ internal static class AssetManifestWriter
                 builder.AppendLine("      },");
             }
             StringArrayProperty(builder, "ancestry", Ancestry(type, byTypeName), 6, trailingComma: true);
-            SourceProperty(builder, type.SourcePath, type.SourceLine, type.SourceColumn, 6, trailingComma: true);
+            SourceProperty(builder, type.SourcePath, type.SourceHash, type.SourceLine, type.SourceColumn, 6, trailingComma: true);
             AppendInputs(builder, type.Inputs);
             AppendCapabilityUses(builder, type.Capabilities);
             AppendOutputs(builder, type.Outputs);
@@ -625,6 +625,7 @@ internal static class AssetManifestWriter
     private static void SourceProperty(
         StringBuilder builder,
         string path,
+        string documentHash,
         int line,
         int column,
         int indent,
@@ -632,6 +633,7 @@ internal static class AssetManifestWriter
     {
         builder.Append(' ', indent).AppendLine("\"source\": {");
         JsonProperty(builder, "path", path, indent + 2, trailingComma: true);
+        JsonProperty(builder, "documentHash", documentHash, indent + 2, trailingComma: true);
         builder.Append(' ', indent + 2).Append("\"line0\": ").Append(line).AppendLine(",");
         builder.Append(' ', indent + 2).Append("\"column0\": ").Append(column).AppendLine();
         builder.Append(' ', indent).Append('}').AppendLine(trailingComma ? "," : string.Empty);

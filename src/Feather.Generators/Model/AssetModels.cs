@@ -64,6 +64,7 @@ internal sealed record AssetTypeModel(
     string? BaseTypeName,
     string? BaseTypeGuid,
     string SourcePath,
+    string SourceHash,
     int SourceLine,
     int SourceColumn,
     ImmutableArray<AssetInputModel> Inputs,
@@ -88,6 +89,7 @@ internal sealed record AssetContractModel(
     bool IsGeneric,
     bool ImplementsMarker,
     string SourcePath,
+    string SourceHash,
     int SourceLine,
     int SourceColumn,
     Location Location);
@@ -105,6 +107,7 @@ internal sealed record AssetProviderModel(
     ImmutableArray<string> AssetTypeNames,
     ImmutableArray<string> OutputContractTypeNames,
     string SourcePath,
+    string SourceHash,
     int SourceLine,
     int SourceColumn,
     Location Location);

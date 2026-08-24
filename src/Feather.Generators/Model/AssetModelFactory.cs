@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -127,6 +129,7 @@ internal static class AssetModelFactory
             baseTypeName,
             baseTypeGuid,
             lineSpan.Path,
+            SourceHash(syntax.SyntaxTree, cancellationToken),
             lineSpan.StartLinePosition.Line,
             lineSpan.StartLinePosition.Character,
             inputs.ToImmutable(),
@@ -201,6 +204,7 @@ internal static class AssetModelFactory
             assetTypes.Distinct(StringComparer.Ordinal).OrderBy(static value => value, StringComparer.Ordinal).ToImmutableArray(),
             outputs.Distinct(StringComparer.Ordinal).OrderBy(static value => value, StringComparer.Ordinal).ToImmutableArray(),
             lineSpan.Path,
+            SourceHash(syntax.SyntaxTree, cancellationToken),
             lineSpan.StartLinePosition.Line,
             lineSpan.StartLinePosition.Character,
             location);
@@ -247,9 +251,18 @@ internal static class AssetModelFactory
             symbol.TypeParameters.Length != 0,
             Implements(symbol, markerName),
             lineSpan.Path,
+            SourceHash(syntax.SyntaxTree, cancellationToken),
             lineSpan.StartLinePosition.Line,
             lineSpan.StartLinePosition.Character,
             location);
+    }
+
+    private static string SourceHash(SyntaxTree syntaxTree, CancellationToken cancellationToken)
+    {
+        string content = syntaxTree.GetText(cancellationToken).ToString();
+        using SHA256 sha256 = SHA256.Create();
+        byte[] hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(content));
+        return "sha256:" + BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant();
     }
 
     private static AssetInputModel CreateInput(ISymbol member, ITypeSymbol type, AttributeData attribute)
