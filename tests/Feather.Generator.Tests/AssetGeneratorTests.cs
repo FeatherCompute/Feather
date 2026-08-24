@@ -138,6 +138,53 @@ public sealed class AssetGeneratorTests
     }
 
     [Fact]
+    public void StandardFoundationTypesAreExtensibleThroughReferencedPublicContracts()
+    {
+        var result = Generate(
+            """
+            using Feather.Assets;
+            using Feather.Assets.Graphics;
+            using Feather.Assets.Scenes;
+
+            [FeatherAssetType("11111111-1111-4111-8111-111111111111", Name = "Custom Texture")]
+            public sealed partial class CustomTexture : TextureAsset { }
+
+            [FeatherAssetType("22222222-2222-4222-8222-222222222222", Name = "Custom Material")]
+            public sealed partial class CustomMaterial : MaterialAsset { }
+
+            [FeatherAssetType("33333333-3333-4333-8333-333333333333", Name = "Custom 3D Model")]
+            public sealed partial class CustomModel : ModelAsset { }
+
+            [FeatherAssetType("44444444-4444-4444-8444-444444444444", Name = "Custom Scene")]
+            public sealed partial class CustomScene : SceneAsset { }
+
+            [FeatherAssetType("55555555-5555-4555-8555-555555555555", Name = "Custom Actor")]
+            public sealed partial class CustomActor : ActorAsset { }
+            """,
+            "Assets/StandardExtensions.cs");
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var document = JsonDocument.Parse(result.Manifest);
+        var expectedBases = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["11111111-1111-4111-8111-111111111111"] = "c2f0c619-d756-42f2-bb4b-a4ca48ab6dd2",
+            ["22222222-2222-4222-8222-222222222222"] = "293fd339-bf12-41dd-9f98-0519c9e17418",
+            ["33333333-3333-4333-8333-333333333333"] = "8ade6d04-a60d-4a58-9ec6-33e039f3b6a0",
+            ["44444444-4444-4444-8444-444444444444"] = "b934179f-2772-4419-afbc-a321888ec2ea",
+            ["55555555-5555-4555-8555-555555555555"] = "09dfd6df-e3b0-4bc2-882a-f42faf6be488",
+        };
+        JsonElement[] types = document.RootElement.GetProperty("assetTypes").EnumerateArray().ToArray();
+
+        Assert.Equal(5, types.Length);
+        foreach ((string typeId, string baseTypeId) in expectedBases)
+        {
+            JsonElement type = types.Single(candidate => candidate.GetProperty("typeId").GetString() == typeId);
+            Assert.Equal(baseTypeId, type.GetProperty("baseType").GetProperty("typeId").GetString());
+            Assert.Equal(baseTypeId, Assert.Single(type.GetProperty("ancestry").EnumerateArray()).GetString());
+        }
+    }
+
+    [Fact]
     public void GeneratorRejectsInvalidIdentityMutabilityCapabilityOutputAndProviderContracts()
     {
         var result = Generate(
