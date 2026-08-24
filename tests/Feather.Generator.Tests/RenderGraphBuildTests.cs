@@ -108,12 +108,75 @@ public class RenderGraphBuildTests
         }
     }
 
+    [Fact]
+    public async Task AssetContractSampleBuildsAndExportsBoundedRelativeManifest()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var sampleDirectory = Path.Combine(repositoryRoot, "samples", "AssetContracts");
+        var projectPath = Path.Combine(sampleDirectory, "AssetContracts.csproj");
+        var outputDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "FeatherAssetBuildTests",
+            Guid.NewGuid().ToString("N"));
+        var passManifestPath = Path.Combine(outputDirectory, "pass-manifest.json");
+        var assetManifestPath = Path.Combine(outputDirectory, "asset-manifest.json");
+        var configuration = Directory.GetParent(typeof(RenderGraphBuildTests).Assembly.Location)!
+            .Parent!
+            .Name;
+
+        Directory.CreateDirectory(outputDirectory);
+        try
+        {
+            var output = await BuildSampleAsync(
+                repositoryRoot,
+                projectPath,
+                configuration,
+                passManifestPath,
+                version: "1.0.0",
+                assetManifestPath);
+            Assert.False(File.Exists(passManifestPath));
+            Assert.True(File.Exists(assetManifestPath), $"Asset manifest was not written:{Environment.NewLine}{output}");
+
+            var manifestText = await File.ReadAllTextAsync(assetManifestPath);
+            Assert.DoesNotContain(repositoryRoot, manifestText, StringComparison.Ordinal);
+            using var manifest = JsonDocument.Parse(manifestText);
+            var root = manifest.RootElement;
+            Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal("Feather.AssetAssemblyManifest", root.GetProperty("kind").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("generatorManifestHash").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("assemblyHash").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("toolchainHash").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("buildId").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("manifestHash").GetString());
+            Assert.Equal(
+                $"bin/{configuration}/net10.0/AssetContracts.dll",
+                root.GetProperty("assemblyPath").GetString());
+
+            var types = root.GetProperty("assetTypes").EnumerateArray().ToArray();
+            Assert.Equal(3, types.Length);
+            var gradient = types.Single(type =>
+                type.GetProperty("typeId").GetString() == "878827ac-7fe1-4990-acad-554923b696c8");
+            var source = gradient.GetProperty("source");
+            Assert.Equal("GradientFieldAssets.cs", source.GetProperty("path").GetString());
+            Assert.Matches("^sha256:[0-9a-f]{64}$", source.GetProperty("documentHash").GetString());
+            var noPreview = types.Single(type =>
+                type.GetProperty("typeId").GetString() == "97c5237c-2ee8-4858-8881-f5e4726116da");
+            Assert.Empty(noPreview.GetProperty("capabilities").EnumerateArray());
+            Assert.Empty(noPreview.GetProperty("productSlots").EnumerateArray());
+        }
+        finally
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
     private static async Task<string> BuildSampleAsync(
         string repositoryRoot,
         string projectPath,
         string configuration,
         string manifestPath,
-        string version)
+        string version,
+        string? assetManifestPath = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -133,6 +196,10 @@ public class RenderGraphBuildTests
         startInfo.ArgumentList.Add(configuration);
         startInfo.ArgumentList.Add("--property:BuildProjectReferences=false");
         startInfo.ArgumentList.Add($"--property:FeatherPassManifestPath={manifestPath}");
+        if (assetManifestPath is not null)
+        {
+            startInfo.ArgumentList.Add($"--property:FeatherAssetManifestPath={assetManifestPath}");
+        }
         startInfo.ArgumentList.Add($"--property:Version={version}");
 
         using var process = Process.Start(startInfo)

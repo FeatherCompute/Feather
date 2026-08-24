@@ -365,13 +365,15 @@ public enum AssetInputRole
     Evaluation = 1 << 0,
     Runtime = 1 << 1,
     Preview = 1 << 2,
+    Editor = 1 << 3,
+    Provenance = 1 << 4,
 }
 
 public enum AssetChangeImpact
 {
     MetadataOnly = 0,
-    ReevaluateOutputs = 1,
-    RebuildProducts = 2,
+    PreviewOnly = 1,
+    ReevaluateOutputs = 2,
     RuntimeCandidate = 3,
 }
 

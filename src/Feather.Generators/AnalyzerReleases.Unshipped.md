@@ -36,3 +36,10 @@ FE0031 | Feather | Error | Render pass must implement IRenderPass.
 FE0032 | Feather | Error | Studio-visible enum identity is missing.
 FE0033 | Feather | Error | Studio-visible enum contract is invalid.
 FE0034 | Feather | Error | Enum underlying ABI is unsupported.
+FSA001 | Feather | Error | Asset Type identity is invalid or duplicated.
+FSA002 | Feather | Error | Asset Type declaration or nominal base is invalid.
+FSA010 | Feather | Error | Asset Input identity is invalid or duplicated.
+FSA011 | Feather | Error | Asset Input type, mutability, or bounds are unsupported.
+FSA020 | Feather | Error | Asset output slot or output contract is invalid.
+FSA030 | Feather | Error | Asset capability contract or version requirement is invalid.
+FSA040 | Feather | Error | Asset provider operation contract is invalid.

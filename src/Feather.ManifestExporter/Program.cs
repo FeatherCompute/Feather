@@ -4,32 +4,65 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-const string MetadataKey = "Feather.PassManifest";
+const string PassMetadataKey = "Feather.PassManifest";
+const string AssetMetadataKey = "Feather.AssetManifest";
 
 try
 {
     var arguments = ParseArguments(args);
     var assemblyPath = Required(arguments, "assembly");
-    var outputPath = Required(arguments, "output");
     var projectRoot = Required(arguments, "project-root");
+    var passOutputPath = arguments.GetValueOrDefault("output");
+    var assetOutputPath = arguments.GetValueOrDefault("asset-output");
+    if (string.IsNullOrWhiteSpace(passOutputPath) && string.IsNullOrWhiteSpace(assetOutputPath))
+    {
+        throw new ArgumentException("At least one of --output or --asset-output is required.");
+    }
     var feirDirectory = arguments.GetValueOrDefault("feir-directory") ?? "Generated/feather-ir";
 
     assemblyPath = Path.GetFullPath(assemblyPath);
-    outputPath = Path.GetFullPath(outputPath);
     projectRoot = Path.GetFullPath(projectRoot);
     var assembly = Assembly.LoadFrom(assemblyPath);
-    var encodedManifest = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-        .SingleOrDefault(attribute => attribute.Key == MetadataKey)
-        ?.Value;
+    if (!string.IsNullOrWhiteSpace(passOutputPath))
+    {
+        ExportPassManifest(
+            assembly,
+            assemblyPath,
+            Path.GetFullPath(passOutputPath),
+            projectRoot,
+            feirDirectory);
+    }
+    if (!string.IsNullOrWhiteSpace(assetOutputPath))
+    {
+        ExportAssetManifest(
+            assembly,
+            assemblyPath,
+            Path.GetFullPath(assetOutputPath),
+            projectRoot);
+    }
+    return 0;
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine($"Feather manifest export failed: {exception.Message}");
+    return 1;
+}
+
+static void ExportPassManifest(
+    Assembly assembly,
+    string assemblyPath,
+    string outputPath,
+    string projectRoot,
+    string feirDirectory)
+{
+    var encodedManifest = Metadata(assembly, PassMetadataKey);
     if (encodedManifest is null)
     {
-        File.Delete(outputPath);
-        return 0;
+        DeleteIfPresent(outputPath);
+        return;
     }
 
-    var manifestText = Encoding.UTF8.GetString(Convert.FromBase64String(encodedManifest));
-    var manifest = JsonNode.Parse(manifestText)?.AsObject()
-        ?? throw new InvalidDataException("Embedded Feather pass manifest is not a JSON object.");
+    var manifest = DecodeManifest(encodedManifest, "pass");
     var relativeAssemblyPath = NormalizePath(Path.GetRelativePath(projectRoot, assemblyPath));
     var outputDirectory = Path.GetDirectoryName(outputPath)
         ?? throw new InvalidOperationException($"Manifest path has no parent directory: {outputPath}");
@@ -57,25 +90,124 @@ try
     using var buildHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     buildHasher.AppendData(Encoding.UTF8.GetBytes(hashInput));
     buildHasher.AppendData([0]);
-    using (var assemblyStream = File.OpenRead(assemblyPath))
+    AppendFile(buildHasher, assemblyPath);
+    manifest["buildId"] = Hash(buildHasher.GetHashAndReset());
+    WriteIfChanged(outputPath, manifest.ToJsonString(jsonOptions) + Environment.NewLine);
+}
+
+static void ExportAssetManifest(
+    Assembly assembly,
+    string assemblyPath,
+    string outputPath,
+    string projectRoot)
+{
+    var encodedManifest = Metadata(assembly, AssetMetadataKey);
+    if (encodedManifest is null)
     {
-        var buffer = new byte[81920];
-        int bytesRead;
-        while ((bytesRead = assemblyStream.Read(buffer, 0, buffer.Length)) > 0)
+        DeleteIfPresent(outputPath);
+        return;
+    }
+
+    var manifest = DecodeManifest(encodedManifest, "Asset");
+    var generatorManifestHash = manifest["buildId"]?.GetValue<string>()
+        ?? throw new InvalidDataException("Embedded Feather Asset manifest is missing buildId.");
+    var assemblyHash = HashFile(assemblyPath);
+    var exporterHash = HashFile(typeof(Program).Assembly.Location);
+    manifest["generatorManifestHash"] = generatorManifestHash;
+    manifest["assemblyPath"] = NormalizePath(Path.GetRelativePath(projectRoot, assemblyPath));
+    manifest["assemblyHash"] = assemblyHash;
+    manifest["toolchainHash"] = HashText(
+        "Feather.AssetManifest.Exporter.v1\0" + generatorManifestHash + "\0" + exporterHash);
+
+    foreach (var collectionName in new[]
+             {
+                 "assetTypes",
+                 "capabilityContracts",
+                 "outputContracts",
+                 "providers",
+             })
+    {
+        foreach (var item in manifest[collectionName]?.AsArray().OfType<JsonObject>() ?? [])
         {
-            buildHasher.AppendData(buffer, 0, bytesRead);
+            var source = item["source"]?.AsObject()
+                ?? throw new InvalidDataException($"Asset manifest {collectionName} item is missing source.");
+            var sourcePath = source["path"]?.GetValue<string>()
+                ?? throw new InvalidDataException($"Asset manifest {collectionName} source is missing path.");
+            var normalizedPath = NormalizeSourcePath(projectRoot, sourcePath);
+            source["path"] = normalizedPath;
+            source["documentHash"] = HashFile(Path.Combine(projectRoot, normalizedPath));
         }
     }
-    manifest["buildId"] = "sha256:" + Convert.ToHexString(
-        buildHasher.GetHashAndReset()).ToLowerInvariant();
-    var output = manifest.ToJsonString(jsonOptions) + Environment.NewLine;
-    WriteIfChanged(outputPath, output);
-    return 0;
+
+    var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+    manifest["buildId"] = string.Empty;
+    manifest["manifestHash"] = string.Empty;
+    using (var buildHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+    {
+        buildHasher.AppendData(Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
+        buildHasher.AppendData([0]);
+        AppendFile(buildHasher, assemblyPath);
+        manifest["buildId"] = Hash(buildHasher.GetHashAndReset());
+    }
+    manifest["manifestHash"] = HashText(manifest.ToJsonString(jsonOptions));
+    WriteIfChanged(outputPath, manifest.ToJsonString(jsonOptions) + Environment.NewLine);
 }
-catch (Exception exception)
+
+static string? Metadata(Assembly assembly, string key)
+    => assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+        .SingleOrDefault(attribute => attribute.Key == key)
+        ?.Value;
+
+static JsonObject DecodeManifest(string encodedManifest, string kind)
 {
-    Console.Error.WriteLine($"Feather manifest export failed: {exception.Message}");
-    return 1;
+    var manifestText = Encoding.UTF8.GetString(Convert.FromBase64String(encodedManifest));
+    return JsonNode.Parse(manifestText)?.AsObject()
+        ?? throw new InvalidDataException($"Embedded Feather {kind} manifest is not a JSON object.");
+}
+
+static string NormalizeSourcePath(string projectRoot, string sourcePath)
+{
+    if (string.IsNullOrWhiteSpace(sourcePath) || Path.IsPathRooted(sourcePath))
+    {
+        throw new InvalidDataException("Asset source paths must be non-empty and project-relative.");
+    }
+
+    var normalizedRoot = Path.GetFullPath(projectRoot).TrimEnd(Path.DirectorySeparatorChar) +
+        Path.DirectorySeparatorChar;
+    var fullPath = Path.GetFullPath(Path.Combine(projectRoot, sourcePath));
+    if (!fullPath.StartsWith(normalizedRoot, StringComparison.Ordinal))
+    {
+        throw new InvalidDataException("Asset source path escapes the project root.");
+    }
+    if (!File.Exists(fullPath))
+    {
+        throw new FileNotFoundException("Asset source file was not found.", fullPath);
+    }
+    return NormalizePath(Path.GetRelativePath(projectRoot, fullPath));
+}
+
+static string HashFile(string path)
+{
+    using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+    AppendFile(hasher, path);
+    return Hash(hasher.GetHashAndReset());
+}
+
+static string HashText(string value)
+    => Hash(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+static string Hash(byte[] value)
+    => "sha256:" + Convert.ToHexString(value).ToLowerInvariant();
+
+static void AppendFile(IncrementalHash hasher, string path)
+{
+    using var stream = File.OpenRead(path);
+    var buffer = new byte[81920];
+    int bytesRead;
+    while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+    {
+        hasher.AppendData(buffer, 0, bytesRead);
+    }
 }
 
 static Dictionary<string, string> ParseArguments(string[] arguments)
@@ -122,6 +254,14 @@ static void WriteIfChanged(string path, string content)
     finally
     {
         File.Delete(temporaryPath);
+    }
+}
+
+static void DeleteIfPresent(string path)
+{
+    if (File.Exists(path))
+    {
+        File.Delete(path);
     }
 }
 

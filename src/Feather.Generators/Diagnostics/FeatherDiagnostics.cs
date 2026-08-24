@@ -177,6 +177,41 @@ internal static class FeatherDiagnostics
         "Enum underlying ABI is unsupported",
         "Enum parameter '{0}' uses unsupported underlying scalar '{1}'; supported scalars are I8, U8, I16, U16, I32, and U32");
 
+    public static readonly DiagnosticDescriptor AssetTypeIdentityInvalid = Create(
+        "FSA001",
+        "Asset Type identity is invalid",
+        "Asset Type '{0}' has an invalid or duplicate canonical identity: {1}");
+
+    public static readonly DiagnosticDescriptor AssetTypeShapeInvalid = Create(
+        "FSA002",
+        "Asset Type declaration is invalid",
+        "Asset Type '{0}' is invalid: {1}");
+
+    public static readonly DiagnosticDescriptor AssetInputIdentityInvalid = Create(
+        "FSA010",
+        "Asset Input identity is invalid",
+        "Asset Input '{0}' on '{1}' has an invalid or duplicate canonical identity: {2}");
+
+    public static readonly DiagnosticDescriptor AssetInputContractUnsupported = Create(
+        "FSA011",
+        "Asset Input contract is unsupported",
+        "Asset Input '{0}' on '{1}' is unsupported: {2}");
+
+    public static readonly DiagnosticDescriptor AssetOutputContractInvalid = Create(
+        "FSA020",
+        "Asset output contract is invalid",
+        "Asset output '{0}' on '{1}' is invalid: {2}");
+
+    public static readonly DiagnosticDescriptor AssetCapabilityContractInvalid = Create(
+        "FSA030",
+        "Asset capability contract is invalid",
+        "Asset capability '{0}' on '{1}' is invalid: {2}");
+
+    public static readonly DiagnosticDescriptor AssetProviderContractInvalid = Create(
+        "FSA040",
+        "Asset provider contract is invalid",
+        "Asset provider '{0}' is invalid: {1}");
+
     public static readonly DiagnosticDescriptor[] All =
     [
         ShaderTypeShape,
@@ -212,7 +247,14 @@ internal static class FeatherDiagnostics
         RenderPassContractInvalid,
         EnumIdentityMissing,
         EnumContractInvalid,
-        EnumUnderlyingUnsupported
+        EnumUnderlyingUnsupported,
+        AssetTypeIdentityInvalid,
+        AssetTypeShapeInvalid,
+        AssetInputIdentityInvalid,
+        AssetInputContractUnsupported,
+        AssetOutputContractInvalid,
+        AssetCapabilityContractInvalid,
+        AssetProviderContractInvalid
     ];
 
     private static DiagnosticDescriptor Create(string id, string title, string message)

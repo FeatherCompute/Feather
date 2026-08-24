@@ -2,11 +2,18 @@
   <PropertyGroup>
     <FeatherEmitPassManifest Condition="'$(FeatherEmitPassManifest)' == ''">true</FeatherEmitPassManifest>
     <FeatherPassManifestPath Condition="'$(FeatherPassManifestPath)' == ''">$(MSBuildProjectDirectory)/Generated/pass-manifest.json</FeatherPassManifestPath>
+    <FeatherEmitAssetManifest Condition="'$(FeatherEmitAssetManifest)' == ''">true</FeatherEmitAssetManifest>
+    <FeatherAssetManifestPath Condition="'$(FeatherAssetManifestPath)' == ''">$(MSBuildProjectDirectory)/Generated/asset-manifest.json</FeatherAssetManifestPath>
     <FeatherFeirDirectory Condition="'$(FeatherFeirDirectory)' == ''">Generated/feather-ir</FeatherFeirDirectory>
     <FeatherManifestExporterPath Condition="'$(FeatherManifestExporterPath)' == '' and Exists('$(MSBuildThisFileDirectory)../../Feather.ManifestExporter/Feather.ManifestExporter.csproj')">$(MSBuildThisFileDirectory)../../Feather.ManifestExporter/bin/$(Configuration)/net10.0/Feather.ManifestExporter.dll</FeatherManifestExporterPath>
     <FeatherManifestExporterPath Condition="'$(FeatherManifestExporterPath)' == ''">$(MSBuildThisFileDirectory)../tools/net10.0/Feather.ManifestExporter.dll</FeatherManifestExporterPath>
     <FeatherDotNetHostPath Condition="'$(FeatherDotNetHostPath)' == '' and '$(DotNetHostPath)' != ''">$(DotNetHostPath)</FeatherDotNetHostPath>
     <FeatherDotNetHostPath Condition="'$(FeatherDotNetHostPath)' == ''">dotnet</FeatherDotNetHostPath>
+    <FeatherPassManifestArgument Condition="'$(FeatherEmitPassManifest)' == 'true'">--output &quot;$(FeatherPassManifestPath)&quot;</FeatherPassManifestArgument>
+    <FeatherAssetManifestArgument Condition="'$(FeatherEmitAssetManifest)' == 'true'">--asset-output &quot;$(FeatherAssetManifestPath)&quot;</FeatherAssetManifestArgument>
+    <FeatherManifestOutputs Condition="'$(FeatherEmitPassManifest)' == 'true'">$(FeatherPassManifestPath)</FeatherManifestOutputs>
+    <FeatherManifestOutputs Condition="'$(FeatherEmitAssetManifest)' == 'true' and '$(FeatherManifestOutputs)' != ''">$(FeatherManifestOutputs);$(FeatherAssetManifestPath)</FeatherManifestOutputs>
+    <FeatherManifestOutputs Condition="'$(FeatherEmitAssetManifest)' == 'true' and '$(FeatherManifestOutputs)' == ''">$(FeatherAssetManifestPath)</FeatherManifestOutputs>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -36,10 +43,10 @@
   <Target Name="FeatherWritePassManifest"
           AfterTargets="Build"
           Inputs="$(TargetPath);$(FeatherManifestExporterPath)"
-          Outputs="$(FeatherPassManifestPath)"
-          Condition="'$(FeatherEmitPassManifest)' == 'true' and Exists('$(TargetPath)')">
+          Outputs="$(FeatherManifestOutputs)"
+          Condition="('$(FeatherEmitPassManifest)' == 'true' or '$(FeatherEmitAssetManifest)' == 'true') and Exists('$(TargetPath)')">
     <Error Condition="!Exists('$(FeatherManifestExporterPath)')"
            Text="Feather manifest exporter was not found at '$(FeatherManifestExporterPath)'." />
-    <Exec Command="&quot;$(FeatherDotNetHostPath)&quot; exec &quot;$(FeatherManifestExporterPath)&quot; --assembly &quot;$(TargetPath)&quot; --output &quot;$(FeatherPassManifestPath)&quot; --project-root &quot;$(MSBuildProjectDirectory)&quot; --feir-directory &quot;$(FeatherFeirDirectory)&quot;" />
+    <Exec Command="&quot;$(FeatherDotNetHostPath)&quot; exec &quot;$(FeatherManifestExporterPath)&quot; --assembly &quot;$(TargetPath)&quot; $(FeatherPassManifestArgument) $(FeatherAssetManifestArgument) --project-root &quot;$(MSBuildProjectDirectory)&quot; --feir-directory &quot;$(FeatherFeirDirectory)&quot;" />
   </Target>
 </Project>

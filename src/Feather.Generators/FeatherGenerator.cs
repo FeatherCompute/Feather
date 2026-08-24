@@ -51,6 +51,46 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             .Select(static (pair, _) =>
                 PassModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
 
+        var assetTypes = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.Assets.FeatherAssetTypeAttribute",
+                static (node, _) => node is ClassDeclarationSyntax,
+                static (ctx, ct) => AssetModelFactory.CreateType(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                AssetModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
+        var assetCapabilities = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.Assets.FeatherAssetCapabilityAttribute",
+                static (node, _) => node is TypeDeclarationSyntax,
+                static (ctx, ct) => AssetModelFactory.CreateCapability(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                AssetModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
+        var assetOutputContracts = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.Assets.FeatherAssetOutputContractAttribute",
+                static (node, _) => node is TypeDeclarationSyntax,
+                static (ctx, ct) => AssetModelFactory.CreateOutputContract(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                AssetModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
+        var assetProviders = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.Assets.FeatherAssetProviderAttribute",
+                static (node, _) => node is ClassDeclarationSyntax,
+                static (ctx, ct) => AssetModelFactory.CreateProvider(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                AssetModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
         context.RegisterSourceOutput(gpuStructModels, static (productionContext, model) =>
         {
             var hasErrors = false;
@@ -119,6 +159,19 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             passModels.Collect().Combine(passManifestOptions),
             static (productionContext, pair) =>
                 PassManifestWriter.Emit(productionContext, pair.Left, pair.Right));
+
+        var assetContracts = assetCapabilities.Collect().Combine(assetOutputContracts.Collect());
+        var assetManifestModels = assetTypes.Collect()
+            .Combine(assetContracts)
+            .Combine(assetProviders.Collect());
+        context.RegisterSourceOutput(
+            assetManifestModels,
+            static (productionContext, pair) => AssetManifestWriter.Emit(
+                productionContext,
+                pair.Left.Left,
+                pair.Left.Right.Left,
+                pair.Left.Right.Right,
+                pair.Right));
     }
 
     private static string GenerateKernel(ShaderModel model)

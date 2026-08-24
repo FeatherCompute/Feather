@@ -23,6 +23,7 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/BlenderRenderGraph/BlenderRenderGraph.csproj" />
+    <Project Path="samples/AssetContracts/AssetContracts.csproj" />
     <Project Path="samples/HelloBuffer/HelloBuffer.csproj" />
     <Project Path="samples/TextureCopy/TextureCopy.csproj" />
     <Project Path="samples/ParallelReduction/ParallelReduction.csproj" />
