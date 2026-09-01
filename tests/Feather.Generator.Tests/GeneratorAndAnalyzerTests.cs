@@ -7061,7 +7061,7 @@ public class GeneratorAndAnalyzerTests
     /// the editor and unresolvable at render time.
     /// </remarks>
     [Fact]
-    public void GeneratorDistinguishesASceneObjectFromTheWholeScene()
+    public void GeneratorDistinguishesEvaluatedSceneGeometryAndSceneObjectResources()
     {
         var compilation = CreateCompilation(
             """
@@ -7070,6 +7070,9 @@ public class GeneratorAndAnalyzerTests
             [FeatherPass("1d7a4c85-6b39-42e7-9f14-8c5d2b7a3e69")]
             public sealed class SceneObjectPass : IComputePass
             {
+                [Input("6f4a2c91-18e3-4b7d-a950-2c6e8f1a3d75", Name = "Evaluated Scene")]
+                public SceneHandle EvaluatedScene { get; init; }
+
                 [Input("4e8b1f36-7d52-49a3-b681-2f9c5a4d8e17")]
                 public SceneGeometryHandle Scene { get; init; }
 
@@ -7102,6 +7105,7 @@ public class GeneratorAndAnalyzerTests
         var inputs = pass.GetProperty("inputs").EnumerateArray()
             .ToDictionary(socket => socket.GetProperty("name").GetString()!);
 
+        Assert.Equal("Scene", inputs["Evaluated Scene"].GetProperty("resourceKind").GetString());
         Assert.Equal("SceneGeometry", inputs["Scene"].GetProperty("resourceKind").GetString());
         Assert.Equal("SceneObject", inputs["Surface"].GetProperty("resourceKind").GetString());
     }

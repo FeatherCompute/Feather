@@ -22,12 +22,15 @@ internal sealed record AssetInputModel(
     int? MinimumItems,
     int? MaximumItems,
     int? MaximumLength,
+    string? DefaultValueJson,
     bool IsImmutable,
     Location Location);
 
 internal sealed record AssetCapabilityUseModel(
     string ContractTypeName,
     string? Guid,
+    ushort ContractMajor,
+    ushort ContractMinor,
     ushort MinimumMajor,
     ushort MinimumMinor,
     bool Required,

@@ -22,6 +22,7 @@ internal static class PassModelFactory
     private const string AssetCapabilityAttributeMetadataName = "AssetCapabilityAttribute`1";
     private const string AssetOutputAttributeMetadataName = "AssetOutputAttribute`1";
     private const string AssetProductBindingAttributeName = "Feather.RenderGraph.AssetProductBindingAttribute";
+    private const string DataBindingAttributeName = "Feather.RenderGraph.DataBindingAttribute";
     private const string RelativePathOption = "build_metadata.Compile.FeatherProjectRelativePath";
 
     public static PassModel? Create(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
@@ -145,6 +146,33 @@ internal static class PassModelFactory
 
     private static PassSocketContractModel CreateSocketContract(ISymbol member, ITypeSymbol memberType)
     {
+        if (memberType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ==
+            "global::Feather.RenderGraph.DataHandle")
+        {
+            AttributeData? binding = FindAttribute(member.GetAttributes(), DataBindingAttributeName);
+            return new PassSocketContractModel(
+                "DATA_INSTANCE",
+                null,
+                0,
+                0,
+                [],
+                null,
+                null,
+                0,
+                0,
+                AdapterRequired: false,
+                RequiredDataTypeId: binding is null ? null : GetConstructorString(binding),
+                RequiredDataLayoutAbiHash: binding?.ConstructorArguments.Length > 1
+                    ? binding.ConstructorArguments[1].Value as string
+                    : null,
+                RequiredDataContractMajor: binding is null
+                    ? (ushort)0
+                    : GetNamedUInt16(binding, "ContractMajor") ?? 1,
+                RequiredDataContractMinor: binding is null
+                    ? (ushort)0
+                    : GetNamedUInt16(binding, "ContractMinor") ?? 0);
+        }
+
         if (memberType is INamedTypeSymbol { IsGenericType: true } named &&
             named.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) ==
             "Feather.Assets.AssetRef<TAsset>")
@@ -213,7 +241,7 @@ internal static class PassModelFactory
     private static ImmutableArray<PassSocketCapabilityModel> AssetCapabilities(ITypeSymbol assetType)
     {
         var result = ImmutableArray.CreateBuilder<PassSocketCapabilityModel>();
-        foreach (var attribute in assetType.GetAttributes())
+        foreach (var attribute in AssetContractAttributes(assetType))
         {
             if (!IsGenericAssetAttribute(attribute, AssetCapabilityAttributeMetadataName) ||
                 attribute.AttributeClass is not { TypeArguments.Length: 1 } capabilityClass)
@@ -239,11 +267,22 @@ internal static class PassModelFactory
         ITypeSymbol assetType,
         ITypeSymbol outputType,
         string? slotGuid)
-        => assetType.GetAttributes().FirstOrDefault(attribute =>
+        => AssetContractAttributes(assetType).FirstOrDefault(attribute =>
             IsGenericAssetAttribute(attribute, AssetOutputAttributeMetadataName) &&
             attribute.AttributeClass is { TypeArguments.Length: 1 } outputClass &&
             SymbolEqualityComparer.Default.Equals(outputClass.TypeArguments[0], outputType) &&
             GetConstructorString(attribute) == slotGuid);
+
+    private static IEnumerable<AttributeData> AssetContractAttributes(ITypeSymbol assetType)
+    {
+        for (ITypeSymbol? current = assetType; current is INamedTypeSymbol named; current = named.BaseType)
+        {
+            foreach (var attribute in current.GetAttributes())
+            {
+                yield return attribute;
+            }
+        }
+    }
 
     private static bool IsGenericAssetAttribute(AttributeData attribute, string metadataName)
         => attribute.AttributeClass?.OriginalDefinition.MetadataName == metadataName &&
@@ -456,8 +495,10 @@ internal static class PassModelFactory
         {
             "global::Feather.RenderGraph.BufferHandle" => "Buffer",
             "global::Feather.RenderGraph.CameraHandle" => "Camera",
+            "global::Feather.RenderGraph.DataHandle" => "Data",
             "global::Feather.RenderGraph.LightTableHandle" => "LightTable",
             "global::Feather.RenderGraph.MaterialTableHandle" => "MaterialTable",
+            "global::Feather.RenderGraph.SceneHandle" => "Scene",
             "global::Feather.RenderGraph.SceneGeometryHandle" => "SceneGeometry",
             "global::Feather.RenderGraph.SceneObjectHandle" => "SceneObject",
             "global::Feather.RenderGraph.TextureHandle" => "Texture2D",

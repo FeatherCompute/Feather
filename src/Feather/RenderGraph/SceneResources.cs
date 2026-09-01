@@ -365,7 +365,12 @@ public sealed class SceneMaterial
         float4? sheenColor = null,
         float clearcoatWeight = DefaultClearcoatWeight,
         float clearcoatRoughness = DefaultClearcoatRoughness,
-        SceneMaterialExpression? expression = null)
+        SceneMaterialExpression? expression = null,
+        float specular = 0.5f,
+        int normalTextureIndex = NoTexture,
+        int metallicTextureIndex = NoTexture,
+        int roughnessTextureIndex = NoTexture,
+        int opacityTextureIndex = NoTexture)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(name);
@@ -378,6 +383,10 @@ public sealed class SceneMaterial
         if (!float.IsFinite(roughness) || roughness is < 0.0f or > 1.0f)
         {
             throw new ArgumentOutOfRangeException(nameof(roughness), "Roughness must be between zero and one.");
+        }
+        if (!float.IsFinite(specular) || specular is < 0.0f or > 1.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(specular), "Specular must be between zero and one.");
         }
         if (!float.IsFinite(ior) || ior is < 1.0f or > 1000.0f)
         {
@@ -417,9 +426,13 @@ public sealed class SceneMaterial
         {
             throw new ArgumentOutOfRangeException(nameof(emissionStrength));
         }
-        if (baseColorTextureIndex < NoTexture)
+        if (baseColorTextureIndex < NoTexture || normalTextureIndex < NoTexture ||
+            metallicTextureIndex < NoTexture || roughnessTextureIndex < NoTexture ||
+            opacityTextureIndex < NoTexture)
         {
-            throw new ArgumentOutOfRangeException(nameof(baseColorTextureIndex));
+            throw new ArgumentOutOfRangeException(
+                nameof(baseColorTextureIndex),
+                "Material texture indices must be -1 or greater.");
         }
         if (!Enum.IsDefined(status))
         {
@@ -434,6 +447,7 @@ public sealed class SceneMaterial
         Name = name;
         BaseColor = baseColor;
         Metallic = metallic;
+        Specular = specular;
         Roughness = roughness;
         Ior = ior;
         DiffuseRoughness = diffuseRoughness;
@@ -446,6 +460,10 @@ public sealed class SceneMaterial
         EmissionStrength = emissionStrength;
         Alpha = alpha;
         BaseColorTextureIndex = baseColorTextureIndex;
+        NormalTextureIndex = normalTextureIndex;
+        MetallicTextureIndex = metallicTextureIndex;
+        RoughnessTextureIndex = roughnessTextureIndex;
+        OpacityTextureIndex = opacityTextureIndex;
         Status = status;
         Diagnostic = diagnostic;
         Expression = expression;
@@ -458,6 +476,8 @@ public sealed class SceneMaterial
     public float4 BaseColor { get; }
 
     public float Metallic { get; }
+
+    public float Specular { get; }
 
     public float Roughness { get; }
 
@@ -486,6 +506,14 @@ public sealed class SceneMaterial
     public float Alpha { get; }
 
     public int BaseColorTextureIndex { get; }
+
+    public int NormalTextureIndex { get; }
+
+    public int MetallicTextureIndex { get; }
+
+    public int RoughnessTextureIndex { get; }
+
+    public int OpacityTextureIndex { get; }
 
     public SceneMaterialStatus Status { get; }
 
@@ -782,6 +810,122 @@ public sealed class SceneLightTable
     }
 
     public ReadOnlyMemory<SceneLight> Lights { get; }
+}
+
+/// <summary>The execution domain retained for one Actor in an evaluated Scene.</summary>
+public enum RenderSceneActorDomain
+{
+    Triangle = 0,
+    Analytic = 1,
+    SignedDistance = 2,
+}
+
+/// <summary>
+/// One immutable Actor passed through a <see cref="RenderScene"/> without forcing it into a mesh.
+/// <c>RepresentationId</c> is a renderer-visible geometry discriminator; it is not an Asset Type
+/// name and does not require an adapter registry. A renderer may switch on it directly, while a
+/// graph-authored adapter pass remains an optional user implementation.
+/// </summary>
+public sealed class RenderSceneActor
+{
+    public RenderSceneActor(
+        string id,
+        string representationId,
+        RenderSceneActorDomain domain,
+        float3 center,
+        float3 size,
+        float3 rotationDegrees,
+        float radius,
+        float3 normal,
+        int materialIndex,
+        ReadOnlyMemory<float> parameters = default,
+        SceneGeometry? triangleGeometry = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentException.ThrowIfNullOrWhiteSpace(representationId);
+        if (!Enum.IsDefined(domain)) throw new ArgumentOutOfRangeException(nameof(domain));
+        if (!IsFinite(center) || !IsFinite(size) || !IsFinite(rotationDegrees) || !IsFinite(normal) ||
+            !float.IsFinite(radius) || radius < 0 || materialIndex < 0)
+        {
+            throw new ArgumentException("Scene Actor values must be finite and bounded.");
+        }
+        foreach (float parameter in parameters.Span)
+        {
+            if (!float.IsFinite(parameter))
+                throw new ArgumentException("Scene Actor representation parameters must be finite.", nameof(parameters));
+        }
+        if (domain == RenderSceneActorDomain.Triangle && triangleGeometry is null)
+            throw new ArgumentException("Triangle-domain Actors require geometry.", nameof(triangleGeometry));
+        if (domain != RenderSceneActorDomain.Triangle && triangleGeometry is not null)
+            throw new ArgumentException("Only triangle-domain Actors may carry triangle geometry.", nameof(triangleGeometry));
+
+        Id = id;
+        RepresentationId = representationId;
+        Domain = domain;
+        Center = center;
+        Size = size;
+        RotationDegrees = rotationDegrees;
+        Radius = radius;
+        Normal = normal;
+        MaterialIndex = materialIndex;
+        Parameters = parameters;
+        TriangleGeometry = triangleGeometry;
+    }
+
+    public string Id { get; }
+    public string RepresentationId { get; }
+    public RenderSceneActorDomain Domain { get; }
+    public float3 Center { get; }
+    public float3 Size { get; }
+    public float3 RotationDegrees { get; }
+    public float Radius { get; }
+    public float3 Normal { get; }
+    public int MaterialIndex { get; }
+    public ReadOnlyMemory<float> Parameters { get; }
+    public SceneGeometry? TriangleGeometry { get; }
+
+    private static bool IsFinite(float3 value) =>
+        float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
+}
+
+/// <summary>
+/// Immutable evaluated Scene object supplied as one graph resource. It intentionally retains
+/// heterogeneous Actor representations so a renderer can implement native hybrid execution.
+/// </summary>
+public sealed class RenderScene
+{
+    public RenderScene(
+        string id,
+        ReadOnlyMemory<RenderSceneActor> actors,
+        SceneMaterialTable materials,
+        SceneTextureTable textures,
+        SceneLightTable lights,
+        RenderCamera camera)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(materials);
+        ArgumentNullException.ThrowIfNull(textures);
+        ArgumentNullException.ThrowIfNull(lights);
+        foreach (RenderSceneActor actor in actors.Span)
+        {
+            if (actor is null) throw new ArgumentException("Scene Actors cannot contain null entries.", nameof(actors));
+            if (actor.MaterialIndex >= materials.Materials.Length)
+                throw new ArgumentException("Scene Actor material index is out of range.", nameof(actors));
+        }
+        Id = id;
+        Actors = actors;
+        Materials = materials;
+        Textures = textures;
+        Lights = lights;
+        Camera = camera;
+    }
+
+    public string Id { get; }
+    public ReadOnlyMemory<RenderSceneActor> Actors { get; }
+    public SceneMaterialTable Materials { get; }
+    public SceneTextureTable Textures { get; }
+    public SceneLightTable Lights { get; }
+    public RenderCamera Camera { get; }
 }
 
 /// <summary>

@@ -15,6 +15,7 @@ public sealed class AssetGeneratorTests
     private const string TypeGuid = "878827ac-7fe1-4990-acad-554923b696c8";
     private const string ScaleGuid = "0228c70f-7456-416f-807d-f4cd4b96e859";
     private const string LabelGuid = "79574624-0838-4cef-8962-aab26ad1ea26";
+    private const string TintGuid = "8f0cd771-3c7f-47d8-a3d8-b51f5325128b";
     private const string ReferenceGuid = "5b2fd1cb-0a91-421a-8858-21f153547e3a";
     private const string SlotGuid = "32087aaa-22f8-4033-95f3-f86a4654614b";
     private const string ProviderGuid = "aa4c24ec-750a-4c1d-aab1-4fbb66d6e474";
@@ -22,6 +23,147 @@ public sealed class AssetGeneratorTests
     private const string ProductInputSocketGuid = "62265a65-a9b4-401c-bf79-3dd70386ad8b";
     private const string ProductOutputSocketGuid = "86dc808c-1a63-4af9-a950-cdc477d80109";
     private const string TextureSocketGuid = "b1acfd3b-9521-47dd-a975-c23f0ca12c57";
+    private const string DataTypeGuid = "de71ba15-fdbc-4ea1-9dcf-5e3551bb6985";
+    private const string DataSocketGuid = "ec52ae35-1ef1-47a0-983b-6a8506f596da";
+    private const string DataLayoutHash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    [Fact]
+    public void GeneratorPublishesCSharpAuthoredDataTypeAndGpuStructLayoutIdentity()
+    {
+        const string dataTypeId = "70ed1481-f8a5-4abd-a835-4f619a8de2c7";
+        const string resourceId = "af0c4383-28df-44f5-884a-51820e69212e";
+        var result = Generate(
+            $$"""
+            using Feather;
+            using Feather.Math;
+            using Feather.RenderGraph;
+
+            namespace Scratch;
+
+            [GpuStruct]
+            public partial struct ProbeSample
+            {
+                public float3 Position;
+                public float Weight;
+            }
+
+            [FeatherDataType("{{dataTypeId}}", Name = "Probe Field")]
+            public sealed class ProbeFieldData
+            {
+                [DataResource(
+                    "{{resourceId}}",
+                    Name = "Probes",
+                    Access = DataAccess.ReadWrite,
+                    Creation = DataCreation.BeforeGraph,
+                    Update = DataUpdate.PassMutated,
+                    Lifetime = DataResourceLifetime.Workspace,
+                    ElementCount = 64,
+                    MaximumBytes = 1024)]
+                public DataBuffer<ProbeSample> Probes;
+            }
+            """,
+            "Data/Types/ProbeFieldData.cs");
+
+        Assert.DoesNotContain(
+            result.Diagnostics,
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(
+            result.Output.GetDiagnostics(),
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var manifest = JsonDocument.Parse(result.DataManifest);
+        Assert.Equal("Feather.DataAssemblyManifest", manifest.RootElement.GetProperty("kind").GetString());
+        var type = Assert.Single(manifest.RootElement.GetProperty("types").EnumerateArray());
+        Assert.Equal("Data/Types/ProbeFieldData.cs", type.GetProperty("sourcePath").GetString());
+        var document = type.GetProperty("document");
+        Assert.Equal(dataTypeId, document.GetProperty("typeId").GetString());
+        Assert.Matches("^sha256:[0-9a-f]{64}$", document.GetProperty("manifestHash").GetString());
+        Assert.Matches("^sha256:[0-9a-f]{64}$", document.GetProperty("layoutAbiHash").GetString());
+        var resource = Assert.Single(document.GetProperty("resources").EnumerateArray());
+        Assert.Equal(resourceId, resource.GetProperty("resourceId").GetString());
+        Assert.Equal("BUFFER", resource.GetProperty("kind").GetString());
+        Assert.Equal("Scratch.ProbeSample", resource.GetProperty("elementType").GetString());
+        Assert.Matches("^sha256:[0-9a-f]{64}$", resource.GetProperty("elementLayoutAbiHash").GetString());
+        Assert.Equal(16, resource.GetProperty("elementStrideBytes").GetInt32());
+        Assert.Equal(16, resource.GetProperty("elementAlignmentBytes").GetInt32());
+        Assert.Equal(64, resource.GetProperty("elementCount").GetInt64());
+        Assert.Equal(1024, resource.GetProperty("maximumBytes").GetInt64());
+    }
+
+    [Fact]
+    public void GeneratorRejectsInvalidDataIdentityAndUnboundedResource()
+    {
+        var result = Generate(
+            """
+            using Feather.RenderGraph;
+
+            [FeatherDataType("70ED1481-F8A5-4ABD-A835-4F619A8DE2C7")]
+            public sealed class BrokenData
+            {
+                [DataResource("not-a-guid")]
+                public DataBuffer<float> Values;
+            }
+            """,
+            "Data/Types/BrokenData.cs");
+
+        var ids = result.Diagnostics.Select(static diagnostic => diagnostic.Id).ToHashSet();
+        Assert.Contains("FSD002", ids);
+        Assert.Empty(result.DataManifest);
+    }
+
+    [Fact]
+    public void PassManifestKeepsDataInstanceAsOneExactTypedObject()
+    {
+        var result = Generate(
+            $$"""
+            using Feather.RenderGraph;
+
+            [FeatherPass("527bbab3-436a-4c73-9e5e-0de711ad1d3c")]
+            public sealed class ProbeLightingPass : IComputePass
+            {
+                [Input("{{DataSocketGuid}}", Name = "Probe GI")]
+                [DataBinding("{{DataTypeGuid}}", "{{DataLayoutHash}}", ContractMajor = 1)]
+                public DataHandle Probes { get; init; }
+
+                public void Execute(RenderContext context) { }
+            }
+            """,
+            "Passes/ProbeLightingPass.cs");
+
+        Assert.DoesNotContain(
+            result.Diagnostics,
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var manifest = JsonDocument.Parse(result.PassManifest);
+        JsonElement input = Assert.Single(
+            Assert.Single(manifest.RootElement.GetProperty("passes").EnumerateArray())
+                .GetProperty("inputs").EnumerateArray());
+        Assert.Equal("Data", input.GetProperty("resourceKind").GetString());
+        Assert.Equal("DATA_INSTANCE", input.GetProperty("contractKind").GetString());
+        Assert.Equal(
+            DataTypeGuid,
+            input.GetProperty("dataContract").GetProperty("requiredTypeId").GetString());
+        Assert.Equal(
+            DataLayoutHash,
+            input.GetProperty("dataContract").GetProperty("layoutAbiHash").GetString());
+    }
+
+    [Fact]
+    public void DataHandleWithoutAnExactBindingIsRejected()
+    {
+        var result = Generate(
+            $$"""
+            using Feather.RenderGraph;
+
+            [FeatherPass("527bbab3-436a-4c73-9e5e-0de711ad1d3c")]
+            public sealed class InvalidDataPass : IComputePass
+            {
+                [Input("{{DataSocketGuid}}")] public DataHandle Data { get; init; }
+                public void Execute(RenderContext context) { }
+            }
+            """,
+            "Passes/InvalidDataPass.cs");
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "FSD001");
+    }
 
     [Fact]
     public void GeneratorEmitsDeterministicAssetContractsProvidersAndCompanion()
@@ -57,8 +199,14 @@ public sealed class AssetGeneratorTests
             .ToDictionary(input => input.GetProperty("inputId").GetString()!);
         Assert.Equal("FLOAT", inputs[ScaleGuid].GetProperty("valueKind").GetString());
         Assert.Equal(0.01, inputs[ScaleGuid].GetProperty("step").GetDouble());
+        Assert.Equal(1, inputs[ScaleGuid].GetProperty("defaultValue").GetDouble());
         Assert.Equal("TEXT", inputs[LabelGuid].GetProperty("valueKind").GetString());
         Assert.Equal(64, inputs[LabelGuid].GetProperty("maximumLength").GetInt32());
+        Assert.Equal(string.Empty, inputs[LabelGuid].GetProperty("defaultValue").GetString());
+        Assert.Equal(
+            [0.2, 0.4, 0.6],
+            inputs[TintGuid].GetProperty("defaultValue").EnumerateArray()
+                .Select(static component => component.GetDouble()).ToArray());
         Assert.Equal("ASSET_REFERENCE", inputs[ReferenceGuid].GetProperty("valueKind").GetString());
         Assert.Equal("Scratch.FieldAsset", inputs[ReferenceGuid].GetProperty("referencedAssetType").GetString());
         Assert.Equal(BaseTypeGuid, inputs[ReferenceGuid].GetProperty("referencedAssetTypeId").GetString());
@@ -114,6 +262,47 @@ public sealed class AssetGeneratorTests
     }
 
     [Fact]
+    public void DerivedAssetMayUseCapabilityAndOutputContractsFromReferencedFeatherAssembly()
+    {
+        var result = Generate(
+            """
+            using Feather.Assets;
+            using Feather.Assets.Graphics;
+            using Feather.Assets.Scenes;
+
+            namespace Scratch;
+
+            [FeatherAssetType("f52f813d-6f74-4fa6-9b76-3cb9554264a2", Name = "Imported Scene Model")]
+            [AssetCapability<SceneSnapshotCapability>]
+            [AssetOutput<SceneSnapshotOutput>(
+                "d25e6564-e47b-48c2-a1b8-700a42c9c7af",
+                Symbol = "SceneSnapshot",
+                PassDirections = AssetPassDirections.Input)]
+            public sealed partial class ImportedSceneModelAsset : ModelAsset;
+            """,
+            "Assets/ImportedSceneModelAsset.cs");
+
+        Assert.DoesNotContain(
+            result.Diagnostics,
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(
+            result.Output.GetDiagnostics(),
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var manifest = JsonDocument.Parse(result.Manifest);
+        Assert.Empty(manifest.RootElement.GetProperty("capabilityContracts").EnumerateArray());
+        Assert.Empty(manifest.RootElement.GetProperty("outputContracts").EnumerateArray());
+        JsonElement type = Assert.Single(manifest.RootElement.GetProperty("assetTypes").EnumerateArray());
+        JsonElement capability = Assert.Single(type.GetProperty("capabilities").EnumerateArray());
+        Assert.Equal(
+            "5cd3ec1b-629a-46ef-9b8a-55f6e96102db",
+            capability.GetProperty("capabilityId").GetString());
+        JsonElement output = Assert.Single(type.GetProperty("productSlots").EnumerateArray());
+        Assert.Equal(
+            "ecf5d49e-e75e-4fbf-be68-c0d07813f612",
+            output.GetProperty("outputContractId").GetString());
+    }
+
+    [Fact]
     public void StableIdsSurviveTypeSymbolAndSourceRename()
     {
         var before = Generate(ValidSource, "Assets/GradientField.cs");
@@ -136,6 +325,55 @@ public sealed class AssetGeneratorTests
         Assert.NotEqual(
             beforeDocument.RootElement.GetProperty("buildId").GetString(),
             renamedDocument.RootElement.GetProperty("buildId").GetString());
+    }
+
+    [Fact]
+    public void PreparedProductSocketAcceptsAProductInheritedByAProjectDefinedAssetType()
+    {
+        const string derivedTypeGuid = "7c773436-0954-4937-afdf-150e827dc381";
+        var result = Generate(
+            $$"""
+            using Feather.Assets;
+            using Feather.RenderGraph;
+
+            [FeatherAssetOutputContract("{{OutputContractGuid}}")]
+            public sealed class Product : IAssetOutputContract { }
+
+            [FeatherAssetType("{{BaseTypeGuid}}", Abstract = true)]
+            [AssetOutput<Product>("{{SlotGuid}}", Symbol = "Product")]
+            public abstract partial class BaseProductAsset : Asset { }
+
+            [FeatherAssetType("{{derivedTypeGuid}}")]
+            public sealed partial class ProjectProductAsset : BaseProductAsset { }
+
+            [FeatherPass("c9176c1c-54f0-4d5d-aa0f-3a1e35846b67")]
+            public sealed class DerivedProductPass : IComputePass
+            {
+                [Input("{{ProductInputSocketGuid}}")]
+                [AssetProductBinding(typeof(ProjectProductAsset), "{{SlotGuid}}")]
+                public AssetOutputHandle<Product> Product { get; init; }
+
+                public void Execute(RenderContext context) { }
+            }
+            """,
+            "Assets/DerivedProductPass.cs");
+
+        Assert.DoesNotContain(
+            result.Diagnostics,
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var passDocument = JsonDocument.Parse(result.PassManifest);
+        var pass = Assert.Single(passDocument.RootElement.GetProperty("passes").EnumerateArray());
+        var input = Assert.Single(pass.GetProperty("inputs").EnumerateArray());
+        Assert.Equal("ASSET_PRODUCT", input.GetProperty("contractKind").GetString());
+        Assert.Equal(
+            derivedTypeGuid,
+            input.GetProperty("assetContract").GetProperty("requiredTypeId").GetString());
+        Assert.Equal(
+            SlotGuid,
+            input.GetProperty("assetContract").GetProperty("productSlotId").GetString());
+        Assert.Equal(
+            OutputContractGuid,
+            input.GetProperty("assetContract").GetProperty("outputContractId").GetString());
     }
 
     [Fact]
@@ -316,7 +554,17 @@ public sealed class AssetGeneratorTests
         var passManifest = passGenerated is null
             ? string.Empty
             : ReadManifest(outputCompilation, passGenerated);
-        return new GeneratorResult(outputCompilation, diagnostics, manifest, passManifest);
+        var dataGenerated = outputCompilation.SyntaxTrees.SingleOrDefault(tree =>
+            tree.FilePath.EndsWith("Feather.DataManifest.g.cs", StringComparison.Ordinal));
+        var dataManifest = dataGenerated is null
+            ? string.Empty
+            : ReadManifest(outputCompilation, dataGenerated);
+        return new GeneratorResult(
+            outputCompilation,
+            diagnostics,
+            manifest,
+            passManifest,
+            dataManifest);
     }
 
     private static string ReadManifest(Compilation compilation, SyntaxTree generated)
@@ -352,7 +600,8 @@ public sealed class AssetGeneratorTests
         Compilation Output,
         IReadOnlyList<Diagnostic> Diagnostics,
         string Manifest,
-        string PassManifest);
+        string PassManifest,
+        string DataManifest);
 
     private sealed class MetadataReferenceComparer : IEqualityComparer<MetadataReference>
     {
@@ -369,6 +618,7 @@ public sealed class AssetGeneratorTests
         using System.Threading;
         using System.Threading.Tasks;
         using Feather.Assets;
+        using Feather.Math;
         using Feather.RenderGraph;
 
         namespace Scratch;
@@ -421,6 +671,9 @@ public sealed class AssetGeneratorTests
                 MaxLength = 64,
                 ChangeImpact = AssetChangeImpact.MetadataOnly)]
             public string Label { get; init; } = string.Empty;
+
+            [AssetInput("{{TintGuid}}", Name = "Tint", Min = 0, Max = 1)]
+            public float3 Tint { get; init; } = new(0.2f, 0.4f, 0.6f);
 
             [AssetInput(
                 "{{ReferenceGuid}}",

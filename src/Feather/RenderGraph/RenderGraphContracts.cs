@@ -204,6 +204,13 @@ public readonly record struct BufferHandle<T>(ulong Value)
 
 public readonly record struct TextureHandle(ulong Value);
 
+/// <summary>
+/// Identifies one immutable evaluated scene. The render host preserves heterogeneous Actor
+/// representations. A renderer may consume them natively with multiple hit paths; an explicit
+/// graph adapter pass is only an optional user-authored design.
+/// </summary>
+public readonly record struct SceneHandle(ulong Value);
+
 public readonly record struct SceneGeometryHandle(ulong Value);
 
 public readonly record struct MaterialTableHandle(ulong Value);

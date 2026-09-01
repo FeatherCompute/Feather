@@ -56,7 +56,12 @@ internal static class AssetModelFactory
             };
             if (memberType is not null)
             {
-                inputs.Add(CreateInput(member, memberType, input));
+                inputs.Add(CreateInput(
+                    context.SemanticModel.Compilation,
+                    member,
+                    memberType,
+                    input,
+                    cancellationToken));
             }
         }
 
@@ -73,6 +78,8 @@ internal static class AssetModelFactory
                 capabilities.Add(new AssetCapabilityUseModel(
                     TypeName(contract),
                     declaration is null ? null : ConstructorString(declaration),
+                    declaration is null ? (ushort)0 : NamedUInt16(declaration, "ContractMajor") ?? 1,
+                    declaration is null ? (ushort)0 : NamedUInt16(declaration, "ContractMinor") ?? 0,
                     NamedUInt16(candidate, "MinimumMajor") ?? 1,
                     NamedUInt16(candidate, "MinimumMinor") ?? 0,
                     NamedBoolean(candidate, "Required", defaultValue: true),
@@ -265,7 +272,12 @@ internal static class AssetModelFactory
         return "sha256:" + BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant();
     }
 
-    private static AssetInputModel CreateInput(ISymbol member, ITypeSymbol type, AttributeData attribute)
+    private static AssetInputModel CreateInput(
+        Compilation compilation,
+        ISymbol member,
+        ITypeSymbol type,
+        AttributeData attribute,
+        CancellationToken cancellationToken)
     {
         var valueKind = ValueKind(
             type,
@@ -296,8 +308,115 @@ internal static class AssetModelFactory
             NonNegative(attribute, "MinItems"),
             NonNegative(attribute, "MaxItems"),
             NonNegative(attribute, "MaxLength"),
+            GetInitializerJson(compilation, member, cancellationToken),
             immutable,
             member.Locations.FirstOrDefault() ?? Location.None);
+    }
+
+    private static string? GetInitializerJson(
+        Compilation compilation,
+        ISymbol member,
+        CancellationToken cancellationToken)
+    {
+        foreach (SyntaxReference syntaxReference in member.DeclaringSyntaxReferences)
+        {
+            SyntaxNode syntax = syntaxReference.GetSyntax(cancellationToken);
+            ExpressionSyntax? expression = syntax switch
+            {
+                PropertyDeclarationSyntax property => property.Initializer?.Value,
+                VariableDeclaratorSyntax field => field.Initializer?.Value,
+                _ => null,
+            };
+            if (expression is null) continue;
+
+            SemanticModel semanticModel = compilation.GetSemanticModel(expression.SyntaxTree);
+            Optional<object?> constant = semanticModel.GetConstantValue(expression, cancellationToken);
+            if (constant.HasValue) return JsonValue(constant.Value);
+            if (VectorInitializer(semanticModel, expression, cancellationToken) is { } vector)
+                return vector;
+            if (semanticModel.GetSymbolInfo(expression, cancellationToken).Symbol is IFieldSymbol
+                {
+                    Name: "Empty",
+                    ContainingType.SpecialType: SpecialType.System_String,
+                })
+            {
+                return "\"\"";
+            }
+        }
+        return null;
+    }
+
+    private static string? VectorInitializer(
+        SemanticModel semanticModel,
+        ExpressionSyntax expression,
+        CancellationToken cancellationToken)
+    {
+        if (expression is not BaseObjectCreationExpressionSyntax creation) return null;
+        int components = semanticModel.GetTypeInfo(expression, cancellationToken).Type?
+            .ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat) switch
+        {
+            "Feather.Math.float2" => 2,
+            "Feather.Math.float3" => 3,
+            "Feather.Math.float4" => 4,
+            _ => 0,
+        };
+        if (components == 0) return null;
+
+        SeparatedSyntaxList<ArgumentSyntax> arguments = creation.ArgumentList?.Arguments ?? default;
+        var values = new List<string>(components);
+        foreach (ArgumentSyntax argument in arguments)
+        {
+            Optional<object?> constant = semanticModel.GetConstantValue(
+                argument.Expression,
+                cancellationToken);
+            if (!constant.HasValue || JsonValue(constant.Value) is not { } value) return null;
+            values.Add(value);
+        }
+        if (values.Count == 1)
+        {
+            string repeated = values[0];
+            while (values.Count < components) values.Add(repeated);
+        }
+        return values.Count == components ? "[" + string.Join(", ", values) + "]" : null;
+    }
+
+    private static string? JsonValue(object? value) => value switch
+    {
+        null => "null",
+        bool boolean => boolean ? "true" : "false",
+        char character => JsonString(character.ToString()),
+        string text => JsonString(text),
+        float number when !float.IsNaN(number) && !float.IsInfinity(number) =>
+            number.ToString("R", CultureInfo.InvariantCulture),
+        double number when !double.IsNaN(number) && !double.IsInfinity(number) =>
+            number.ToString("R", CultureInfo.InvariantCulture),
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+        _ => null,
+    };
+
+    private static string JsonString(string value)
+    {
+        var builder = new StringBuilder(value.Length + 2).Append('"');
+        foreach (char character in value)
+        {
+            switch (character)
+            {
+                case '"': builder.Append("\\\""); break;
+                case '\\': builder.Append("\\\\"); break;
+                case '\b': builder.Append("\\b"); break;
+                case '\f': builder.Append("\\f"); break;
+                case '\n': builder.Append("\\n"); break;
+                case '\r': builder.Append("\\r"); break;
+                case '\t': builder.Append("\\t"); break;
+                default:
+                    if (character < ' ')
+                        builder.Append("\\u").Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
+                    else
+                        builder.Append(character);
+                    break;
+            }
+        }
+        return builder.Append('"').ToString();
     }
 
     private static string ValueKind(

@@ -23,7 +23,11 @@ internal sealed record PassSocketContractModel(
     string? OutputContractId,
     ushort OutputContractMajor,
     ushort OutputContractMinor,
-    bool AdapterRequired);
+    bool AdapterRequired,
+    string? RequiredDataTypeId = null,
+    string? RequiredDataLayoutAbiHash = null,
+    ushort RequiredDataContractMajor = 0,
+    ushort RequiredDataContractMinor = 0);
 
 internal sealed record PassSocketCapabilityModel(
     string CapabilityId,

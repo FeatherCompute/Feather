@@ -175,6 +175,15 @@ namespace Feather.Assets.Graphics
     }
 
     /// <summary>
+    /// Canonical project Texture Type sampling surface. UV input and RGBA output use normalized
+    /// semantic space; addressing, filtering, and color decoding remain explicit Asset inputs.
+    /// </summary>
+    public interface INormalizedTextureSampler
+    {
+        float4 Sample(float2 uv);
+    }
+
+    /// <summary>
     /// Nominal base for Assets that can realise the standard Texture View product on at least one
     /// declared target. It does not imply an image-file source, 2D shape, density, residency,
     /// color semantics, or a live GPU texture.

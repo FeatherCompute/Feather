@@ -362,6 +362,32 @@ internal static class PassManifestWriter
             return socket.Contract;
         }
 
+        if (socket.Contract.Kind == "DATA_INSTANCE")
+        {
+            if (!TryCanonicalAssetGuid(socket.Contract.RequiredDataTypeId, out string dataTypeId) ||
+                socket.Contract.RequiredDataContractMajor == 0 ||
+                socket.Contract.RequiredDataLayoutAbiHash is not { } layoutAbiHash ||
+                layoutAbiHash.Length != 71 ||
+                !layoutAbiHash.StartsWith("sha256:", StringComparison.Ordinal) ||
+                layoutAbiHash.Substring(7).Any(static value =>
+                    !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    FeatherDiagnostics.DataSocketContractInvalid,
+                    socket.Location,
+                    socket.Name,
+                    model.TypeName,
+                    "Data pass socket requires [DataBinding] with a canonical Type ID, positive contract version, and lowercase sha256 layout ABI hash"));
+                valid = false;
+                return null;
+            }
+            return socket.Contract with
+            {
+                RequiredDataTypeId = dataTypeId,
+                RequiredDataLayoutAbiHash = layoutAbiHash,
+            };
+        }
+
         if (!TryCanonicalAssetGuid(socket.Contract.RequiredAssetTypeId, out var typeId) ||
             socket.Contract.RequiredAssetTypeMajor == 0)
         {
@@ -572,7 +598,11 @@ internal static class PassManifestWriter
                 socket.Contract.Kind,
                 10,
                 trailingComma: socket.Contract.Kind != "GPU_RESOURCE");
-            if (socket.Contract.Kind != "GPU_RESOURCE")
+            if (socket.Contract.Kind == "DATA_INSTANCE")
+            {
+                AppendDataSocketContract(builder, socket.Contract);
+            }
+            else if (socket.Contract.Kind != "GPU_RESOURCE")
             {
                 AppendAssetSocketContract(builder, socket.Contract);
             }
@@ -624,6 +654,20 @@ internal static class PassManifestWriter
         }
         builder.Append("            \"adapterRequired\": ")
             .Append(contract.AdapterRequired ? "true" : "false").AppendLine();
+        builder.AppendLine("          }");
+    }
+
+    private static void AppendDataSocketContract(
+        StringBuilder builder,
+        PassSocketContractModel contract)
+    {
+        builder.AppendLine("          \"dataContract\": {");
+        AppendJsonString(builder, "requiredTypeId", contract.RequiredDataTypeId!, 12, trailingComma: true);
+        AppendJsonString(builder, "layoutAbiHash", contract.RequiredDataLayoutAbiHash!, 12, trailingComma: true);
+        builder.AppendLine("            \"requiredTypeVersion\": {");
+        builder.Append("              \"major\": ").Append(contract.RequiredDataContractMajor).AppendLine(",");
+        builder.Append("              \"minor\": ").Append(contract.RequiredDataContractMinor).AppendLine();
+        builder.AppendLine("            }");
         builder.AppendLine("          }");
     }
 

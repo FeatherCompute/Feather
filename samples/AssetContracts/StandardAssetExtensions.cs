@@ -15,8 +15,14 @@ public sealed partial class PngTextureAsset : TextureAsset;
 
 [FeatherAssetType(
     "9b338c83-5397-46f2-a157-1e6e76adbb52",
-    Name = "glTF 3D Model",
-    Description = "An imported glTF 2.0 model template; never a learned or inference model")]
+    Name = "glTF Scene",
+    Description = "A complete imported glTF 2.0 scene with geometry, hierarchy, materials, textures, cameras, and its original model representation")]
+[AssetCapability<SceneSnapshotCapability>]
+[AssetOutput<SceneSnapshotOutput>(
+    "d25e6564-e47b-48c2-a1b8-700a42c9c7af",
+    Symbol = "SceneSnapshot",
+    Name = "Scene",
+    PassDirections = AssetPassDirections.Input)]
 public sealed partial class GltfModelAsset : ModelAsset;
 
 [FeatherAssetType(

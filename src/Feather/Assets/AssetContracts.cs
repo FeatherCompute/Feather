@@ -545,6 +545,43 @@ public interface IAssetPreviewProvider<TAsset>
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Gives one user-authored C# Asset Preview Program a stable identity independent of its CLR
+/// symbol and source path. Studio loads the program only inside the isolated RenderHost candidate.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+public sealed class FeatherAssetPreviewProgramAttribute(string guid) : Attribute
+{
+    public string Guid { get; } = guid;
+
+    public string? Name { get; set; }
+
+    public ushort ContractMajor { get; set; } = 1;
+
+    public ushort ContractMinor { get; set; }
+}
+
+/// <summary>
+/// A unified C# Preview Program. The program owns the rendering algorithm and shader work; Studio
+/// supplies only an isolated RenderContext, output handle, dimensions, and revision/profile state.
+/// No Electron process loads or invokes this interface.
+/// </summary>
+public interface IAssetPreviewProgram<TAsset>
+    where TAsset : Asset
+{
+    void Render(AssetPreviewProgramContext<TAsset> context);
+}
+
+/// <summary>
+/// One exact dependency revision admitted by the host for a Preview Program. This is a bounded
+/// immutable closure, not a catalog or resolver service; it cannot discover ambient Assets.
+/// </summary>
+public sealed record AssetPreviewDependencySnapshot(
+    AssetId AssetId,
+    AssetRevisionId RevisionId,
+    AssetContentHash RevisionManifestHash,
+    Asset Value);
+
 public interface IAssetRuntimeAdapter<TOutput>
     where TOutput : IAssetOutputContract
 {
@@ -607,6 +644,67 @@ public abstract class AssetPreviewContext<TAsset> : AssetProviderContext
     public abstract string Profile { get; }
 
     public abstract string Target { get; }
+
+    /// <summary>
+    /// Selects the exact user C# Preview Program to execute for this prepared revision. The host
+    /// validates the stable program attribute and instantiates the program in the candidate ALC.
+    /// </summary>
+    public void UseProgram<TProgram>()
+        where TProgram : class, IAssetPreviewProgram<TAsset>, new()
+        => SelectProgram(typeof(TProgram));
+
+    protected virtual void SelectProgram(Type programType)
+        => throw new NotSupportedException("This Asset host does not execute C# Preview Programs.");
+}
+
+/// <summary>
+/// RenderHost-owned frame context for one Asset Preview Program invocation. The output handle is a
+/// normal Feather graph texture: the program may publish GPU-resident or CPU RGBA output through
+/// RenderContext without routing pixels through JSON, Electron IPC, or the provider contract.
+/// </summary>
+public abstract class AssetPreviewProgramContext<TAsset>
+    where TAsset : Asset
+{
+    protected AssetPreviewProgramContext()
+    {
+    }
+
+    public abstract AssetRevisionSnapshot<TAsset> Revision { get; }
+
+    public abstract string Profile { get; }
+
+    public abstract string Target { get; }
+
+    public abstract Feather.RenderGraph.RenderContext RenderContext { get; }
+
+    public abstract Feather.RenderGraph.TextureHandle Output { get; }
+
+    public abstract long FrameIndex { get; }
+
+    public abstract IReadOnlyList<AssetPreviewDependencySnapshot> Dependencies { get; }
+
+    public bool TryResolve<TDependency>(
+        AssetRef<TDependency> reference,
+        [NotNullWhen(true)] out AssetRevisionSnapshot<TDependency>? revision)
+        where TDependency : Asset
+    {
+        AssetPreviewDependencySnapshot? dependency = Dependencies.FirstOrDefault(candidate =>
+            candidate.AssetId == reference.AssetId);
+        if (dependency is null || dependency.Value is not TDependency value ||
+            reference.Revision.Policy == AssetRevisionPolicy.PinnedExact &&
+            (reference.Revision.RevisionId != dependency.RevisionId ||
+             reference.Revision.RevisionManifestHash != dependency.RevisionManifestHash))
+        {
+            revision = null;
+            return false;
+        }
+        revision = new AssetRevisionSnapshot<TDependency>(
+            dependency.AssetId,
+            dependency.RevisionId,
+            dependency.RevisionManifestHash,
+            value);
+        return true;
+    }
 }
 
 public abstract class AssetRuntimeAdapterContext<TOutput> : AssetProviderContext

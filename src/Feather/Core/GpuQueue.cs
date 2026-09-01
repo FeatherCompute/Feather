@@ -1190,11 +1190,14 @@ public sealed class GpuFence : IDisposable, IAsyncDisposable
     private async Task ObserveCompletionAsync()
     {
         await Task.Yield();
-        var delayMilliseconds = 1;
         while (!IsCompleted)
         {
-            await Task.Delay(delayMilliseconds).ConfigureAwait(false);
-            delayMilliseconds = System.Math.Min(delayMilliseconds * 2, 8);
+            // Queue fences sit on the steady-state frame path. Exponential polling backoff
+            // can observe an already-complete submission up to eight milliseconds late and
+            // turn an otherwise sub-budget GPU frame into a missed presentation interval.
+            // One millisecond remains non-blocking while bounding completion observation
+            // latency independently of how long an earlier submission happened to run.
+            await Task.Delay(1).ConfigureAwait(false);
         }
     }
 

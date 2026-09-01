@@ -4,6 +4,7 @@ using Feather.Interop;
 using Feather.Math;
 using Feather.RenderGraph;
 using Feather.Resources;
+using Feather.Assets.Graphics;
 
 namespace Feather.Tests;
 
@@ -64,14 +65,65 @@ public class PublicApiTests
         Assert.True(typeof(IRenderPass).IsAssignableFrom(typeof(IComputePass)));
         Assert.Equal(42UL, new TextureHandle(42).Value);
         Assert.Equal(43UL, new SceneGeometryHandle(43).Value);
+        Assert.Equal(44UL, new SceneHandle(44).Value);
 
-        var typedBuffer = new BufferHandle<float3>(44);
+        var typedBuffer = new BufferHandle<float3>(45);
         BufferHandle untypedBuffer = typedBuffer;
-        Assert.Equal(44UL, typedBuffer.Value);
+        Assert.Equal(45UL, typedBuffer.Value);
         Assert.Equal(typedBuffer.Value, typedBuffer.Untyped.Value);
         Assert.Equal(typedBuffer.Value, untypedBuffer.Value);
         Assert.Equal(typedBuffer, (BufferHandle<float3>)untypedBuffer);
         Assert.Equal(typedBuffer, untypedBuffer.As<float3>());
+    }
+
+    [Fact]
+    public void DataAuthoringContractsExposeStableTypedResourceMetadata()
+    {
+        const string typeId = "70ed1481-f8a5-4abd-a835-4f619a8de2c7";
+        const string resourceId = "af0c4383-28df-44f5-884a-51820e69212e";
+        var type = new FeatherDataTypeAttribute(typeId)
+        {
+            Name = "Probe Field",
+            ContractMajor = 2,
+            ContractMinor = 1,
+        };
+        var resource = new DataResourceAttribute(resourceId)
+        {
+            Name = "Probes",
+            Access = DataAccess.ReadWrite,
+            Creation = DataCreation.BeforeGraph,
+            Update = DataUpdate.PassMutated,
+            Lifetime = DataResourceLifetime.Workspace,
+            Frames = DataFrames.Single,
+            ElementCount = 64,
+            MaximumBytes = 1024,
+        };
+
+        Assert.Equal(typeId, type.DataTypeGuid);
+        Assert.Equal("Probe Field", type.Name);
+        Assert.Equal((ushort)2, type.ContractMajor);
+        Assert.Equal((ushort)1, type.ContractMinor);
+        Assert.Equal(resourceId, resource.ResourceGuid);
+        Assert.Equal(DataAccess.ReadWrite, resource.Access);
+        Assert.Equal(64, resource.ElementCount);
+        Assert.Equal(1024, resource.MaximumBytes);
+        Assert.True(typeof(DataBuffer<float>).IsValueType);
+        Assert.True(typeof(DataTexture2D<float4>).IsValueType);
+    }
+
+    [Fact]
+    public void TextureTypesExposeOneNormalizedSamplingContract()
+    {
+        INormalizedTextureSampler sampler = new TestTextureSampler();
+
+        float4 color = sampler.Sample(new float2(0.25f, 0.75f));
+
+        Assert.Equal(new float4(0.25f, 0.75f, 0.5f, 1), color);
+    }
+
+    private sealed class TestTextureSampler : INormalizedTextureSampler
+    {
+        public float4 Sample(float2 uv) => new(uv.X, uv.Y, 0.5f, 1);
     }
 
     [Fact]
@@ -122,9 +174,28 @@ public class PublicApiTests
             0.0f,
             0.0f);
         var lights = new SceneLightTable(new[] { light });
+        var sceneActor = new RenderSceneActor(
+            "actor-0",
+            "example.sdf.v1",
+            RenderSceneActorDomain.SignedDistance,
+            new float3(0, 0, 0),
+            new float3(1, 1, 1),
+            new float3(0, 0, 0),
+            0,
+            new float3(0, 1, 0),
+            0,
+            new float[] { 4, 0.2f });
+        var scene = new RenderScene(
+            "scene-0",
+            new[] { sceneActor },
+            materials,
+            textures,
+            lights,
+            camera);
         var time = new RenderTime(12, 0.25f);
         var backend = new FakeRenderContextBackend(
             geometry,
+            scene,
             camera,
             materials,
             textures,
@@ -138,6 +209,9 @@ public class PublicApiTests
         Assert.Equal(RenderPurpose.Final, context.Purpose);
         Assert.False(context.IsInteractive);
         Assert.Same(geometry, context.GetSceneGeometry(new SceneGeometryHandle(1)));
+        Assert.Same(scene, context.GetScene(new SceneHandle(8)));
+        Assert.Equal(RenderSceneActorDomain.SignedDistance, scene.Actors.Span[0].Domain);
+        Assert.Null(scene.Actors.Span[0].TriangleGeometry);
         Assert.Equal(camera, context.GetCamera(new CameraHandle(2)));
         Assert.Equal(new float2(0.25f, 0.75f), geometry.Vertices.Span[0].UV);
         Assert.Equal(new SceneSubmesh(0, 3, 0), geometry.Submeshes.Span[0]);
@@ -458,6 +532,7 @@ public class PublicApiTests
 
     private sealed class FakeRenderContextBackend(
         SceneGeometry geometry,
+        RenderScene scene,
         RenderCamera camera,
         SceneMaterialTable materials,
         SceneTextureTable textures,
@@ -474,6 +549,9 @@ public class PublicApiTests
 
         public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
             => handle.Value == 1 ? geometry : throw new KeyNotFoundException();
+
+        public RenderScene GetScene(SceneHandle handle)
+            => handle.Value == 8 ? scene : throw new KeyNotFoundException();
 
         public RenderCamera GetCamera(CameraHandle handle)
             => handle.Value == 2 ? camera : throw new KeyNotFoundException();

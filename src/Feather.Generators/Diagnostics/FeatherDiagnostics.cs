@@ -212,6 +212,21 @@ internal static class FeatherDiagnostics
         "Asset provider contract is invalid",
         "Asset provider '{0}' is invalid: {1}");
 
+    public static readonly DiagnosticDescriptor DataSocketContractInvalid = Create(
+        "FSD001",
+        "Data pass socket contract is invalid",
+        "Data socket '{0}' on '{1}' is invalid: {2}");
+
+    public static readonly DiagnosticDescriptor DataTypeContractInvalid = Create(
+        "FSD002",
+        "Data Type contract is invalid",
+        "Data Type '{0}' is invalid: {1}");
+
+    public static readonly DiagnosticDescriptor DataResourceContractInvalid = Create(
+        "FSD003",
+        "Data resource contract is invalid",
+        "Data resource '{0}' on '{1}' is invalid: {2}");
+
     public static readonly DiagnosticDescriptor[] All =
     [
         ShaderTypeShape,
@@ -254,7 +269,10 @@ internal static class FeatherDiagnostics
         AssetInputContractUnsupported,
         AssetOutputContractInvalid,
         AssetCapabilityContractInvalid,
-        AssetProviderContractInvalid
+        AssetProviderContractInvalid,
+        DataSocketContractInvalid,
+        DataTypeContractInvalid,
+        DataResourceContractInvalid
     ];
 
     private static DiagnosticDescriptor Create(string id, string title, string message)

@@ -301,7 +301,34 @@ public interface IRenderContextBackend
         where TValue : unmanaged
         => throw new NotSupportedException("This render host does not expose retained pass textures.");
 
+    GpuBuffer<T> GetDataBuffer<T>(DataHandle handle, string resourceGuid)
+        where T : unmanaged
+        => throw new NotSupportedException("This render host does not expose Data Manager buffers.");
+
+    GpuTexture2D<TPixel, TValue> GetDataTexture2D<TPixel, TValue>(
+        DataHandle handle,
+        string resourceGuid,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => throw new NotSupportedException("This render host does not expose Data Manager textures.");
+
+    GpuTexture2D<TPixel, TValue> GetDataTexture2D<TPixel, TValue>(
+        DataHandle handle,
+        string resourceGuid,
+        PixelFormat format,
+        DataFrameVersion version)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+        => version == DataFrameVersion.Current
+            ? GetDataTexture2D<TPixel, TValue>(handle, resourceGuid, format)
+            : throw new NotSupportedException(
+                "This render host does not expose frame-versioned Data Manager textures.");
+
     SceneGeometry GetSceneGeometry(SceneGeometryHandle handle);
+
+    RenderScene GetScene(SceneHandle handle)
+        => throw new NotSupportedException("This render host does not expose evaluated scenes.");
 
     RenderCamera GetCamera(CameraHandle handle);
 
@@ -548,8 +575,67 @@ public sealed class RenderContext
         return Backend.GetOrCreatePassTexture<TPixel, TValue>(identity, width, height, format);
     }
 
+    /// <summary>
+    /// Resolves one typed buffer declared inside a Data Type. The render host validates the stable
+    /// resource identity, access mode, element count, exact Type layout, and initializer before it
+    /// returns the host-owned allocation. The caller must not dispose the buffer.
+    /// </summary>
+    public GpuBuffer<T> GetDataBuffer<T>(DataHandle handle, string resourceGuid)
+        where T : unmanaged
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceGuid);
+        return Backend.GetDataBuffer<T>(handle, resourceGuid);
+    }
+
+    /// <summary>
+    /// Resolves one 2D texture declared inside a Data Type. Width, height, lifetime, and update
+    /// policy come from the Data manifest rather than the current viewport or the pass source.
+    /// </summary>
+    public GpuTexture2D<TPixel, TValue> GetDataTexture2D<TPixel, TValue>(
+        DataHandle handle,
+        string resourceGuid,
+        PixelFormat format)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceGuid);
+        return Backend.GetDataTexture2D<TPixel, TValue>(handle, resourceGuid, format);
+    }
+
+    /// <summary>
+    /// Resolves Current or Next for one frame-versioned logical Data texture. A successful graph
+    /// frame atomically promotes Next to Current; an aborted frame leaves Current unchanged.
+    /// </summary>
+    public GpuTexture2D<TPixel, TValue> GetDataTexture2D<TPixel, TValue>(
+        DataHandle handle,
+        string resourceGuid,
+        PixelFormat format,
+        DataFrameVersion version)
+        where TPixel : unmanaged
+        where TValue : unmanaged
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceGuid);
+        if (!Enum.IsDefined(version))
+        {
+            throw new ArgumentOutOfRangeException(nameof(version));
+        }
+        return Backend.GetDataTexture2D<TPixel, TValue>(
+            handle,
+            resourceGuid,
+            format,
+            version);
+    }
+
     public SceneGeometry GetSceneGeometry(SceneGeometryHandle handle)
         => Backend.GetSceneGeometry(handle);
+
+    /// <summary>
+    /// Resolves the immutable heterogeneous Scene selected by the graph. Representation lowering is
+    /// not imposed by Studio: a renderer may execute several native geometry domains directly, and
+    /// an explicit adapter pass remains optional.
+    /// </summary>
+    public RenderScene GetScene(SceneHandle handle)
+        => Backend.GetScene(handle);
 
     public RenderCamera GetCamera(CameraHandle handle)
         => Backend.GetCamera(handle);

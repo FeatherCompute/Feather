@@ -43,3 +43,6 @@ FSA011 | Feather | Error | Asset Input type, mutability, or bounds are unsupport
 FSA020 | Feather | Error | Asset output slot or output contract is invalid.
 FSA030 | Feather | Error | Asset capability contract or version requirement is invalid.
 FSA040 | Feather | Error | Asset provider operation contract is invalid.
+FSD001 | Feather | Error | Data pass socket Type or layout ABI contract is invalid.
+FSD002 | Feather | Error | Data Type declarations require canonical identity, bounded shape, and at least one logical resource.
+FSD003 | Feather | Error | Data resources require a supported typed marker, valid GPU layout, coherent lifecycle, and explicit byte budget.

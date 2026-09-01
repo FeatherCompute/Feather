@@ -258,13 +258,19 @@ internal static class AssetManifestWriter
         var valid = true;
         foreach (var use in type.Capabilities)
         {
-            if (!contracts.TryGetValue(use.ContractTypeName, out var contract) ||
-                !TryCanonicalGuid(use.Guid, out var id) ||
-                id != contract.Guid ||
+            contracts.TryGetValue(use.ContractTypeName, out var localContract);
+            ushort contractMajor = localContract?.ContractMajor ?? use.ContractMajor;
+            ushort contractMinor = localContract?.ContractMinor ?? use.ContractMinor;
+            string? contractGuid = localContract?.Guid ?? use.Guid;
+            if (!TryCanonicalGuid(use.Guid, out var id) ||
+                !TryCanonicalGuid(contractGuid, out var declaredId) ||
+                id != declaredId ||
+                localContract is not null && id != localContract.Guid ||
                 !ids.Add(id) ||
+                contractMajor == 0 ||
                 use.MinimumMajor == 0 ||
-                use.MinimumMajor != contract.ContractMajor ||
-                use.MinimumMinor > contract.ContractMinor)
+                use.MinimumMajor != contractMajor ||
+                use.MinimumMinor > contractMinor)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     FeatherDiagnostics.AssetCapabilityContractInvalid,
@@ -295,15 +301,23 @@ internal static class AssetManifestWriter
         var valid = true;
         foreach (var output in type.Outputs)
         {
-            if (!contracts.TryGetValue(output.ContractTypeName, out var contract) ||
-                !TryCanonicalGuid(output.Guid, out var id) ||
+            contracts.TryGetValue(output.ContractTypeName, out var localContract);
+            string? contractGuid = localContract?.Guid ?? output.ContractGuid;
+            ushort contractMajor = localContract?.ContractMajor ?? output.ContractMajor;
+            ushort contractMinor = localContract?.ContractMinor ?? output.ContractMinor;
+            if (!TryCanonicalGuid(output.Guid, out var id) ||
                 !TryCanonicalGuid(output.ContractGuid, out var contractId) ||
-                contractId != contract.Guid ||
+                !TryCanonicalGuid(contractGuid, out var declaredContractId) ||
+                contractId != declaredContractId ||
+                localContract is not null && contractId != localContract.Guid ||
                 !ids.Add(id) ||
                 string.IsNullOrWhiteSpace(output.Symbol) ||
                 !SyntaxFacts.IsValidIdentifier(output.Symbol) ||
                 !symbols.Add(output.Symbol) ||
-                output.PassDirections is < 0 or > 3)
+                output.PassDirections is < 0 or > 3 ||
+                contractMajor == 0 ||
+                output.ContractMajor != contractMajor ||
+                output.ContractMinor != contractMinor)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     FeatherDiagnostics.AssetOutputContractInvalid,
@@ -319,8 +333,8 @@ internal static class AssetManifestWriter
             {
                 Guid = id,
                 ContractGuid = contractId,
-                ContractMajor = contract.ContractMajor,
-                ContractMinor = contract.ContractMinor,
+                ContractMajor = contractMajor,
+                ContractMinor = contractMinor,
             });
         }
 
@@ -468,7 +482,10 @@ internal static class AssetManifestWriter
             NullableNumberProperty(builder, "step", input.Step, 10, trailingComma: true);
             NullableIntegerProperty(builder, "minimumItems", input.MinimumItems, 10, trailingComma: true);
             NullableIntegerProperty(builder, "maximumItems", input.MaximumItems, 10, trailingComma: true);
-            NullableIntegerProperty(builder, "maximumLength", input.MaximumLength, 10, trailingComma: false);
+            NullableIntegerProperty(builder, "maximumLength", input.MaximumLength, 10, trailingComma: true);
+            builder.Append("          \"defaultValue\": ")
+                .Append(input.DefaultValueJson ?? "null")
+                .AppendLine();
             builder.Append("        }").AppendLine(index + 1 < inputs.Length ? "," : string.Empty);
         }
         builder.AppendLine("      ],");

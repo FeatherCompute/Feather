@@ -91,6 +91,16 @@ public sealed class FeatherGenerator : IIncrementalGenerator
             .Select(static (pair, _) =>
                 AssetModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
 
+        var dataTypes = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "Feather.RenderGraph.FeatherDataTypeAttribute",
+                static (node, _) => node is TypeDeclarationSyntax,
+                static (ctx, ct) => DataModelFactory.Create(ctx, ct))
+            .Where(static model => model is not null)
+            .Select(static (model, _) => model!)
+            .Combine(context.AnalyzerConfigOptionsProvider)
+            .Select(static (pair, _) =>
+                DataModelFactory.ApplyProjectRelativePath(pair.Left, pair.Right));
+
         context.RegisterSourceOutput(gpuStructModels, static (productionContext, model) =>
         {
             var hasErrors = false;
@@ -172,6 +182,11 @@ public sealed class FeatherGenerator : IIncrementalGenerator
                 pair.Left.Right.Left,
                 pair.Left.Right.Right,
                 pair.Right));
+
+        context.RegisterSourceOutput(
+            dataTypes.Collect(),
+            static (productionContext, models) =>
+                DataManifestWriter.Emit(productionContext, models));
     }
 
     private static string GenerateKernel(ShaderModel model)

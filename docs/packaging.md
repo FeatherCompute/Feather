@@ -167,7 +167,7 @@ the same three native runtimes before uploading or publishing all five packages.
 For preview releases, use an immutable prerelease version such as:
 
 ```text
-0.2.0-preview.N
+0.4.0-preview.N
 ```
 
 NuGet package versions are immutable once published, so run the workflow once
