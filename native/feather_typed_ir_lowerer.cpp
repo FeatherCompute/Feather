@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <functional>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
