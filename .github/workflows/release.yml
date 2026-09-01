@@ -121,13 +121,49 @@ jobs:
     env:
       FEATHER_PACKAGE_VERSION: ${{ inputs.version }}
       FEATHER_SKIP_NATIVE_BUILD: "1"
+      FEATHER_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native-assets/runtimes/linux-x64/native/libfeather.so
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.301
           global-json-file: global.json
+
+      - name: Install Linux native dependencies
+        timeout-minutes: 15
+        run: |
+          sudo apt-get \
+            -o Acquire::Retries=5 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=5 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o Dpkg::Use-Pty=0 \
+            install -y \
+            build-essential \
+            cmake \
+            glslang-dev \
+            glslang-tools \
+            libgl1-mesa-dev \
+            libspirv-cross-c-shared-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            mesa-vulkan-drivers \
+            spirv-cross \
+            spirv-headers \
+            spirv-tools \
+            vulkan-tools
 
       - name: Download native assets
         uses: actions/download-artifact@v4
@@ -162,6 +198,21 @@ jobs:
 
       - name: Restore
         run: dotnet restore Feather.slnx
+
+      - name: Build
+        run: dotnet build Feather.slnx --no-restore -v minimal
+
+      - name: Test managed contracts
+        run: ./eng/test.sh
+
+      - name: Enforce managed AD coverage
+        run: python3 scripts/ad-coverage-gate.py
+
+      - name: Enforce NN device paths
+        run: python3 scripts/nn-industrial-gate.py
+
+      - name: Check markdown links
+        run: ./eng/check-markdown-links.py
 
       - name: Pack
         shell: bash
