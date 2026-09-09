@@ -806,18 +806,18 @@ public sealed class RenderContext
     /// this performs no readback and accepts any pixel format, so simulation state can stay in a
     /// float target across passes and frames.
     /// </summary>
+    /// <remarks>
+    /// Intermediate pass-to-pass sockets accept any texture size, so passes can publish
+    /// downsampled pyramids or fixed-size lookup targets; consumers read the texture's own
+    /// dimensions. Frame-bound outputs — the active View's final output and history write
+    /// targets — must still match the render size; the render host enforces that contract.
+    /// </remarks>
     public void SetTextureOutput(
         TextureHandle handle,
         IGpuTexture2D texture,
         DispatchPath dispatchPath = DispatchPath.None)
     {
         ArgumentNullException.ThrowIfNull(texture);
-        if (texture.Width != Width || texture.Height != Height)
-        {
-            throw new ArgumentException(
-                $"Texture output is {texture.Width}x{texture.Height}; expected {Width}x{Height}.",
-                nameof(texture));
-        }
         Backend.SetTextureOutput(handle, texture, dispatchPath);
     }
 

@@ -129,6 +129,7 @@ public enum ParameterBindingTargets
     RuntimeProperty = 1 << 2,
     Timeline = 1 << 3,
     Public = 1 << 4,
+    PreviewInput = 1 << 5,
 }
 
 public enum ParameterRedaction

@@ -442,6 +442,7 @@ internal static class PassModelFactory
         if ((value & (1L << 2)) != 0) result.Add("RUNTIME_PROPERTY");
         if ((value & (1L << 3)) != 0) result.Add("TIMELINE");
         if ((value & (1L << 4)) != 0) result.Add("PUBLIC");
+        if ((value & (1L << 5)) != 0) result.Add("PREVIEW_INPUT");
         return result.ToImmutable();
     }
 
