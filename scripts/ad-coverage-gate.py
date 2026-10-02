@@ -69,7 +69,7 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
     ScopeEntry(
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
         "AD marker validation, AD callable policy, and traceable parameter analysis",
-        ((281, 420), (722, 743), (1988, 2032), (2043, 2133)),
+        ((281, 420), (732, 753), (1991, 2035), (2046, 2136)),
         ("Feather.Generators/Model/ShaderModelFactory.cs",),
         (
             ("var lossCount = 0;", "private static bool IsAutoDiffMarkerMethod("),
@@ -116,7 +116,7 @@ MANAGED_SCOPE: tuple[ScopeEntry, ...] = (
     ScopeEntry(
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
         "typed IR callable and AD marker lowering paths",
-        ((63, 81), (126, 137), (678, 694)),
+        ((63, 81), (126, 137), (680, 696)),
         ("Feather.Generators/Lowering/ShaderIrLowerer.cs",),
         (
             (
@@ -157,7 +157,7 @@ LINE_EXCLUSIONS: dict[tuple[str, int], str] = {
     **{
         ("src/Feather.Generators/Model/ShaderModelFactory.cs", line):
             "type-null guard for AD marker value-type helper is defensive after Roslyn binding"
-        for line in (1991, 1992)
+        for line in (1994, 1995)
     },
     **{
         ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
@@ -172,7 +172,7 @@ LINE_EXCLUSIONS: dict[tuple[str, int], str] = {
     **{
         ("src/Feather.Generators/Lowering/ShaderIrLowerer.cs", line):
             "recursive child-operation marker guard is unreachable for valid standalone void AD marker calls"
-        for line in (692, 693)
+        for line in (694, 695)
     },
     (
         "src/Feather/AD/AD.cs",
@@ -275,43 +275,43 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "non-buffer source guard is retained defensively; texture/sampler and buffer paths are covered at diagnostics",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        1990,
+        1993,
     ): "type-null guard for AD marker value-type helper; concrete supported/unsupported marker types are tested",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2051,
+        2054,
     ): "traceable-source resource-kind and argument-count guard includes defensive non-resource element access branches",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2057,
+        2060,
     ): "resource-name syntax switch fallback bookkeeping; identifier buffer sources are covered by AD metadata tests",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2065,
+        2068,
     ): "empty resource/index defensive guard is unreachable for parsed buffer element syntax",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2070,
+        2073,
     ): "value-type null fallback for parsed buffer element syntax; scalar/vector parameter metadata is covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2086,
+        2089,
     ): "local-alias declaration-shape guard; direct, casted, mutated, and untraceable aliases are covered",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2094,
+        2097,
     ): "alias Execute-body absence guard is unreachable for validated kernels",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2102,
+        2105,
     ): "alias assignment scan line mixes covered reassignment rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2119,
+        2122,
     ): "alias increment scan line mixes covered increment/decrement rejection with out-of-window Roslyn pattern bookkeeping",
     (
         "src/Feather.Generators/Model/ShaderModelFactory.cs",
-        2124,
+        2127,
     ): "increment/decrement operation pattern includes defensive non-local target subbranches",
     (
         "src/Feather.Generators/Model/ShaderSemanticLowerer.cs",
@@ -351,11 +351,11 @@ BRANCH_EXCLUSIONS: dict[tuple[str, int], str] = {
     ): "missing Roslyn method-body operation guard requires a malformed semantic model",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        679,
+        681,
     ): "AD marker invocation helper includes defensive symbol subbranches; marker skip behavior is covered",
     (
         "src/Feather.Generators/Lowering/ShaderIrLowerer.cs",
-        691,
+        693,
     ): "recursive child-operation marker guard is unreachable for valid standalone void AD marker calls",
     (
         "src/Feather.Generators/Lowering/ShaderIrModuleWriter.cs",
