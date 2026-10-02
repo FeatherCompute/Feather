@@ -31,6 +31,11 @@ internal static class GpuStructLayoutRules
             return arrayLayout;
         }
 
+        if (TryGetInlineArrayLayout(type, out var inlineArrayLayout))
+        {
+            return inlineArrayLayout;
+        }
+
         if (type.SpecialType is SpecialType.System_Boolean)
         {
             return new GpuStructTypeLayout(4, 4);
@@ -85,6 +90,48 @@ internal static class GpuStructLayoutRules
 
         return true;
     }
+
+    /// <summary>
+    /// Recognizes a BCL <c>[InlineArray(N)]</c> struct and reports its element type and fixed length,
+    /// so it can lower exactly like a <c>GpuArrayN&lt;T&gt;</c> fixed-size array. Member types are read
+    /// from the (possibly constructed) symbol, so generic inline-array structs report substituted
+    /// element types.
+    /// </summary>
+    public static bool TryGetInlineArrayInfo(ITypeSymbol? type, out ITypeSymbol elementType, out int length)
+    {
+        elementType = null!;
+        length = 0;
+        if (type is not INamedTypeSymbol named)
+        {
+            return false;
+        }
+
+        foreach (var attribute in named.GetAttributes())
+        {
+            if (attribute.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) !=
+                    "global::System.Runtime.CompilerServices.InlineArrayAttribute" ||
+                attribute.ConstructorArguments.Length != 1 ||
+                attribute.ConstructorArguments[0].Value is not int declaredLength)
+            {
+                continue;
+            }
+
+            var field = named.GetMembers().OfType<IFieldSymbol>().FirstOrDefault(static member => !member.IsStatic);
+            if (field is null || declaredLength <= 0)
+            {
+                return false;
+            }
+
+            elementType = field.Type;
+            length = declaredLength;
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool IsInlineArrayType(ITypeSymbol? type)
+        => TryGetInlineArrayInfo(type, out _, out _);
 
     public static bool UsesUnsupportedMatrixType(ITypeSymbol type)
     {
@@ -193,6 +240,14 @@ internal static class GpuStructLayoutRules
             yield break;
         }
 
+        if (TryGetInlineArrayInfo(type, out var inlineElement, out _) &&
+            inlineElement is INamedTypeSymbol inlineElementNamed &&
+            IsGpuStruct(inlineElementNamed))
+        {
+            yield return inlineElementNamed;
+            yield break;
+        }
+
         if (type is INamedTypeSymbol named && IsGpuStruct(named))
         {
             yield return named;
@@ -209,13 +264,42 @@ internal static class GpuStructLayoutRules
         }
 
         var elementType = named.TypeArguments[0];
-        if (elementType is IArrayTypeSymbol || IsGpuArrayType(elementType))
+        if (elementType is IArrayTypeSymbol || IsGpuArrayType(elementType) || IsInlineArrayType(elementType))
         {
             return true;
         }
 
         var elementLayout = GetTypeLayout(elementType);
         if (length <= 0 || elementLayout.SizeInBytes <= 0 || elementLayout.Alignment <= 0)
+        {
+            return true;
+        }
+
+        var stride = Align(elementLayout.SizeInBytes, elementLayout.Alignment);
+        layout = new GpuStructTypeLayout(
+            checked(stride * length),
+            elementLayout.Alignment,
+            length,
+            stride,
+            elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+        return true;
+    }
+
+    private static bool TryGetInlineArrayLayout(ITypeSymbol type, out GpuStructTypeLayout layout)
+    {
+        layout = GpuStructTypeLayout.Unsupported;
+        if (!TryGetInlineArrayInfo(type, out var elementType, out var length))
+        {
+            return false;
+        }
+
+        if (elementType is IArrayTypeSymbol || IsGpuArrayType(elementType) || IsInlineArrayType(elementType))
+        {
+            return true;
+        }
+
+        var elementLayout = GetTypeLayout(elementType);
+        if (elementLayout.SizeInBytes <= 0 || elementLayout.Alignment <= 0)
         {
             return true;
         }
@@ -272,6 +356,11 @@ internal static class GpuStructLayoutRules
         if (named.IsGenericType && TryGetGpuArrayLength(named, out _))
         {
             return ContainsNarrowScalar(named.TypeArguments[0], visiting);
+        }
+
+        if (TryGetInlineArrayInfo(named, out var inlineElement, out _))
+        {
+            return ContainsNarrowScalar(inlineElement, visiting);
         }
 
         if (!IsGpuStruct(named))

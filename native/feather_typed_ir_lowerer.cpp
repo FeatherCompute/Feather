@@ -301,15 +301,18 @@ public:
 
         current_function_id_ = typed_.entry_function;
 
-        if (!RegisterResources() || !ResolveCallableResourceBindings() || !RegisterCallables() ||
-            !EmitBoundsCheckGuard(entry.kind) ||
-            !EmitComputeTraceEntryStart(typed_.entry_function, entry.body_statement_index) ||
-            !LowerStatement(entry.body_statement_index) ||
-            !EmitComputeTraceEntryEnd(typed_.entry_function, entry.body_statement_index) ||
-            (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
-             !branch_divergence_site_emitted_) ||
-            (inputs_.diagnostic_mode == kDiagnosticCounterfactual &&
-             !counterfactual_site_emitted_)) {
+        if (!RegisterResources()) { Fail("stage:RegisterResources"); }
+        else if (!ResolveCallableResourceBindings()) { Fail("stage:ResolveCallableResourceBindings"); }
+        else if (!RegisterCallables()) { Fail("stage:RegisterCallables"); }
+        else if (!EmitBoundsCheckGuard(entry.kind)) { Fail("stage:EmitBoundsCheckGuard"); }
+        else if (!EmitComputeTraceEntryStart(typed_.entry_function, entry.body_statement_index)) { Fail("stage:EmitComputeTraceEntryStart"); }
+        else if (!LowerStatement(entry.body_statement_index)) { Fail("stage:LowerStatement"); }
+        else if (!EmitComputeTraceEntryEnd(typed_.entry_function, entry.body_statement_index)) { Fail("stage:EmitComputeTraceEntryEnd"); }
+        else if (inputs_.diagnostic_mode == kDiagnosticBranchDivergence &&
+                 !branch_divergence_site_emitted_) { Fail("stage:BranchDivergence"); }
+        else if (inputs_.diagnostic_mode == kDiagnosticCounterfactual &&
+                 !counterfactual_site_emitted_) { Fail("stage:Counterfactual"); }
+        if (error_ != nullptr && !error_->empty()) {
             Fail("section 7 typed IR lowerer failed before EasyGPU module creation");
             return nullptr;
         }
@@ -3666,6 +3669,20 @@ private:
 
     GPU::IR::ValueId BuildConstructor(const Expression& expression) {
         const auto result_type = ToModuleType(expression.type_id);
+        if (expression.type_id < typed_.types.size() &&
+            typed_.types[expression.type_id].kind == kTypeArray) {
+            // GLSL array constructors spell as e.g. float[4](...); the value record keeps the
+            // element type because GPU::IR::Type has no first-class array kind.
+            auto array_name = GlslStructFieldTypeAndSuffix(expression.type_id);
+            auto arguments = BuildArguments(expression);
+            if (array_name.first.empty() || !result_type.IsValid() ||
+                !arguments.has_value() || arguments->empty()) {
+                return GPU::IR::InvalidValueId;
+            }
+
+            return builder_.Intrinsic(array_name.first + array_name.second, result_type, *arguments);
+        }
+
         const auto constructor = ConstructorName(result_type);
         if (!result_type.IsValid() || constructor.empty()) {
             return GPU::IR::InvalidValueId;

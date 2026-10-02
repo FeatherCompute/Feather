@@ -394,7 +394,7 @@ internal static class ShaderSemanticFacts
             changed |= !SymbolEqualityComparer.Default.Equals(arguments[i], target.TypeArguments[i]);
         }
 
-        return changed ? target.Construct(arguments) : target;
+        return changed ? target.ConstructedFrom.Construct(arguments) : target;
     }
 
     public static bool TryResolveCallableInvocationTarget(

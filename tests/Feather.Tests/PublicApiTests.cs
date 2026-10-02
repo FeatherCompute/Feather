@@ -341,13 +341,14 @@ public class PublicApiTests
     }
 
     [Fact]
-    public void GpuResidentTextureOutputRejectsMismatchedDimensions()
+    public void GpuResidentTextureOutputDefersSizingToTheHost()
     {
         var context = new RenderContext(new LegacyRenderContextBackend());
 
-        // Dimensions are validated before the backend is consulted, so an unsupported host still
-        // reports the more specific error.
-        Assert.Throws<ArgumentException>(
+        // Intermediate sockets accept any texture size, so the call reaches the backend, which
+        // reports that this host does not take GPU-resident outputs; null is still rejected up
+        // front.
+        Assert.Throws<NotSupportedException>(
             () => context.SetTextureOutput(
                 new TextureHandle(1),
                 new StubGpuTexture2D(64, 64, PixelFormat.R32Float)));

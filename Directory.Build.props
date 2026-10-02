@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <EnablePackageValidation>true</EnablePackageValidation>
     <VersionPrefix>0.4.0</VersionPrefix>
-    <VersionSuffix>preview.1</VersionSuffix>
+    <VersionSuffix>preview.2</VersionSuffix>
     <Authors>Feather Contributors</Authors>
     <Company>Feather</Company>
     <PackageProjectUrl>https://github.com/FeatherCompute/Feather</PackageProjectUrl>
@@ -19,7 +19,7 @@
     <FeatherPackRepositoryDocs Condition="'$(FeatherPackRepositoryDocs)' == ''">true</FeatherPackRepositoryDocs>
     <PackageReadmeFile Condition="'$(FeatherPackRepositoryDocs)' == 'true'">README.md</PackageReadmeFile>
     <PackageTags>gpu;compute;graphics;roslyn;easygpu;autodiff</PackageTags>
-    <PackageReleaseNotes>Preview release of the FeatherCompute C# GPU frontend for EasyGPU. Adds the public RenderContext.Purpose/IsInteractive final-versus-preview contract, typed Scene and Data resources, official Asset extension contracts, richer Principled materials, pooled raster targets, and GPU queue and uniform correctness fixes.</PackageReleaseNotes>
+    <PackageReleaseNotes>Preview 2 of the FeatherCompute C# GPU frontend for EasyGPU. Fixes five shader-DSL gaps: generic [Callable] methods now compile (type-parameter local variables, unmanaged-constrained type parameters, and generic callables declared inside the kernel type are discovered instead of being silently dropped); ref/out/in parameters are accepted on [Callable] methods; [InlineArray] struct fields map to fixed-size GPU arrays with correct layout; zero-argument constructors and default(T) lower to zero values on both the managed and native typed-IR paths. Also updates the SetTextureOutput sizing test to match the relaxed intermediate-socket contract.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' == 'true' and '$(FeatherPackRepositoryDocs)' == 'true'">

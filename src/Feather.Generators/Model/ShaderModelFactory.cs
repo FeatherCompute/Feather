@@ -626,7 +626,7 @@ internal static class ShaderModelFactory
                 continue;
             }
 
-            if (!IsSupportedComputeValueType(symbol.Type))
+            if (!IsSupportedComputeValueType(symbol.Type) && !IsSubstitutableGenericLocal(symbol))
             {
                 yield return BodyDiagnostic(
                     FeatherDiagnostics.UnsupportedExpression,
@@ -644,6 +644,16 @@ internal static class ShaderModelFactory
             }
         }
     }
+
+    /// <summary>
+    /// A local whose type is a method type parameter of a generic [Callable]: it carries no concrete
+    /// shader type at declaration time, but the lowerer only ever emits the callable after
+    /// monomorphizing it with the call site's concrete type arguments, which substitute the parameter.
+    /// </summary>
+    private static bool IsSubstitutableGenericLocal(ILocalSymbol symbol)
+        => symbol.Type is ITypeParameterSymbol
+            && symbol.ContainingSymbol is IMethodSymbol { IsGenericMethod: true } containingMethod
+            && ShaderSemanticFacts.IsCallableMethod(containingMethod);
 
     private static IEnumerable<ShaderBodyDiagnosticModel> ValidateCall(InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
     {
@@ -756,7 +766,7 @@ internal static class ShaderModelFactory
 
         foreach (var parameter in symbol.Parameters)
         {
-            if (parameter.RefKind is RefKind.Ref or RefKind.Out or RefKind.In || !IsSupportedCallableTypeOrGenericParameter(parameter.Type))
+            if (!IsSupportedCallableTypeOrGenericParameter(parameter.Type))
             {
                 var parameterSyntax = method.ParameterList.Parameters
                     .FirstOrDefault(candidate => candidate.Identifier.ValueText == parameter.Name);
@@ -830,6 +840,7 @@ internal static class ShaderModelFactory
     private static bool HasSupportedGenericCallableShape(IMethodSymbol symbol)
         => !symbol.IsGenericMethod ||
            symbol.TypeParameters.All(static parameter =>
+               parameter.HasUnmanagedTypeConstraint ||
                parameter.ConstraintTypes.Any(static constraint => constraint.TypeKind == TypeKind.Interface));
 
     private static bool IsSupportedCallableTypeOrGenericParameter(ITypeSymbol type)
@@ -1072,15 +1083,6 @@ internal static class ShaderModelFactory
                     yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
                     yield break;
                 }
-            }
-        }
-
-        foreach (var parameter in symbol.Parameters)
-        {
-            if (parameter.RefKind is RefKind.Ref or RefKind.Out or RefKind.In)
-            {
-                yield return BodyDiagnostic(FeatherDiagnostics.UnsupportedCall, invocation.GetLocation(), symbol.Name);
-                yield break;
             }
         }
     }
@@ -1395,7 +1397,8 @@ internal static class ShaderModelFactory
 
             if (!TryGetMethodSyntax(methodSymbol, cancellationToken, out var methodSyntax) ||
                 (!IsShaderLibraryCallable(methodSymbol) &&
-                 !ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(methodSymbol)))
+                 !ShaderSemanticFacts.IsGpuStructInstanceCallableMethod(methodSymbol) &&
+                 !SymbolEqualityComparer.Default.Equals(methodSymbol.ContainingType, symbol)))
             {
                 continue;
             }

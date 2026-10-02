@@ -62,6 +62,22 @@ internal static class ShaderTypeFactory
             };
         }
 
+        if (GpuStructLayoutRules.TryGetInlineArrayInfo(type, out var inlineElementType, out var inlineLength))
+        {
+            if (inlineElementType is IArrayTypeSymbol ||
+                IsGpuArrayType(inlineElementType) ||
+                GpuStructLayoutRules.IsInlineArrayType(inlineElementType))
+            {
+                return null;
+            }
+
+            var inlineElement = FromTypeSymbol(inlineElementType);
+            return inlineElement is null ? null : new ShaderArrayType(inlineElement, inlineLength)
+            {
+                CSharpTypeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+            };
+        }
+
         if (type is INamedTypeSymbol { IsGenericType: true } named)
         {
             var elementType = FromTypeSymbol(named.TypeArguments[0]);
@@ -70,7 +86,7 @@ internal static class ShaderTypeFactory
                 var genericName = named.ConstructedFrom.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                 if (TryGetGpuArrayLength(named, out var length))
                 {
-                    if (length <= 0 || IsGpuArrayType(named.TypeArguments[0]))
+                    if (length <= 0 || IsGpuArrayType(named.TypeArguments[0]) || GpuStructLayoutRules.IsInlineArrayType(named.TypeArguments[0]))
                     {
                         return null;
                     }
@@ -280,7 +296,8 @@ internal static class ShaderTypeFactory
         }
 
         if (shaderType is not ShaderArrayType { Length: > 0 } array ||
-            IsGpuArrayType(named.TypeArguments[0]))
+            IsGpuArrayType(named.TypeArguments[0]) ||
+            GpuStructLayoutRules.IsInlineArrayType(named.TypeArguments[0]))
         {
             layout = new TypeLayout(0, 0);
             return true;

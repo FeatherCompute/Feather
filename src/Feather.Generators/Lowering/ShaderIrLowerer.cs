@@ -365,6 +365,8 @@ internal static class ShaderIrLowerer
             IObjectCreationOperation ctor => LowerCtor(ctor, ctx),
             IDefaultValueOperation def => LowerDefaultValue(def, ctx),
             IConditionalOperation { IsRef: false } tern => LowerTernary(tern, ctx),
+            IDeclarationExpressionOperation => throw Unsupported(u,
+                "inline variable declarations in argument position are not supported; declare the variable before the call and pass it as the out/ref argument"),
             _ => throw Unsupported(u, $"unsupported expression operation '{u.Kind}'")
         };
     }
@@ -770,6 +772,20 @@ internal static class ShaderIrLowerer
         }
 
         var args = ctor.Arguments.Select(a => LowerExpr(a.Value, ctx)).ToArray();
+        if (args.Length == 0 && ctor.Initializer is null)
+        {
+            if (ctor.Constructor is { IsImplicitlyDeclared: false })
+            {
+                throw Unsupported(ctor,
+                    "user-defined parameterless struct constructors are not supported in Feather shader code; initialize fields explicitly");
+            }
+
+            if (TryLowerZeroValue(t, out var zero))
+            {
+                return zero;
+            }
+        }
+
         return new ShaderConstructorExpression(t, new EquatableArray<ShaderExpression>(args));
     }
 
@@ -951,6 +967,18 @@ internal static class ShaderIrLowerer
                 expression = new ShaderConstructorExpression(
                     structure,
                     new EquatableArray<ShaderExpression>(fields.ToArray()));
+                return true;
+            }
+            case ShaderArrayType { Length: > 0 } array:
+            {
+                if (!TryLowerZeroValue(array.ElementType, out var elementZero))
+                {
+                    return false;
+                }
+
+                expression = new ShaderConstructorExpression(
+                    array,
+                    new EquatableArray<ShaderExpression>(Enumerable.Repeat(elementZero, array.Length.Value).ToArray()));
                 return true;
             }
             default:

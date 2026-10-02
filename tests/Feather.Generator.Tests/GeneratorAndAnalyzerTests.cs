@@ -2993,27 +2993,6 @@ public class GeneratorAndAnalyzerTests
             }
         }
         """)]
-    [InlineData("FE0008", """
-        using Feather;
-        using Feather.Resources;
-
-        [Kernel]
-        public readonly partial struct BadKernel(ReadWriteBuffer<float> output) : IKernel1D
-        {
-            public void Execute()
-            {
-                float value = 1;
-                Mutate(ref value);
-                output[ThreadIds.X] = value;
-            }
-
-            [Callable]
-            private static void Mutate(ref float value)
-            {
-                value = value + 1;
-            }
-        }
-        """)]
     [InlineData("FE0011", """
         using Feather;
 
